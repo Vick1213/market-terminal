@@ -1,0 +1,37 @@
+# --- data & local state (never commit) ---
+/data/
+*.duckdb
+*.duckdb.wal
+*.db
+*.db-wal
+*.db-shm
+.cache/
+.diskcache/
+
+# --- python ---
+__pycache__/
+*.py[cod]
+.venv/
+apps/api/.venv/
+.python-version.local
+
+# --- node / next ---
+node_modules/
+.next/
+out/
+dist/
+.turbo/
+*.tsbuildinfo
+
+# --- env & secrets ---
+.env
+.env.local
+.env.*.local
+apps/web/.env.local
+apps/api/.env
+
+# --- editor / os ---
+.DS_Store
+.vscode/
+.idea/
+*.log

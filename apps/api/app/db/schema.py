@@ -1,0 +1,219 @@
+"""Idempotent schema bootstrap for both stores.
+
+DuckDB holds the time-series the analytical panels query; SQLite holds tiny
+transactional app state. All DDL is CREATE ... IF NOT EXISTS so startup is safe
+to run on every boot. Phase 0 seeds a default watchlist so later panels have
+something to render.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+
+from app.db.duck import DuckStore
+from app.db.sqlite import SqliteStore
+
+DEFAULT_WATCHLIST = [
+    # (symbol, asset_class, display_name)
+    ("SPY", "equity", "S&P 500 ETF"),
+    ("QQQ", "equity", "Nasdaq 100 ETF"),
+    ("AAPL", "equity", "Apple"),
+    ("NVDA", "equity", "NVIDIA"),
+    ("BTC/USD", "crypto", "Bitcoin"),
+    ("ETH/USD", "crypto", "Ethereum"),
+    ("GLD", "metal", "Gold ETF"),
+    ("SLV", "metal", "Silver ETF"),
+    ("XAU", "metal", "Gold spot"),
+    ("XAG", "metal", "Silver spot"),
+]
+
+
+def init_duckdb(duck: DuckStore) -> None:
+    # OHLCV / quotes for every asset class (stocks, crypto, metals, futures, FX).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_price (
+            source       VARCHAR NOT NULL,
+            symbol       VARCHAR NOT NULL,
+            asset_class  VARCHAR NOT NULL,
+            ts           TIMESTAMP NOT NULL,
+            open         DOUBLE,
+            high         DOUBLE,
+            low          DOUBLE,
+            close        DOUBLE,
+            volume       DOUBLE,
+            PRIMARY KEY (source, symbol, ts)
+        );
+        """
+    )
+    # Macro / indicator series (FRED, CBOE-derived, breadth, sentiment surveys).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_macro (
+            series_id  VARCHAR NOT NULL,
+            ts         TIMESTAMP NOT NULL,
+            value      DOUBLE,
+            source     VARCHAR DEFAULT 'fred',
+            PRIMARY KEY (series_id, ts)
+        );
+        """
+    )
+    # Sentiment scores, keyed by text hash so a re-seen article is never rescored.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_sentiment (
+            text_hash   VARCHAR NOT NULL,
+            source      VARCHAR NOT NULL,
+            symbol      VARCHAR,
+            ts          TIMESTAMP NOT NULL,
+            score       DOUBLE,
+            confidence  DOUBLE,
+            label       VARCHAR,
+            model       VARCHAR,
+            PRIMARY KEY (text_hash, symbol)
+        );
+        """
+    )
+    # Deduped, FinBERT-scored news timeline (Panel a). id = normalized-URL hash.
+    # outlets / outlet_names: multi-outlet convergence — when a dup of this
+    # story arrives from a DIFFERENT source, the counter grows instead of the
+    # item being silently dropped (PLAN §3a "multi-outlet convergence" badge).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_items (
+            id           VARCHAR PRIMARY KEY,
+            source       VARCHAR NOT NULL,
+            symbol       VARCHAR,
+            title        VARCHAR NOT NULL,
+            summary      VARCHAR,
+            url          VARCHAR,
+            published    TIMESTAMP NOT NULL,
+            ingested     TIMESTAMP NOT NULL,
+            score        DOUBLE,
+            confidence   DOUBLE,
+            label        VARCHAR,
+            model        VARCHAR,
+            outlets      INTEGER DEFAULT 1,
+            outlet_names VARCHAR
+        );
+        """
+    )
+    # Migrate pre-convergence DBs in place (DuckDB supports IF NOT EXISTS here).
+    duck.execute("ALTER TABLE news_items ADD COLUMN IF NOT EXISTS outlets INTEGER DEFAULT 1;")
+    duck.execute("ALTER TABLE news_items ADD COLUMN IF NOT EXISTS outlet_names VARCHAR;")
+    # Retail mention/volume snapshots (ApeWisdom, StockTwits, Bluesky).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_retail (
+            source          VARCHAR NOT NULL,
+            symbol          VARCHAR NOT NULL,
+            ts              TIMESTAMP NOT NULL,
+            mentions        BIGINT,
+            mentions_prev   BIGINT,
+            rank            INTEGER,
+            upvotes         BIGINT,
+            sentiment_score DOUBLE,
+            PRIMARY KEY (source, symbol, ts)
+        );
+        """
+    )
+    # Individual large prints / trade tape (CCXT crypto streams, proxies).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS trades (
+            source       VARCHAR NOT NULL,
+            symbol       VARCHAR NOT NULL,
+            asset_class  VARCHAR NOT NULL,
+            ts           TIMESTAMP NOT NULL,
+            price        DOUBLE,
+            size         DOUBLE,
+            side         VARCHAR,
+            notional     DOUBLE
+        );
+        """
+    )
+
+
+def init_sqlite(sqlite: SqliteStore) -> None:
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS watchlist (
+            symbol       TEXT PRIMARY KEY,
+            asset_class  TEXT NOT NULL,
+            display_name TEXT,
+            sort_order   INTEGER DEFAULT 0,
+            added_at     TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS dashboard_layout (
+            id      TEXT PRIMARY KEY,   -- one row per named layout
+            layout  TEXT NOT NULL,      -- JSON: react-grid-layout positions
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    # Per-source cursor (last id / last timestamp pulled) for incremental ingest.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS scraper_cursor (
+            source     TEXT NOT NULL,
+            key        TEXT NOT NULL,   -- e.g. symbol or feed url
+            cursor     TEXT,
+            updated_at TEXT DEFAULT (datetime('now')),
+            PRIMARY KEY (source, key)
+        );
+        """
+    )
+    # Conditional-GET metadata (ETag / Last-Modified) for polite caching.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS http_cache_meta (
+            url           TEXT PRIMARY KEY,
+            etag          TEXT,
+            last_modified TEXT,
+            fetched_at    TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    # News dedupe: store a content hash so the same story across outlets counts
+    # once. item_id/source point back at the kept news_items row so a dup from
+    # a different outlet can bump that row's convergence counter.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_dedupe (
+            content_hash TEXT PRIMARY KEY,
+            first_seen   TEXT DEFAULT (datetime('now')),
+            item_id      TEXT,
+            source       TEXT
+        );
+        """
+    )
+    # Migrate pre-convergence DBs in place (SQLite has no IF NOT EXISTS here).
+    for col in ("item_id TEXT", "source TEXT"):
+        try:
+            sqlite.execute(f"ALTER TABLE news_dedupe ADD COLUMN {col};")
+        except sqlite3.OperationalError:
+            pass  # duplicate column — already migrated
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS app_meta (
+            key   TEXT PRIMARY KEY,
+            value TEXT
+        );
+        """
+    )
+
+    # Seed the default watchlist once (idempotent).
+    sqlite.executemany(
+        "INSERT OR IGNORE INTO watchlist (symbol, asset_class, display_name, sort_order) "
+        "VALUES (?, ?, ?, ?)",
+        [(s, a, n, i) for i, (s, a, n) in enumerate(DEFAULT_WATCHLIST)],
+    )
+
+
+def init_all(duck: DuckStore, sqlite: SqliteStore) -> None:
+    init_duckdb(duck)
+    init_sqlite(sqlite)

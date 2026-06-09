@@ -1,0 +1,15 @@
+{
+  "name": "market-terminal",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Local-first, free, private market-intelligence terminal (Next.js + FastAPI + local models)",
+  "packageManager": "pnpm@9.15.9",
+  "scripts": {
+    "dev:web": "pnpm --filter @market/web dev",
+    "build:web": "pnpm --filter @market/web build",
+    "gen:types": "bash scripts/gen-types.sh"
+  },
+  "devDependencies": {
+    "openapi-typescript": "^7.4.4"
+  }
+}

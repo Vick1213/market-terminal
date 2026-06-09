@@ -1,0 +1,37 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  launchd template to run the terminal (both processes via honcho) at login.
+  1. Install honcho:   uv tool install honcho
+  2. Edit the paths below (REPO and honcho location) to match your machine.
+  3. Copy to ~/Library/LaunchAgents/ and load:
+       cp deploy/com.market.terminal.plist ~/Library/LaunchAgents/
+       launchctl load ~/Library/LaunchAgents/com.market.terminal.plist
+  Logs land in <repo>/data/*.log.
+-->
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.market.terminal</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/saatvik1213/.local/bin/honcho</string>
+        <string>start</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/saatvik1213/Documents/market</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/saatvik1213/Documents/market/data/terminal.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/saatvik1213/Documents/market/data/terminal.err.log</string>
+</dict>
+</plist>

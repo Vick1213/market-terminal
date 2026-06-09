@@ -1,0 +1,121 @@
+"""FastAPI application entrypoint.
+
+Wires the whole single-process backend together in the lifespan:
+  startup  -> ensure data dirs, open DuckDB + SQLite, init schema, build the
+              shared HttpClient, start APScheduler, stash everything on app.state
+  shutdown -> stop scheduler, close HTTP client, close DB connections
+
+Run (dev): cd apps/api && uv run uvicorn app.main:app --reload --port 8000
+"""
+
+from __future__ import annotations
+
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+
+from app.config import get_settings
+from app.db.duck import DuckStore
+from app.db.schema import init_all
+from app.db.sqlite import SqliteStore
+from app.ingest.http import HttpClient
+from app.ingest.news import NewsPipeline
+from app.routers import health as health_router
+from app.routers import news as news_router
+from app.routers import sentiment as sentiment_router
+from app.routers import ws as ws_router
+from app.scheduler.jobs import build_scheduler
+from app.sentiment import SentimentService
+from app.ws.hub import hub
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
+)
+log = logging.getLogger("market.main")
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    settings = get_settings()
+    settings.ensure_dirs()
+    log.info("starting %s v%s — data dir: %s", settings.app_name, settings.version, settings.data_dir)
+
+    duck = DuckStore(settings.duckdb_path)
+    sqlite = SqliteStore(settings.sqlite_path)
+    init_all(duck, sqlite)
+    log.info("schema ready — duckdb tables: %s", list(duck.table_counts().keys()))
+
+    http = HttpClient(user_agent=settings.user_agent, cache_dir=str(settings.http_cache_dir))
+
+    # FinBERT loads lazily on first score (in its own thread-pool, off the loop).
+    sentiment = SentimentService(
+        duck, ensemble=settings.sentiment_ensemble, device=settings.sentiment_device
+    )
+    news_pipeline = NewsPipeline(
+        duck,
+        sqlite,
+        sentiment,
+        hub,
+        http,
+        finnhub_key=settings.finnhub_api_key,
+        edgar_lookback_days=settings.edgar_lookback_days,
+    )
+
+    scheduler = build_scheduler(settings, news_pipeline)
+    scheduler.start()
+    log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
+
+    app.state.settings = settings
+    app.state.duck = duck
+    app.state.sqlite = sqlite
+    app.state.http = http
+    app.state.sentiment = sentiment
+    app.state.news_pipeline = news_pipeline
+    app.state.scheduler = scheduler
+    app.state.hub = hub
+
+    try:
+        yield
+    finally:
+        log.info("shutting down")
+        scheduler.shutdown(wait=False)
+        sentiment.close()
+        await http.aclose()
+        duck.close()
+        sqlite.close()
+
+
+def create_app() -> FastAPI:
+    settings = get_settings()
+    app = FastAPI(title=settings.app_name, version=settings.version, lifespan=lifespan)
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings.cors_origins,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(health_router.router)
+    app.include_router(sentiment_router.router)
+    app.include_router(news_router.router)
+    app.include_router(ws_router.router)
+
+    @app.get("/", tags=["meta"])
+    async def root():
+        return {
+            "app": settings.app_name,
+            "version": settings.version,
+            "docs": "/docs",
+            "health": "/api/health",
+            "ws": "/ws/heartbeat",
+        }
+
+    return app
+
+
+app = create_app()
