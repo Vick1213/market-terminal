@@ -56,6 +56,10 @@ class Settings(BaseSettings):
     edgar_poll_minutes: int = 10
     # Only ingest EDGAR filings newer than this many days (first-run flood guard).
     edgar_lookback_days: int = 7
+    # GDELT theme rotation (slow per plan — 1 req/5s budget) and the broad
+    # CNBC/MarketWatch/Investing topic feeds (~5 min per plan).
+    gdelt_poll_minutes: int = 15
+    broad_rss_poll_minutes: int = 5
 
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [

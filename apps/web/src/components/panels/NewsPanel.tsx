@@ -1,6 +1,6 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useMemo, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import type { NewsItem, NewsMessage } from "@market/shared";
 import { fetchNews } from "@/lib/api";
@@ -130,14 +130,29 @@ export function NewsPanel() {
 
   const chips = data?.symbols ?? [];
 
-  // Expand on any click in the panel that isn't a link / button / chip.
+  // Expand on a TRUE click only: not on links/buttons/chips, and not on the
+  // mouse-up that ends a react-grid-layout drag or resize — if the pointer
+  // moved more than a few px since mousedown, it was a drag, not a click.
+  const downAt = useRef<{ x: number; y: number } | null>(null);
+  const onPanelMouseDown = (e: React.MouseEvent) => {
+    downAt.current = { x: e.clientX, y: e.clientY };
+  };
   const onPanelClick = (e: React.MouseEvent) => {
+    const d = downAt.current;
+    const dragged = d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5;
+    downAt.current = null;
+    if (dragged) return;
     if ((e.target as HTMLElement).closest("a, button")) return;
     setExpanded(true);
   };
 
   return (
-    <div className="panel panel-expandable" onClick={onPanelClick} title="Click to expand">
+    <div
+      className="panel panel-expandable"
+      onMouseDownCapture={onPanelMouseDown}
+      onClick={onPanelClick}
+      title="Click to expand"
+    >
       <div className="panel-head">
         <span>News + Sentiment</span>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>

@@ -87,5 +87,29 @@ def build_scheduler(
             )
         else:
             log.info("finnhub ingestor disabled (no MARKET_FINNHUB_API_KEY)")
+        scheduler.add_job(
+            news_pipeline.run_broad_rss,
+            trigger="interval",
+            minutes=settings.broad_rss_poll_minutes,
+            next_run_time=soon + timedelta(seconds=50),
+            id="news_broad_rss",
+            **common,
+        )
+        scheduler.add_job(
+            news_pipeline.run_gdelt,
+            trigger="interval",
+            minutes=settings.gdelt_poll_minutes,
+            next_run_time=soon + timedelta(seconds=80),
+            id="news_gdelt",
+            **common,
+        )
+        scheduler.add_job(
+            news_pipeline.run_seekingalpha,
+            trigger="interval",
+            minutes=settings.news_poll_minutes,
+            next_run_time=soon + timedelta(seconds=110),
+            id="news_seekingalpha",
+            **common,
+        )
 
     return scheduler

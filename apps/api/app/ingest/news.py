@@ -1,12 +1,23 @@
 """News ingestors + pipeline (Panel a).
 
-Three free sources, all through the shared rate-limited/conditional-GET
+Free sources, all through the shared rate-limited/conditional-GET
 ``HttpClient``:
   * Yahoo per-ticker RSS  — pre-mapped to ticker; fragile/unofficial, so its
     failure is logged and swallowed (Finnhub + EDGAR are the fallbacks).
   * SEC EDGAR submissions JSON — authoritative 8-K/10-Q/10-K source, no key,
     descriptive UA required (set globally), <=10 req/s (limited per-host).
   * Finnhub /company-news — optional free key; ingestor disabled without one.
+  * GDELT DOC 2.0 — only free no-key broad-market firehose. Queried per
+    macro/sector THEME, never per-ticker; the 1 req/5s budget is enforced by
+    the per-host limiter in HttpClient.
+  * CNBC / MarketWatch / Investing.com topic RSS — breadth; need a browser UA
+    (403/Cloudflare on naive fetchers), fragile by design, skip-on-fail.
+  * Seeking Alpha per-symbol RSS — analyst angle; same browser-UA treatment.
+
+Market-wide items (no pre-mapped ticker) get entity-localized FinBERT tagging:
+watchlist tickers mentioned in the text are scored on their sentence window
+(PLAN §3a — per-company sentiment with NO LLM), and a single-ticker article is
+tagged with that symbol so it shows up in the per-ticker drill-down.
 
 Pipeline (PLAN §3 dedup is mandatory): normalize URL (strip query/fragment) +
 normalize title, hash both, drop the item if EITHER hash was seen
@@ -45,6 +56,36 @@ EDGAR_TICKERS = "https://www.sec.gov/files/company_tickers.json"
 EDGAR_SUBMISSIONS = "https://data.sec.gov/submissions/CIK{cik:010d}.json"
 EDGAR_DOC = "https://www.sec.gov/Archives/edgar/data/{cik}/{accession}/{doc}"
 FINNHUB_NEWS = "https://finnhub.io/api/v1/company-news"
+GDELT_DOC = "https://api.gdeltproject.org/api/v2/doc/doc"
+SEEKING_ALPHA_RSS = "https://seekingalpha.com/api/sa/combined/{symbol}.xml"
+
+# CNBC/MarketWatch/Investing 403 naive fetchers — they get a real browser UA
+# instead of the descriptive one (PLAN §3 a / §8). All are fragile by design.
+BROWSER_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/137.0.0.0 Safari/537.36"
+    ),
+    "Accept": "application/rss+xml, application/xml;q=0.9, */*;q=0.8",
+}
+
+BROAD_FEEDS: list[tuple[str, str]] = [
+    ("cnbc", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=100003114"),  # top news
+    ("cnbc", "https://search.cnbc.com/rs/search/combinedcms/view.xml?partnerId=wrss01&id=20910258"),   # markets
+    ("marketwatch", "https://feeds.content.dowjones.io/public/rss/mw_topstories"),
+    ("marketwatch", "https://feeds.content.dowjones.io/public/rss/mw_realtimeheadlines"),
+    ("investing", "https://www.investing.com/rss/news_25.rss"),  # market news
+]
+
+# GDELT is queried per sector/macro THEME, never per-ticker (PLAN hard rule).
+GDELT_QUERIES: dict[str, str] = {
+    "fed": '"federal reserve" OR FOMC OR "interest rate decision"',
+    "inflation": '"inflation report" OR "CPI report" OR "consumer prices"',
+    "equities": '"stock market" OR "wall street" OR "S&P 500"',
+    "crypto": "bitcoin OR ethereum OR cryptocurrency",
+    "metals": '"gold price" OR "silver price" OR "precious metals"',
+    "energy": '"oil price" OR OPEC OR "crude oil"',
+}
 
 # Filing forms worth a timeline entry in P1 (8-K alert chips per plan; insider
 # Form 4 clustering is a later phase).
@@ -88,33 +129,121 @@ def watchlist_tickers(sqlite: SqliteStore) -> list[str]:
 # --------------------------------------------------------------- ingestors
 
 
+def _entries_to_raw(feed, source: str, symbol: str | None) -> list[RawNews]:
+    """Map feedparser entries to RawNews; entries without link/title dropped."""
+    items: list[RawNews] = []
+    for e in feed.entries:
+        ts = e.get("published_parsed") or e.get("updated_parsed")
+        published = (
+            datetime.fromtimestamp(time.mktime(ts), tz=timezone.utc)
+            if ts
+            else datetime.now(timezone.utc)
+        )
+        link = e.get("link", "")
+        title = (e.get("title") or "").strip()
+        if not link or not title:
+            continue
+        summary = re.sub(r"<[^>]+>", " ", e.get("summary") or "").strip()
+        items.append(
+            RawNews(
+                source=source,
+                symbol=symbol,
+                title=title,
+                summary=summary,
+                url=link,
+                published=published,
+            )
+        )
+    return items
+
+
+async def fetch_rss(
+    http: HttpClient,
+    url: str,
+    source: str,
+    symbol: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> list[RawNews]:
+    """One RSS/Atom feed -> RawNews. Every feed here is allowed to fail."""
+    try:
+        text = await http.get_text(url, headers=headers)
+        feed = feedparser.parse(text)
+    except Exception as exc:  # fragile-by-design sources — degrade, don't die
+        log.warning("%s rss failed (%s): %s", source, url, exc)
+        return []
+    return _entries_to_raw(feed, source, symbol)
+
+
 async def fetch_yahoo(http: HttpClient, symbols: list[str]) -> list[RawNews]:
     items: list[RawNews] = []
     for sym in symbols:
-        try:
-            text = await http.get_text(YAHOO_RSS.format(symbol=sym))
-            feed = feedparser.parse(text)
-        except Exception as exc:  # unofficial feed — degrade, don't die
-            log.warning("yahoo rss failed for %s: %s", sym, exc)
-            continue
-        for e in feed.entries:
-            ts = e.get("published_parsed") or e.get("updated_parsed")
-            published = (
-                datetime.fromtimestamp(time.mktime(ts), tz=timezone.utc)
-                if ts
-                else datetime.now(timezone.utc)
+        items.extend(await fetch_rss(http, YAHOO_RSS.format(symbol=sym), "yahoo", sym))
+    return items
+
+
+async def fetch_broad_rss(http: HttpClient) -> list[RawNews]:
+    """CNBC / MarketWatch / Investing.com topic feeds — market-wide breadth."""
+    items: list[RawNews] = []
+    for source, url in BROAD_FEEDS:
+        items.extend(await fetch_rss(http, url, source, headers=BROWSER_HEADERS))
+    return items
+
+
+async def fetch_seekingalpha(http: HttpClient, symbols: list[str]) -> list[RawNews]:
+    items: list[RawNews] = []
+    for sym in symbols:
+        items.extend(
+            await fetch_rss(
+                http,
+                SEEKING_ALPHA_RSS.format(symbol=sym),
+                "seekingalpha",
+                sym,
+                headers=BROWSER_HEADERS,
             )
-            link = e.get("link", "")
-            title = (e.get("title") or "").strip()
-            if not link or not title:
+        )
+    return items
+
+
+async def fetch_gdelt(http: HttpClient) -> list[RawNews]:
+    """GDELT DOC 2.0 ArtList per macro theme. The api.gdeltproject.org host
+    limiter (1 req / 5 s) spaces the theme rotation automatically."""
+    items: list[RawNews] = []
+    for theme, query in GDELT_QUERIES.items():
+        try:
+            data = await http.get_json(
+                GDELT_DOC,
+                params={
+                    "query": f"({query}) sourcelang:eng",
+                    "mode": "ArtList",
+                    "format": "json",
+                    "maxrecords": "30",
+                    "timespan": "6h",
+                },
+                # Cache key is the bare URL — identical across themes — so
+                # conditional GET would serve one theme's body for another.
+                conditional=False,
+            )
+        except Exception as exc:
+            log.warning("gdelt query failed (%s): %s", theme, exc)
+            continue
+        for a in data.get("articles", []) if isinstance(data, dict) else []:
+            title = (a.get("title") or "").strip()
+            url = a.get("url") or ""
+            if not title or not url:
                 continue
+            try:
+                published = datetime.strptime(
+                    a.get("seendate", ""), "%Y%m%dT%H%M%SZ"
+                ).replace(tzinfo=timezone.utc)
+            except ValueError:
+                published = datetime.now(timezone.utc)
             items.append(
                 RawNews(
-                    source="yahoo",
-                    symbol=sym,
+                    source="gdelt",
+                    symbol=None,  # market-wide; entity tagging happens in process()
                     title=title,
-                    summary=(e.get("summary") or "").strip(),
-                    url=link,
+                    summary="",
+                    url=url,
                     published=published,
                 )
             )
@@ -308,6 +437,34 @@ class NewsPipeline:
             bumped += 1
         return bumped
 
+    async def _tag_entities(self, fresh: list[tuple[str, RawNews]]) -> None:
+        """Entity-localized scoring for market-wide items (PLAN §3a, no LLM):
+        find watchlist tickers mentioned in the text (case-sensitive, optional
+        $-prefix), score each ticker's sentence window with the same encoder
+        (cached per-symbol in ts_sentiment for later panels), and tag the item
+        with the symbol when exactly one ticker matched."""
+        loop = asyncio.get_running_loop()
+        tickers = await loop.run_in_executor(None, watchlist_tickers, self._sqlite)
+        if not tickers:
+            return
+        pat = re.compile(
+            r"(?<![A-Z$])\$?(" + "|".join(map(re.escape, tickers)) + r")(?![A-Z])"
+        )
+        for _, it in fresh:
+            if it.symbol is not None:
+                continue
+            text = f"{it.title}. {it.summary[:500]}" if it.summary else it.title
+            matched = sorted(set(pat.findall(text)))
+            if not matched or len(matched) > 3:  # >3 = ticker-list noise, skip
+                continue
+            try:
+                await self._sentiment.score_entities(text, matched, source=it.source)
+            except Exception:
+                log.exception("entity scoring failed for %s", it.url)
+                continue
+            if len(matched) == 1:
+                it.symbol = matched[0]
+
     async def process(self, items: list[RawNews]) -> int:
         loop = asyncio.get_running_loop()
         fresh, convergent = await loop.run_in_executor(None, self._dedupe, items)
@@ -317,6 +474,8 @@ class NewsPipeline:
                 log.info("convergence: %s stories confirmed by another outlet", bumped)
         if not fresh:
             return 0
+
+        await self._tag_entities(fresh)
 
         # Score headline+summary in ONE batch — encoder-speed, cache-backed.
         texts = [
@@ -387,3 +546,16 @@ class NewsPipeline:
         symbols = watchlist_tickers(self._sqlite)
         n = await self.process(await fetch_finnhub(self._http, self._finnhub_key, symbols))
         log.info("finnhub ingest: %s new items (%s tickers)", n, len(symbols))
+
+    async def run_gdelt(self) -> None:
+        n = await self.process(await fetch_gdelt(self._http))
+        log.info("gdelt ingest: %s new items (%s themes)", n, len(GDELT_QUERIES))
+
+    async def run_broad_rss(self) -> None:
+        n = await self.process(await fetch_broad_rss(self._http))
+        log.info("broad rss ingest: %s new items (%s feeds)", n, len(BROAD_FEEDS))
+
+    async def run_seekingalpha(self) -> None:
+        symbols = watchlist_tickers(self._sqlite)
+        n = await self.process(await fetch_seekingalpha(self._http, symbols))
+        log.info("seekingalpha ingest: %s new items (%s tickers)", n, len(symbols))
