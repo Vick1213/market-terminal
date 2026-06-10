@@ -197,6 +197,108 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # --- Phase 7: edge extras ---
+    # Fired alerts (the in-app feed; ntfy push is fan-out only). id = rule:key:day
+    # hash so a re-evaluated rule can never double-insert.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alerts (
+            id        VARCHAR PRIMARY KEY,
+            ts        TIMESTAMP NOT NULL,
+            rule      VARCHAR NOT NULL,     -- macro_z | corr_break | regime_flip | ...
+            severity  VARCHAR NOT NULL,     -- info | warn | critical
+            title     VARCHAR NOT NULL,
+            body      VARCHAR,
+            symbol    VARCHAR,
+            value     DOUBLE,
+            regime    VARCHAR,              -- regime at fire time (gating context)
+            pushed    BOOLEAN DEFAULT FALSE -- delivered to ntfy
+        );
+        """
+    )
+    # SEC Form 4 open-market BUYS (transaction code P) for watchlist issuers.
+    # One row per (accession, insider); clusters are detected at read time.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS insider_trades (
+            accession     VARCHAR NOT NULL,
+            symbol        VARCHAR NOT NULL,
+            issuer_name   VARCHAR,
+            insider_name  VARCHAR NOT NULL,
+            insider_title VARCHAR,
+            is_officer    BOOLEAN,
+            is_director   BOOLEAN,
+            is_ceo_cfo    BOOLEAN,
+            filed_at      TIMESTAMP NOT NULL,
+            trade_date    TIMESTAMP,
+            shares        DOUBLE,
+            price         DOUBLE,
+            value         DOUBLE,            -- shares * price
+            url           VARCHAR,
+            PRIMARY KEY (accession, insider_name)
+        );
+        """
+    )
+    # Weekly CFTC legacy COT prints for the tracked futures markets. The COT
+    # Index (3y percentile of net non-commercial) is computed at read time.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_cot (
+            market_code    VARCHAR NOT NULL,  -- CFTC contract market code
+            market         VARCHAR,           -- short label (GOLD, ES, BTC ...)
+            ts             TIMESTAMP NOT NULL, -- report date
+            noncomm_long   DOUBLE,
+            noncomm_short  DOUBLE,
+            comm_long      DOUBLE,
+            comm_short     DOUBLE,
+            open_interest  DOUBLE,
+            PRIMARY KEY (market_code, ts)
+        );
+        """
+    )
+    # Self-computed dealer-gamma snapshots from the fragile CBOE delayed
+    # options JSON (one isolated adapter; rows only on schema-valid pulls).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS gex_snapshots (
+            symbol      VARCHAR NOT NULL,
+            ts          TIMESTAMP NOT NULL,
+            spot        DOUBLE,
+            total_gex   DOUBLE,              -- $bn per 1% move, calls + puts
+            flip        DOUBLE,              -- strike where cumulative GEX crosses 0
+            call_wall   DOUBLE,
+            put_wall    DOUBLE,
+            detail      VARCHAR,             -- JSON: per-strike profile
+            PRIMARY KEY (symbol, ts)
+        );
+        """
+    )
+    # Daily pre-market auto-brief (one row per day; re-runs replace).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS briefs (
+            ts      TIMESTAMP PRIMARY KEY,
+            regime  VARCHAR,
+            text    VARCHAR,               -- markdown narrative
+            model   VARCHAR,               -- LLM used, or 'template'
+            detail  VARCHAR                -- JSON digest the narrative grounds on
+        );
+        """
+    )
+    # Event Horizon calendar: forward market-moving events (FOMC, CPI, NFP,
+    # OPEX/quad-witching, COT prints, watchlist earnings). Upserted on refresh.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS events (
+            id      VARCHAR PRIMARY KEY,   -- kind:date(:symbol)
+            ts      TIMESTAMP NOT NULL,    -- event date (UTC midnight)
+            kind    VARCHAR NOT NULL,      -- fomc | cpi | nfp | opex | cot | earnings
+            title   VARCHAR NOT NULL,
+            symbol  VARCHAR,
+            source  VARCHAR
+        );
+        """
+    )
 
 
 def init_sqlite(sqlite: SqliteStore) -> None:
@@ -285,6 +387,18 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         CREATE TABLE IF NOT EXISTS app_meta (
             key   TEXT PRIMARY KEY,
             value TEXT
+        );
+        """
+    )
+    # Alert dedupe/cooldown: one row per rule-instance key. last_value lets
+    # threshold rules fire on the CROSSING, not on every sweep above it.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS alert_state (
+            rule_key   TEXT PRIMARY KEY,
+            last_fired TEXT,
+            last_value REAL,
+            last_text  TEXT
         );
         """
     )

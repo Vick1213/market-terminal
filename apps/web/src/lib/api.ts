@@ -1,5 +1,12 @@
 import type {
+  AlertsResponse,
+  BriefResponse,
+  CalendarResponse,
   ChartMarker,
+  CotResponse,
+  GexResponse,
+  InsiderResponse,
+  RotationResponse,
   CorrCardDetail,
   CorrResponse,
   HealthResponse,
@@ -125,6 +132,60 @@ export async function fetchCorrCard(cardId: string): Promise<CorrCardDetail> {
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`corr card failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchAlerts(limit = 50): Promise<AlertsResponse> {
+  const res = await fetch(`${API_URL}/api/alerts?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`alerts request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function testNtfy(): Promise<{ ok: boolean; detail?: string }> {
+  const res = await fetch(`${API_URL}/api/alerts/test`, { method: "POST" });
+  if (!res.ok) throw new Error(`ntfy test failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRotation(): Promise<RotationResponse> {
+  const res = await fetch(`${API_URL}/api/rotation`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`rotation request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCot(): Promise<CotResponse> {
+  const res = await fetch(`${API_URL}/api/cot`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`cot request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchGex(): Promise<GexResponse> {
+  const res = await fetch(`${API_URL}/api/gex`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`gex request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchInsider(days = 30): Promise<InsiderResponse> {
+  const res = await fetch(`${API_URL}/api/insider?days=${days}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`insider request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCalendar(days = 30): Promise<CalendarResponse> {
+  const res = await fetch(`${API_URL}/api/calendar?days=${days}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`calendar request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBrief(): Promise<BriefResponse> {
+  const res = await fetch(`${API_URL}/api/brief`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`brief request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runBrief(): Promise<BriefResponse> {
+  const res = await fetch(`${API_URL}/api/brief/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`brief run failed: ${res.status}`);
   return res.json();
 }
 

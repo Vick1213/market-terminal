@@ -114,6 +114,44 @@ class Settings(BaseSettings):
     # legs are ensured cache-first each run, so most runs cost no network.
     corr_poll_minutes: int = 15
 
+    # --- Phase 7: edge extras + alerting + brief ---
+    # ntfy.sh push: set a LONG RANDOM topic (it is the only auth). Empty ->
+    # alerts stay in-app only (WS + panel), nothing leaves the machine.
+    ntfy_topic: str = ""
+    ntfy_server: str = "https://ntfy.sh"
+    # Alert sweep cadence; every rule also dedupes per-key with this cooldown.
+    alerts_poll_minutes: int = 10
+    alert_cooldown_hours: int = 24
+    # Form 4 cluster buys: watchlist issuers only (bounded EDGAR requests).
+    insider_poll_minutes: int = 240
+    insider_lookback_days: int = 30
+    insider_cluster_window_days: int = 14
+    insider_cluster_min_buyers: int = 2
+    insider_min_trade_value: float = 25_000
+    # RS/RRG sector rotation + seasonality (pure math on cached daily bars).
+    rotation_poll_minutes: int = 360
+    sector_etfs: list[str] = [
+        "XLK", "XLF", "XLE", "XLV", "XLI", "XLP",
+        "XLY", "XLU", "XLB", "XLRE", "XLC",
+    ]
+    rrg_benchmark: str = "SPY"
+    # CFTC COT (weekly print, Fridays 15:30 ET) — 12h poll is plenty.
+    cot_poll_minutes: int = 720
+    # CBOE delayed options JSON is 15-min delayed; fragile, isolated adapter.
+    gex_poll_minutes: int = 30
+    gex_symbols: list[str] = ["_SPX", "SPY"]
+    # Daily auto-brief: pre-market cron (UTC) + on-demand POST /api/brief/run.
+    brief_hour_utc: int = 11
+    brief_minute_utc: int = 30
+    # Local LLM for the brief narrative (Ollama). Unreachable -> deterministic
+    # template fallback, the brief never silently fails.
+    ollama_url: str = "http://127.0.0.1:11434"
+    ollama_model: str = "qwen3:8b"
+    ollama_timeout_seconds: float = 180.0
+    # Event Horizon calendar: earnings dates refresh (FOMC/CPI/NFP/OPEX legs
+    # are static or computed locally and cost nothing).
+    calendar_poll_minutes: int = 720
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

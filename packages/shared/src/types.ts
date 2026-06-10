@@ -37,6 +37,8 @@ export type WsMessage =
   | QuoteMessage
   | RetailWsMessage
   | CorrWsMessage
+  | AlertWsMessage
+  | BriefWsMessage
   | Record<string, unknown>;
 
 // --- Phase 1: news + sentiment ---
@@ -455,4 +457,155 @@ export interface CorrWsMessage {
   broken: number;
   watch: number;
   stress: boolean;
+}
+
+// --- Phase 7: edge extras --------------------------------------------------
+
+export type AlertSeverity = "info" | "warn" | "critical";
+
+export interface AlertItem {
+  id: string;
+  ts: string;
+  rule: string;
+  severity: AlertSeverity;
+  title: string;
+  body: string | null;
+  symbol: string | null;
+  value: number | null;
+  regime: string | null;
+  pushed: boolean;
+}
+
+export interface AlertsResponse {
+  ntfy_enabled: boolean;
+  alerts: AlertItem[];
+}
+
+export interface AlertWsMessage {
+  type: "alert";
+  id: string | null;
+  rule: string;
+  severity: AlertSeverity;
+  title: string;
+  body: string;
+  symbol: string | null;
+  value: number | null;
+  ts: string;
+}
+
+export type RrgQuadrant = "leading" | "weakening" | "lagging" | "improving";
+
+export interface RrgSector {
+  symbol: string;
+  name: string;
+  rs_ratio: number;
+  rs_momentum: number;
+  quadrant: RrgQuadrant;
+  trail: { ts: string; r: number; m: number }[];
+}
+
+export interface SeasonalityMonth {
+  month: number;
+  mean_return: number;
+  win_rate: number;
+  years: number;
+}
+
+export interface SeasonalityRow {
+  symbol: string;
+  months: SeasonalityMonth[];
+}
+
+export interface RotationResponse {
+  benchmark: string;
+  sectors: RrgSector[];
+  seasonality: SeasonalityRow[];
+}
+
+export interface CotMarket {
+  market_code: string;
+  market: string;
+  report_date: string;
+  net_noncommercial: number;
+  cot_index: number | null;
+  net_13w_ago: number | null;
+  open_interest: number | null;
+  weeks: number;
+}
+
+export interface CotResponse {
+  markets: CotMarket[];
+}
+
+export interface GexSnapshot {
+  symbol: string;
+  ts: string;
+  spot: number | null;
+  total_gex_bn: number | null;
+  flip: number | null;
+  call_wall: number | null;
+  put_wall: number | null;
+  profile: { strike: number; gex: number }[];
+  contracts: number | null;
+}
+
+export interface GexResponse {
+  snapshots: GexSnapshot[];
+}
+
+export interface InsiderTrade {
+  accession: string;
+  symbol: string;
+  issuer: string | null;
+  insider: string;
+  title: string | null;
+  is_ceo_cfo: boolean;
+  filed_at: string;
+  trade_date: string | null;
+  shares: number | null;
+  price: number | null;
+  value: number | null;
+  url: string | null;
+}
+
+export interface InsiderCluster {
+  symbol: string;
+  buyers: number;
+  total_value: number | null;
+  last_filed: string;
+  has_ceo_cfo: boolean;
+}
+
+export interface InsiderResponse {
+  trades: InsiderTrade[];
+  clusters: InsiderCluster[];
+}
+
+export interface CalendarEvent {
+  id: string;
+  date: string;
+  days_until: number;
+  kind: "fomc" | "cpi" | "nfp" | "ppi" | "gdp" | "pce" | "opex" | "cot" | "earnings";
+  title: string;
+  symbol: string | null;
+  source: string;
+}
+
+export interface CalendarResponse {
+  events: CalendarEvent[];
+}
+
+export interface BriefResponse {
+  date: string | null;
+  regime: string | null;
+  text: string | null;
+  model: string | null;
+  digest?: Record<string, unknown>;
+}
+
+export interface BriefWsMessage {
+  type: "brief";
+  date: string;
+  regime: string;
+  model: string;
 }

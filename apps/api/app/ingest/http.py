@@ -14,7 +14,7 @@ Async-first; blocking parsing should still be offloaded by callers.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from urllib.parse import urlsplit
+from urllib.parse import urlencode, urlsplit
 
 import diskcache
 import httpx
@@ -61,6 +61,8 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "api.gdeltproject.org": (1, 5.0),
     "data.sec.gov": (8, 1.0),
     "efts.sec.gov": (8, 1.0),
+    "www.sec.gov": (8, 1.0),
+    "publicreporting.cftc.gov": (2, 1.0),
     "stooq.com": (1, 2.0),
     "finnhub.io": (50, 60.0),
     "api.stlouisfed.org": (100, 60.0),
@@ -110,7 +112,11 @@ class HttpClient:
         host = urlsplit(url).netloc
         req_headers = dict(headers or {})
 
-        cached = self._cache.get(url) if conditional else None
+        # Cache key must include query params — two requests to the same path
+        # with different params are different resources (FRED, Socrata, ...).
+        cache_key = f"{url}?{urlencode(sorted(params.items()))}" if params else url
+
+        cached = self._cache.get(cache_key) if conditional else None
         if cached:
             if cached.get("etag"):
                 req_headers.setdefault("If-None-Match", cached["etag"])
@@ -136,7 +142,7 @@ class HttpClient:
 
         if conditional and (resp.headers.get("ETag") or resp.headers.get("Last-Modified")):
             self._cache.set(
-                url,
+                cache_key,
                 {
                     "etag": resp.headers.get("ETag"),
                     "last_modified": resp.headers.get("Last-Modified"),

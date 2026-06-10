@@ -21,6 +21,14 @@ from app.corr.pipeline import CorrPipeline
 from app.db.duck import DuckStore
 from app.db.schema import init_all
 from app.db.sqlite import SqliteStore
+from app.edge.alerts import AlertEngine
+from app.edge.brief import BriefService
+from app.edge.calendar import CalendarPipeline
+from app.edge.cot import CotPipeline
+from app.edge.gex import GexAdapter
+from app.edge.insider import InsiderPipeline
+from app.edge.ntfy import NtfyPublisher
+from app.edge.rotation import RotationPipeline
 from app.ingest.crypto import CryptoStreamer
 from app.ingest.http import HttpClient
 from app.ingest.macro import MacroPipeline
@@ -28,6 +36,7 @@ from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
 from app.ingest.retail import RetailPipeline
 from app.routers import corr as corr_router
+from app.routers import edge as edge_router
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
@@ -92,9 +101,41 @@ async def lifespan(app: FastAPI):
 
     corr_pipeline = CorrPipeline(duck, hub)
 
+    # Phase 7: edge extras + alerting + brief.
+    ntfy = NtfyPublisher(settings.ntfy_server, settings.ntfy_topic)
+    if not ntfy.enabled:
+        log.info("ntfy push disabled (no MARKET_NTFY_TOPIC — alerts stay in-app)")
+    alert_engine = AlertEngine(
+        duck, sqlite, hub, ntfy,
+        cooldown_hours=settings.alert_cooldown_hours,
+        large_print_notional=settings.large_print_notional,
+        insider_cluster_min_buyers=settings.insider_cluster_min_buyers,
+        insider_cluster_window_days=settings.insider_cluster_window_days,
+    )
+    insider_pipeline = InsiderPipeline(
+        duck, sqlite, http,
+        lookback_days=settings.insider_lookback_days,
+        min_trade_value=settings.insider_min_trade_value,
+    )
+    rotation_pipeline = RotationPipeline(
+        duck, sqlite, settings.sector_etfs, settings.rrg_benchmark
+    )
+    cot_pipeline = CotPipeline(duck, http)
+    gex_adapter = GexAdapter(duck, http, settings.gex_symbols)
+    calendar_pipeline = CalendarPipeline(
+        duck, sqlite, http, fred_api_key=settings.fred_api_key
+    )
+    brief_service = BriefService(
+        duck, hub, ntfy,
+        ollama_url=settings.ollama_url,
+        ollama_model=settings.ollama_model,
+        ollama_timeout=settings.ollama_timeout_seconds,
+    )
+
     scheduler = build_scheduler(
         settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline,
-        corr_pipeline,
+        corr_pipeline, alert_engine, insider_pipeline, rotation_pipeline,
+        cot_pipeline, gex_adapter, calendar_pipeline, brief_service,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -125,6 +166,14 @@ async def lifespan(app: FastAPI):
     app.state.crypto_streamer = crypto_streamer
     app.state.scheduler = scheduler
     app.state.hub = hub
+    app.state.ntfy = ntfy
+    app.state.alert_engine = alert_engine
+    app.state.insider_pipeline = insider_pipeline
+    app.state.rotation_pipeline = rotation_pipeline
+    app.state.cot_pipeline = cot_pipeline
+    app.state.gex_adapter = gex_adapter
+    app.state.calendar_pipeline = calendar_pipeline
+    app.state.brief_service = brief_service
 
     try:
         yield
@@ -133,6 +182,7 @@ async def lifespan(app: FastAPI):
         await crypto_streamer.stop()
         scheduler.shutdown(wait=False)
         sentiment.close()
+        await ntfy.aclose()
         await http.aclose()
         duck.close()
         sqlite.close()
@@ -159,6 +209,7 @@ def create_app() -> FastAPI:
     app.include_router(multiasset_router.router)
     app.include_router(retail_router.router)
     app.include_router(corr_router.router)
+    app.include_router(edge_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(ws_router.router)
 

@@ -18,6 +18,13 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import Settings
 from app.corr.pipeline import CorrPipeline
+from app.edge.alerts import AlertEngine
+from app.edge.brief import BriefService
+from app.edge.calendar import CalendarPipeline
+from app.edge.cot import CotPipeline
+from app.edge.gex import GexAdapter
+from app.edge.insider import InsiderPipeline
+from app.edge.rotation import RotationPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -50,6 +57,13 @@ def build_scheduler(
     multiasset_pipeline: MultiAssetPipeline | None = None,
     retail_pipeline: RetailPipeline | None = None,
     corr_pipeline: CorrPipeline | None = None,
+    alert_engine: AlertEngine | None = None,
+    insider_pipeline: InsiderPipeline | None = None,
+    rotation_pipeline: RotationPipeline | None = None,
+    cot_pipeline: CotPipeline | None = None,
+    gex_adapter: GexAdapter | None = None,
+    calendar_pipeline: CalendarPipeline | None = None,
+    brief_service: BriefService | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -254,6 +268,79 @@ def build_scheduler(
             coalesce=True,
             misfire_grace_time=300,
             jitter=30,
+        )
+
+    # --- Phase 7: edge extras + alerting + brief ---
+    common = dict(max_instances=1, coalesce=True, misfire_grace_time=300, jitter=30)
+    soon = datetime.now(timezone.utc)
+    if calendar_pipeline is not None:
+        # Cheap (mostly date math) and feeds the brief — runs early.
+        scheduler.add_job(
+            calendar_pipeline.run,
+            trigger="interval",
+            minutes=settings.calendar_poll_minutes,
+            next_run_time=soon + timedelta(seconds=380),
+            id="edge_calendar",
+            **common,
+        )
+    if cot_pipeline is not None:
+        scheduler.add_job(
+            cot_pipeline.run,
+            trigger="interval",
+            minutes=settings.cot_poll_minutes,
+            next_run_time=soon + timedelta(seconds=410),
+            id="edge_cot",
+            **common,
+        )
+    if gex_adapter is not None:
+        scheduler.add_job(
+            gex_adapter.run,
+            trigger="interval",
+            minutes=settings.gex_poll_minutes,
+            next_run_time=soon + timedelta(seconds=440),
+            id="edge_gex",
+            **common,
+        )
+    if rotation_pipeline is not None:
+        scheduler.add_job(
+            rotation_pipeline.run,
+            trigger="interval",
+            minutes=settings.rotation_poll_minutes,
+            next_run_time=soon + timedelta(seconds=470),
+            id="edge_rotation",
+            **common,
+        )
+    if insider_pipeline is not None:
+        scheduler.add_job(
+            insider_pipeline.run,
+            trigger="interval",
+            minutes=settings.insider_poll_minutes,
+            next_run_time=soon + timedelta(seconds=500),
+            id="edge_insider",
+            **common,
+        )
+    if alert_engine is not None:
+        # First sweep waits for the first round of ingests so it has data
+        # to judge but fires before the user's first coffee refill.
+        scheduler.add_job(
+            alert_engine.run,
+            trigger="interval",
+            minutes=settings.alerts_poll_minutes,
+            next_run_time=soon + timedelta(seconds=560),
+            id="edge_alerts",
+            **common,
+        )
+    if brief_service is not None:
+        # Pre-market cron (UTC); /api/brief/run regenerates on demand.
+        scheduler.add_job(
+            brief_service.run,
+            trigger="cron",
+            hour=settings.brief_hour_utc,
+            minute=settings.brief_minute_utc,
+            id="edge_brief",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=3600,
         )
 
     return scheduler
