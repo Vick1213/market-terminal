@@ -6,6 +6,7 @@ import { BriefPanel } from "./panels/BriefPanel";
 import { CalendarPanel } from "./panels/CalendarPanel";
 import { CorrelationPanel } from "./panels/CorrelationPanel";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
+import { HelpPanel } from "./panels/HelpPanel";
 import { MacroPanel } from "./panels/MacroPanel";
 import { MultiAssetPanel } from "./panels/MultiAssetPanel";
 import { NewsPanel } from "./panels/NewsPanel";
@@ -31,6 +32,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "calendar", el: <CalendarPanel /> },
   { i: "rotation", el: <RotationPanel /> },
   { i: "positioning", el: <PositioningPanel /> },
+  { i: "help", el: <HelpPanel /> },
 ];
 
 const layouts: Layouts = {
@@ -48,6 +50,7 @@ const layouts: Layouts = {
     { i: "rotation", x: 0, y: 18, w: 6, h: 8 },
     { i: "cookbook", x: 6, y: 18, w: 6, h: 8 },
     { i: "system", x: 0, y: 26, w: 4, h: 6 },
+    { i: "help", x: 4, y: 26, w: 8, h: 6 },
   ],
 };
 
