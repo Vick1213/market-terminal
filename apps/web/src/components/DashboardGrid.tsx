@@ -1,11 +1,11 @@
 "use client";
 
 import { Responsive, WidthProvider, type Layouts } from "react-grid-layout";
+import { CorrelationPanel } from "./panels/CorrelationPanel";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
 import { MacroPanel } from "./panels/MacroPanel";
 import { MultiAssetPanel } from "./panels/MultiAssetPanel";
 import { NewsPanel } from "./panels/NewsPanel";
-import { PlaceholderPanel } from "./panels/PlaceholderPanel";
 import { RetailPanel } from "./panels/RetailPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
 
@@ -19,7 +19,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "watchlist", el: <WatchlistPanel /> },
   { i: "multiasset", el: <MultiAssetPanel /> },
   { i: "retail", el: <RetailPanel /> },
-  { i: "cookbook", el: <PlaceholderPanel title="Correlation Cookbook" phase="P6" note="12 intermarket rule-cards" /> },
+  { i: "cookbook", el: <CorrelationPanel /> },
 ];
 
 const layouts: Layouts = {

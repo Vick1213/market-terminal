@@ -60,6 +60,18 @@ MACRO_LABELS: dict[str, str] = {
     "RETAIL_SENT": "Retail sentiment (-1..+1)",
     "RETAIL_CHATTER_Z": "Retail chatter z",
     "RETAIL_MENTIONS": "Retail mentions (total)",
+    "CORR_GOLD_BTC": "Corr 90d: Gold↔BTC",
+    "CORR_COPPERGOLD_10Y": "Corr 90d: Copper/Gold↔10y",
+    "CORR_BTC_NDX": "Corr 90d: BTC↔Nasdaq",
+    "CORR_USDJPY_RISK": "Corr 90d: USDJPY↔Nasdaq",
+    "CORR_HY_SPX": "Corr 90d: HY OAS↔SPX",
+    "CORR_CURVE_2S10S": "2s10s level (cookbook)",
+    "CORR_GOLD_SILVER": "Gold/Silver ratio",
+    "CORR_NETLIQ_BTC": "Corr 26w: Net liq↔BTC",
+    "CORR_REAL_GOLD": "Corr 90d: Real yields↔Gold",
+    "CORR_USD_COMMOD": "Corr 90d: DXY↔Gold",
+    "CORR_VIX_TERM": "VIX3M/VIX ratio",
+    "CORR_OIL_BREAKEVEN": "Corr 90d: Oil↔Breakevens",
 }
 
 RETAIL_CATALOG_LIMIT = 30  # top movers only — the long tail isn't chartworthy

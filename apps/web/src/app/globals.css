@@ -887,3 +887,82 @@ body {
   outline: none;
   border-color: var(--accent);
 }
+
+/* --- correlation cookbook (Panel f) --- */
+.corr-grid {
+  display: grid;
+  grid-template-columns: repeat(6, 1fr);
+  gap: 6px;
+  margin-top: 8px;
+}
+.corr-grid.full {
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin: 10px 0;
+}
+.corr-card {
+  border: 1px solid var(--panel-border);
+  border-left-width: 3px;
+  border-radius: 4px;
+  padding: 6px 8px;
+  cursor: pointer;
+  min-width: 0;
+}
+.corr-card:hover {
+  background: rgba(255, 255, 255, 0.03);
+}
+.corr-card-head {
+  display: flex;
+  align-items: baseline;
+  gap: 5px;
+  font-size: 11px;
+}
+.corr-card-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.corr-status {
+  font-size: 9px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  flex: none;
+  margin-left: auto;
+}
+.corr-card-vals {
+  display: flex;
+  gap: 8px;
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.corr-card-note {
+  font-size: 9.5px;
+  color: var(--yellow);
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.heat-table {
+  border-collapse: collapse;
+  font-size: 10px;
+  margin-top: 6px;
+}
+.heat-table th {
+  color: var(--text-dim);
+  font-weight: 400;
+  padding: 2px 4px;
+  text-align: center;
+}
+.heat-table th.row-label {
+  text-align: right;
+}
+.heat-table td {
+  padding: 2px 4px;
+  text-align: center;
+  min-width: 36px;
+  border: 1px solid var(--bg);
+}

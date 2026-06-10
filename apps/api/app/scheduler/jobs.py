@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import Settings
+from app.corr.pipeline import CorrPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -48,6 +49,7 @@ def build_scheduler(
     macro_pipeline: MacroPipeline | None = None,
     multiasset_pipeline: MultiAssetPipeline | None = None,
     retail_pipeline: RetailPipeline | None = None,
+    corr_pipeline: CorrPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -237,6 +239,21 @@ def build_scheduler(
             next_run_time=soon + timedelta(seconds=210),
             id="retail_tradestie",
             **common,
+        )
+
+    if corr_pipeline is not None:
+        # First run waits for the FRED ingest (140s) so cards land with both
+        # legs; the price-leg ensure inside the run is cache-first either way.
+        scheduler.add_job(
+            corr_pipeline.run,
+            trigger="interval",
+            minutes=settings.corr_poll_minutes,
+            next_run_time=datetime.now(timezone.utc) + timedelta(seconds=350),
+            id="corr_cookbook",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=300,
+            jitter=30,
         )
 
     return scheduler

@@ -1,5 +1,7 @@
 import type {
   ChartMarker,
+  CorrCardDetail,
+  CorrResponse,
   HealthResponse,
   MacroResponse,
   MarkersResponse,
@@ -109,6 +111,20 @@ export async function fetchRetailSymbol(symbol: string): Promise<RetailSymbolRes
     cache: "no-store",
   });
   if (!res.ok) throw new Error(`retail drill failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCorr(): Promise<CorrResponse> {
+  const res = await fetch(`${API_URL}/api/corr`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`corr request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchCorrCard(cardId: string): Promise<CorrCardDetail> {
+  const res = await fetch(`${API_URL}/api/corr/${encodeURIComponent(cardId)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`corr card failed: ${res.status}`);
   return res.json();
 }
 

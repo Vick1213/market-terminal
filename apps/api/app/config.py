@@ -109,6 +109,11 @@ class Settings(BaseSettings):
     # Tradestie WSB cross-confirmation (Cloudflare-gated — may never deliver).
     tradestie_poll_minutes: int = 30
 
+    # --- Phase 6: correlation cookbook ---
+    # Recompute cadence (PLAN §3f: every 15 min from cached series). The price
+    # legs are ensured cache-first each run, so most runs cost no network.
+    corr_poll_minutes: int = 15
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

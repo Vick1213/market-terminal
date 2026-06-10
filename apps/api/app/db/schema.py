@@ -166,6 +166,24 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # Correlation Cookbook snapshots (Panel f): one row per card per day, plus
+    # a '_meta' row holding the full computed result (regime, stress radar,
+    # heatmap) so /api/corr is a single read. detail = JSON.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS corr_snapshots (
+            card_id  VARCHAR NOT NULL,
+            ts       TIMESTAMP NOT NULL,
+            status   VARCHAR,
+            corr30   DOUBLE,
+            corr90   DOUBLE,
+            z        DOUBLE,
+            value    DOUBLE,
+            detail   VARCHAR,
+            PRIMARY KEY (card_id, ts)
+        );
+        """
+    )
     # Per-ticker FINRA daily short-sale volume (Panel e accumulation proxy).
     # Short SELL volume incl. MM hedging, NOT short interest (PLAN §3e).
     duck.execute(

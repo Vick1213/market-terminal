@@ -36,6 +36,7 @@ export type WsMessage =
   | DepthMessage
   | QuoteMessage
   | RetailWsMessage
+  | CorrWsMessage
   | Record<string, unknown>;
 
 // --- Phase 1: news + sentiment ---
@@ -375,4 +376,83 @@ export interface RetailWsMessage {
   computed_at: string | null;
   score: number | null;
   total_mentions: number | null;
+}
+
+// --- Phase 6: correlation cookbook ---
+
+export type CorrStatus = "holds" | "watch" | "broken" | "no-data";
+
+export interface CorrLeadLag {
+  unit: "d" | "w";
+  peak_lag: number; // >0 = the named leader's past correlates with the other leg's present
+  peak_corr: number | null;
+  leader: string;
+  leads_now: boolean;
+  decayed: boolean; // leading series stopped leading = early decay warning
+  profile: { lag: number; corr: number | null }[];
+}
+
+export interface CorrCard {
+  id: string;
+  num: number;
+  title: string;
+  mode: "corr" | "ratio" | "curve" | "term" | string;
+  status: CorrStatus | string;
+  legs: string[];
+  asof: string | null;
+  windows: string[]; // ["30d","90d"] or ["13w","26w"] for the weekly card
+  corr30: number | null;
+  corr90: number | null;
+  baseline_mean: number | null;
+  baseline_std: number | null;
+  baseline_n: number;
+  z: number | null; // z of current corr vs long-run rolling-90 baseline
+  sign_flip: boolean;
+  value: number | null; // ratio / term / curve level
+  value_label: string;
+  lead_lag: CorrLeadLag | null;
+  secondary: { label: string; corr30: number | null; corr90: number | null } | null;
+  notes: string[];
+  normal: string;
+  rationale: string;
+  breaks_when: string;
+}
+
+export interface CorrStressLight {
+  key: string;
+  label: string;
+  on: boolean;
+  value: number | null;
+}
+
+export interface CorrResponse {
+  computed_at: string | null;
+  regime: string;
+  regime_score: number | null;
+  cards: CorrCard[];
+  stress: { on: boolean; lights: CorrStressLight[] };
+  heatmap: { labels: string[]; matrix: (number | null)[][] };
+}
+
+export interface CorrHistoryPoint {
+  t: number; // unix seconds
+  corr30: number | null;
+  corr90: number | null;
+}
+
+export interface CorrCardDetail {
+  card: CorrCard;
+  history?: CorrHistoryPoint[];
+  legs_rebased?: { t: number; a: number | null; b: number | null }[];
+  levels?: { t: number; v?: number | null; a?: number | null; b?: number | null }[];
+  leg_labels: string[];
+}
+
+export interface CorrWsMessage {
+  type: "corr";
+  computed_at: string;
+  regime: string;
+  broken: number;
+  watch: number;
+  stress: boolean;
 }

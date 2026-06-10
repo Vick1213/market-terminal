@@ -17,6 +17,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from app.config import get_settings
+from app.corr.pipeline import CorrPipeline
 from app.db.duck import DuckStore
 from app.db.schema import init_all
 from app.db.sqlite import SqliteStore
@@ -26,6 +27,7 @@ from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
 from app.ingest.retail import RetailPipeline
+from app.routers import corr as corr_router
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
@@ -88,8 +90,11 @@ async def lifespan(app: FastAPI):
         message_retention_days=settings.retail_message_retention_days,
     )
 
+    corr_pipeline = CorrPipeline(duck, hub)
+
     scheduler = build_scheduler(
-        settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline
+        settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline,
+        corr_pipeline,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -116,6 +121,7 @@ async def lifespan(app: FastAPI):
     app.state.macro_pipeline = macro_pipeline
     app.state.multiasset_pipeline = multiasset_pipeline
     app.state.retail_pipeline = retail_pipeline
+    app.state.corr_pipeline = corr_pipeline
     app.state.crypto_streamer = crypto_streamer
     app.state.scheduler = scheduler
     app.state.hub = hub
@@ -152,6 +158,7 @@ def create_app() -> FastAPI:
     app.include_router(markers_router.router)
     app.include_router(multiasset_router.router)
     app.include_router(retail_router.router)
+    app.include_router(corr_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(ws_router.router)
 
