@@ -61,6 +61,22 @@ class Settings(BaseSettings):
     gdelt_poll_minutes: int = 15
     broad_rss_poll_minutes: int = 5
 
+    # --- Phase 2: macro / liquidity + regime ---
+    # Optional FRED key (free at fred.stlouisfed.org). Empty -> the keyless
+    # fredgraph.csv endpoint is used instead (same data, politer cadence).
+    fred_api_key: str = ""
+
+    # Daily-ish sources: FRED updates ~16:30 ET, CBOE/FINRA after the close.
+    # 6h intervals keep things fresh without hammering anyone; NAAIM/AAII are
+    # weekly prints so 12h is plenty.
+    fred_poll_minutes: int = 360
+    cboe_poll_minutes: int = 360
+    finra_poll_minutes: int = 360
+    naaim_poll_minutes: int = 720
+    aaii_poll_minutes: int = 720
+    # Composite recompute safety-net (each ingest also recomputes on success).
+    composite_poll_minutes: int = 60
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

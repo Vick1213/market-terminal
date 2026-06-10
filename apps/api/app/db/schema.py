@@ -101,6 +101,19 @@ def init_duckdb(duck: DuckStore) -> None:
     # Migrate pre-convergence DBs in place (DuckDB supports IF NOT EXISTS here).
     duck.execute("ALTER TABLE news_items ADD COLUMN IF NOT EXISTS outlets INTEGER DEFAULT 1;")
     duck.execute("ALTER TABLE news_items ADD COLUMN IF NOT EXISTS outlet_names VARCHAR;")
+    # Daily composite Risk-On/Off snapshots (Panel c). detail = JSON with the
+    # sub-bucket z-scores/contributions + regime dials so the UI can show
+    # *what* drives the regime; one row per day (intraday recompute replaces).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS macro_composite (
+            ts      TIMESTAMP PRIMARY KEY,
+            score   DOUBLE,
+            regime  VARCHAR,
+            detail  VARCHAR
+        );
+        """
+    )
     # Retail mention/volume snapshots (ApeWisdom, StockTwits, Bluesky).
     duck.execute(
         """
@@ -197,6 +210,24 @@ def init_sqlite(sqlite: SqliteStore) -> None:
             sqlite.execute(f"ALTER TABLE news_dedupe ADD COLUMN {col};")
         except sqlite3.OperationalError:
             pass  # duplicate column — already migrated
+    # Persistent chart annotations: pinned to a chart_key at a time (+optional
+    # price/series), shared by every chart instance with that key.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS chart_markers (
+            id         TEXT PRIMARY KEY,
+            chart_key  TEXT NOT NULL,
+            t          INTEGER NOT NULL,   -- unix seconds
+            price      REAL,
+            series_id  TEXT,
+            text       TEXT,
+            created_at TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    sqlite.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chart_markers_key ON chart_markers (chart_key);"
+    )
     sqlite.execute(
         """
         CREATE TABLE IF NOT EXISTS app_meta (

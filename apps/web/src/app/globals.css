@@ -416,6 +416,160 @@ body {
   font-size: 9px;
 }
 
+/* --- liquidity & macro panel (P2) --- */
+.regime-banner {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  border: 1px solid;
+  border-radius: 6px;
+  padding: 6px 10px;
+  margin-bottom: 8px;
+}
+.regime-tag {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+}
+.regime-score {
+  font-size: 18px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.gauge-track {
+  position: relative;
+  height: 10px;
+  border: 1px solid var(--panel-border);
+  border-radius: 5px;
+  background: rgba(120, 123, 134, 0.06);
+  margin-bottom: 10px;
+  overflow: hidden;
+}
+.gauge-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  opacity: 0.8;
+}
+.gauge-zero {
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--text-dim);
+}
+
+.bucket-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.bucket-row {
+  display: grid;
+  grid-template-columns: 140px 1fr 44px;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+}
+.bucket-row.dim {
+  color: var(--text-dim);
+  opacity: 0.6;
+}
+.bucket-label {
+  color: var(--text-dim);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.bucket-weight {
+  font-size: 9px;
+  opacity: 0.7;
+}
+.bucket-track {
+  position: relative;
+  height: 7px;
+  border-radius: 3px;
+  background: rgba(120, 123, 134, 0.1);
+  overflow: hidden;
+}
+.bucket-fill {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  opacity: 0.85;
+}
+.bucket-val {
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+
+/* --- shared TradingView-style chart (MarketChart) --- */
+.mchart-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding: 4px 0 8px;
+}
+.mchart-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid var(--panel-border);
+  color: var(--text);
+}
+.mchart-chip-x {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 9px;
+  cursor: pointer;
+  padding: 0 0 0 2px;
+}
+.mchart-chip-x:hover {
+  color: var(--red);
+}
+.mchart-add {
+  font-size: 10px;
+  background: transparent;
+  color: var(--text-dim);
+  border: 1px solid var(--panel-border);
+  border-radius: 10px;
+  padding: 2px 6px;
+  cursor: pointer;
+  max-width: 130px;
+}
+.mchart-add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.expand-btn.active-mark {
+  color: var(--yellow);
+  border-color: var(--yellow);
+}
+.mchart-markers {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-top: 6px;
+}
+.mchart-marker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 10px;
+  color: var(--yellow);
+  background: rgba(240, 185, 11, 0.08);
+  border-radius: 4px;
+  padding: 2px 6px;
+}
+
 /* react-grid-layout cosmetics */
 .react-grid-item.react-grid-placeholder {
   background: var(--accent);

@@ -2,6 +2,7 @@
 
 import { Responsive, WidthProvider, type Layouts } from "react-grid-layout";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
+import { MacroPanel } from "./panels/MacroPanel";
 import { NewsPanel } from "./panels/NewsPanel";
 import { PlaceholderPanel } from "./panels/PlaceholderPanel";
 
@@ -11,7 +12,7 @@ const Grid = WidthProvider(Responsive);
 const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "system", el: <HeartbeatPanel /> },
   { i: "news", el: <NewsPanel /> },
-  { i: "liquidity", el: <PlaceholderPanel title="Liquidity & Macro" phase="P2" note="FRED-backed Risk-On/Off score" /> },
+  { i: "liquidity", el: <MacroPanel /> },
   { i: "watchlist", el: <PlaceholderPanel title="Custom Watchlist" phase="P3" note="Per-symbol quotes + badges" /> },
   { i: "multiasset", el: <PlaceholderPanel title="Multi-Asset Liquidity & Major Trades" phase="P4" note="Live crypto prints · metals · proxies" /> },
   { i: "retail", el: <PlaceholderPanel title="Retail Market Score" phase="P5" note="ApeWisdom · Bluesky · StockTwits" /> },

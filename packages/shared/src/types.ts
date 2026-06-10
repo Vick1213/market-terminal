@@ -27,7 +27,12 @@ export interface WelcomeMessage {
   topic: string;
 }
 
-export type WsMessage = HeartbeatMessage | WelcomeMessage | NewsMessage | Record<string, unknown>;
+export type WsMessage =
+  | HeartbeatMessage
+  | WelcomeMessage
+  | NewsMessage
+  | MacroMessage
+  | Record<string, unknown>;
 
 // --- Phase 1: news + sentiment ---
 
@@ -66,6 +71,109 @@ export interface SentimentResult {
   model: string;
   cached: boolean;
   flagged: boolean;
+}
+
+// --- Phase 2: macro / liquidity + regime ---
+
+export type Regime = "risk-on" | "neutral" | "risk-off" | "stress" | "unknown" | "warming-up";
+
+export interface MacroComponent {
+  series_id: string;
+  sign: number; // +1 = high is risk-on, -1 = inverted
+  value: number;
+  z: number; // sign-aligned, clamped ±3
+  ts: string; // ISO date of the latest observation
+}
+
+export interface MacroBucket {
+  key: string;
+  label: string;
+  weight: number; // planned (PLAN §3c)
+  weight_used: number; // after renormalizing over available buckets
+  z: number | null; // null = no data yet (e.g. breadth before Phase 3)
+  contribution: number; // points of the composite
+  components: MacroComponent[];
+}
+
+export interface MacroRegimeDial {
+  label: string;
+  value: number;
+  vote: number; // +1 risk-on / -1 risk-off
+}
+
+export interface MacroHeadlineDial {
+  series_id: string;
+  label: string;
+  value: number;
+  ts: string;
+}
+
+export interface MacroHistoryPoint {
+  ts: string;
+  score: number;
+}
+
+export interface MacroResponse {
+  score: number | null; // -100..+100, + = risk-on; null while warming up
+  regime: Regime | string;
+  computed_at: string | null;
+  buckets: MacroBucket[];
+  dials: Record<string, MacroRegimeDial>;
+  headline: MacroHeadlineDial[];
+  history: MacroHistoryPoint[];
+}
+
+export interface MacroMessage {
+  type: "macro";
+  score: number;
+  regime: string;
+  computed_at: string;
+}
+
+// --- chart model: composable series + persistent markers ---
+
+export interface SeriesPoint {
+  t: number; // unix seconds (UTC)
+  v: number;
+}
+
+export interface SeriesData {
+  id: string; // macro id | "PRICE:SYM" | "SENT:SYM" | "SENT:ALL"
+  label: string;
+  group: "macro" | "price" | "sentiment" | string;
+  points: SeriesPoint[];
+}
+
+export interface SeriesResponse {
+  series: SeriesData[];
+}
+
+export interface SeriesCatalogItem {
+  id: string;
+  label: string;
+}
+
+export interface SeriesCatalogGroup {
+  key: string;
+  label: string;
+  items: SeriesCatalogItem[];
+}
+
+export interface SeriesCatalogResponse {
+  groups: SeriesCatalogGroup[];
+}
+
+export interface ChartMarker {
+  id: string;
+  chart_key: string;
+  t: number; // unix seconds
+  price: number | null;
+  series_id: string | null;
+  text: string;
+}
+
+export interface MarkersResponse {
+  markers: ChartMarker[];
 }
 
 export type AssetClass = "equity" | "crypto" | "metal" | "fx" | "future";

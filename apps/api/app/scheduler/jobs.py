@@ -17,6 +17,7 @@ from datetime import datetime, timedelta, timezone
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import Settings
+from app.ingest.macro import MacroPipeline
 from app.ingest.news import NewsPipeline
 from app.ws.hub import hub
 
@@ -40,7 +41,9 @@ async def _heartbeat() -> None:
 
 
 def build_scheduler(
-    settings: Settings, news_pipeline: NewsPipeline | None = None
+    settings: Settings,
+    news_pipeline: NewsPipeline | None = None,
+    macro_pipeline: MacroPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -109,6 +112,64 @@ def build_scheduler(
             minutes=settings.news_poll_minutes,
             next_run_time=soon + timedelta(seconds=110),
             id="news_seekingalpha",
+            **common,
+        )
+
+    if macro_pipeline is not None:
+        common = dict(max_instances=1, coalesce=True, misfire_grace_time=300, jitter=30)
+        soon = datetime.now(timezone.utc)
+        # Daily-cadence sources, staggered after the news ingestors. FRED runs
+        # first since the composite leans on it hardest.
+        if settings.fred_api_key:
+            scheduler.add_job(
+                macro_pipeline.run_fred,
+                trigger="interval",
+                minutes=settings.fred_poll_minutes,
+                next_run_time=soon + timedelta(seconds=140),
+                id="macro_fred",
+                **common,
+            )
+        else:
+            log.info("fred ingestor disabled (no MARKET_FRED_API_KEY — free at "
+                     "fred.stlouisfed.org/docs/api/api_key.html)")
+        scheduler.add_job(
+            macro_pipeline.run_cboe,
+            trigger="interval",
+            minutes=settings.cboe_poll_minutes,
+            next_run_time=soon + timedelta(seconds=170),
+            id="macro_cboe",
+            **common,
+        )
+        scheduler.add_job(
+            macro_pipeline.run_finra,
+            trigger="interval",
+            minutes=settings.finra_poll_minutes,
+            next_run_time=soon + timedelta(seconds=200),
+            id="macro_finra",
+            **common,
+        )
+        scheduler.add_job(
+            macro_pipeline.run_naaim,
+            trigger="interval",
+            minutes=settings.naaim_poll_minutes,
+            next_run_time=soon + timedelta(seconds=230),
+            id="macro_naaim",
+            **common,
+        )
+        scheduler.add_job(
+            macro_pipeline.run_aaii,
+            trigger="interval",
+            minutes=settings.aaii_poll_minutes,
+            next_run_time=soon + timedelta(seconds=260),
+            id="macro_aaii",
+            **common,
+        )
+        # Safety-net recompute (each ingest already recomputes on success).
+        scheduler.add_job(
+            macro_pipeline.recompute_composite,
+            trigger="interval",
+            minutes=settings.composite_poll_minutes,
+            id="macro_composite",
             **common,
         )
 

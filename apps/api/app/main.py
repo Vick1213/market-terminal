@@ -21,9 +21,13 @@ from app.db.duck import DuckStore
 from app.db.schema import init_all
 from app.db.sqlite import SqliteStore
 from app.ingest.http import HttpClient
+from app.ingest.macro import MacroPipeline
 from app.ingest.news import NewsPipeline
 from app.routers import health as health_router
+from app.routers import macro as macro_router
+from app.routers import markers as markers_router
 from app.routers import news as news_router
+from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
 from app.routers import ws as ws_router
 from app.scheduler.jobs import build_scheduler
@@ -64,7 +68,9 @@ async def lifespan(app: FastAPI):
         edgar_lookback_days=settings.edgar_lookback_days,
     )
 
-    scheduler = build_scheduler(settings, news_pipeline)
+    macro_pipeline = MacroPipeline(duck, hub, http, fred_api_key=settings.fred_api_key)
+
+    scheduler = build_scheduler(settings, news_pipeline, macro_pipeline)
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
 
@@ -74,6 +80,7 @@ async def lifespan(app: FastAPI):
     app.state.http = http
     app.state.sentiment = sentiment
     app.state.news_pipeline = news_pipeline
+    app.state.macro_pipeline = macro_pipeline
     app.state.scheduler = scheduler
     app.state.hub = hub
 
@@ -103,6 +110,9 @@ def create_app() -> FastAPI:
     app.include_router(health_router.router)
     app.include_router(sentiment_router.router)
     app.include_router(news_router.router)
+    app.include_router(macro_router.router)
+    app.include_router(series_router.router)
+    app.include_router(markers_router.router)
     app.include_router(ws_router.router)
 
     @app.get("/", tags=["meta"])

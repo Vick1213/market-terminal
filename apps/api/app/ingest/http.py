@@ -63,6 +63,13 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "efts.sec.gov": (8, 1.0),
     "stooq.com": (1, 2.0),
     "finnhub.io": (50, 60.0),
+    "api.stlouisfed.org": (100, 60.0),
+    "fred.stlouisfed.org": (1, 1.0),
+    "cdn.cboe.com": (2, 1.0),
+    "www.cboe.com": (1, 2.0),
+    "cdn.finra.org": (2, 1.0),
+    "naaim.org": (1, 2.0),
+    "www.aaii.com": (1, 2.0),
 }
 
 
