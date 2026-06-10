@@ -6,6 +6,7 @@ import { MacroPanel } from "./panels/MacroPanel";
 import { MultiAssetPanel } from "./panels/MultiAssetPanel";
 import { NewsPanel } from "./panels/NewsPanel";
 import { PlaceholderPanel } from "./panels/PlaceholderPanel";
+import { RetailPanel } from "./panels/RetailPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
 
 const Grid = WidthProvider(Responsive);
@@ -17,7 +18,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "liquidity", el: <MacroPanel /> },
   { i: "watchlist", el: <WatchlistPanel /> },
   { i: "multiasset", el: <MultiAssetPanel /> },
-  { i: "retail", el: <PlaceholderPanel title="Retail Market Score" phase="P5" note="ApeWisdom · Bluesky · StockTwits" /> },
+  { i: "retail", el: <RetailPanel /> },
   { i: "cookbook", el: <PlaceholderPanel title="Correlation Cookbook" phase="P6" note="12 intermarket rule-cards" /> },
 ];
 

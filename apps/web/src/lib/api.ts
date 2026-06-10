@@ -5,6 +5,8 @@ import type {
   MarkersResponse,
   MultiAssetResponse,
   NewsResponse,
+  RetailResponse,
+  RetailSymbolResponse,
   SeriesCatalogResponse,
   SeriesResponse,
   WatchlistQuote,
@@ -93,6 +95,20 @@ export async function removeWatchlistSymbol(symbol: string): Promise<void> {
 export async function fetchMultiAsset(): Promise<MultiAssetResponse> {
   const res = await fetch(`${API_URL}/api/multiasset`, { cache: "no-store" });
   if (!res.ok) throw new Error(`multiasset request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRetail(limit = 30): Promise<RetailResponse> {
+  const res = await fetch(`${API_URL}/api/retail?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`retail request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchRetailSymbol(symbol: string): Promise<RetailSymbolResponse> {
+  const res = await fetch(`${API_URL}/api/retail/${encodeURIComponent(symbol)}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`retail drill failed: ${res.status}`);
   return res.json();
 }
 

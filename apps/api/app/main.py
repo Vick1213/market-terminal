@@ -25,11 +25,13 @@ from app.ingest.http import HttpClient
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
+from app.ingest.retail import RetailPipeline
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
 from app.routers import multiasset as multiasset_router
 from app.routers import news as news_router
+from app.routers import retail as retail_router
 from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
 from app.routers import watchlist as watchlist_router
@@ -74,8 +76,21 @@ async def lifespan(app: FastAPI):
 
     macro_pipeline = MacroPipeline(duck, hub, http, fred_api_key=settings.fred_api_key)
     multiasset_pipeline = MultiAssetPipeline(duck, sqlite, http)
+    retail_pipeline = RetailPipeline(
+        duck,
+        sqlite,
+        sentiment,
+        hub,
+        http,
+        filters=settings.apewisdom_filters,
+        pages=settings.apewisdom_pages,
+        spike_top_n=settings.retail_spike_top_n,
+        message_retention_days=settings.retail_message_retention_days,
+    )
 
-    scheduler = build_scheduler(settings, news_pipeline, macro_pipeline, multiasset_pipeline)
+    scheduler = build_scheduler(
+        settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline
+    )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
 
@@ -100,6 +115,7 @@ async def lifespan(app: FastAPI):
     app.state.news_pipeline = news_pipeline
     app.state.macro_pipeline = macro_pipeline
     app.state.multiasset_pipeline = multiasset_pipeline
+    app.state.retail_pipeline = retail_pipeline
     app.state.crypto_streamer = crypto_streamer
     app.state.scheduler = scheduler
     app.state.hub = hub
@@ -135,6 +151,7 @@ def create_app() -> FastAPI:
     app.include_router(series_router.router)
     app.include_router(markers_router.router)
     app.include_router(multiasset_router.router)
+    app.include_router(retail_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(ws_router.router)
 

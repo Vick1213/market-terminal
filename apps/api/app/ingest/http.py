@@ -70,6 +70,10 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "cdn.finra.org": (2, 1.0),
     "naaim.org": (1, 2.0),
     "www.aaii.com": (1, 2.0),
+    "apewisdom.io": (1, 2.0),
+    "api.stocktwits.com": (1, 3.0),
+    "api.bsky.app": (3, 1.0),
+    "tradestie.com": (1, 5.0),
 }
 
 

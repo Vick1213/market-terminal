@@ -130,6 +130,27 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # ApeWisdom ships rank_24h_ago; persisting it gives the leaderboard its
+    # rank-velocity term without a second snapshot lookup.
+    duck.execute("ALTER TABLE ts_retail ADD COLUMN IF NOT EXISTS rank_prev INTEGER;")
+    # Individual scored social messages (StockTwits/Bluesky) behind the
+    # per-symbol drill-down. Only spiking tickers are ever polled, and rows
+    # age out on a short retention, so this stays small.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS retail_messages (
+            id      VARCHAR PRIMARY KEY,  -- source-prefixed message id
+            source  VARCHAR NOT NULL,     -- stocktwits | bluesky
+            symbol  VARCHAR NOT NULL,
+            ts      TIMESTAMP NOT NULL,
+            text    VARCHAR,
+            url     VARCHAR,
+            score   DOUBLE,               -- FinBERT -1..+1
+            label   VARCHAR,
+            tag     VARCHAR               -- human Bullish/Bearish (StockTwits)
+        );
+        """
+    )
     # Individual large prints / trade tape (CCXT crypto streams, proxies).
     duck.execute(
         """

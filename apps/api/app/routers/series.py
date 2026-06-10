@@ -57,7 +57,12 @@ MACRO_LABELS: dict[str, str] = {
     "PC_EQUITY": "Put/Call equity",
     "PC_INDEX": "Put/Call index",
     "FINRA_SHORT_RATIO": "Short-sale volume %",
+    "RETAIL_SENT": "Retail sentiment (-1..+1)",
+    "RETAIL_CHATTER_Z": "Retail chatter z",
+    "RETAIL_MENTIONS": "Retail mentions (total)",
 }
+
+RETAIL_CATALOG_LIMIT = 30  # top movers only — the long tail isn't chartworthy
 
 
 class SeriesPoint(BaseModel):
@@ -119,9 +124,24 @@ async def catalog(request: Request) -> CatalogResponse:
                 "WHERE symbol IS NOT NULL AND score IS NOT NULL ORDER BY symbol"
             )
         ]
-        return macro_ids, sent_syms, _watchlist(sqlite)
+        latest = duck.fetchone(
+            "SELECT max(ts) FROM ts_retail WHERE source LIKE 'apewisdom:%'"
+        )
+        retail_syms = (
+            [
+                r[0]
+                for r in duck.fetchall(
+                    "SELECT symbol FROM ts_retail WHERE source LIKE 'apewisdom:%' "
+                    "AND ts = ? GROUP BY symbol ORDER BY SUM(mentions) DESC LIMIT ?",
+                    [latest[0], RETAIL_CATALOG_LIMIT],
+                )
+            ]
+            if latest and latest[0]
+            else []
+        )
+        return macro_ids, sent_syms, retail_syms, _watchlist(sqlite)
 
-    macro_ids, sent_syms, watchlist = await loop.run_in_executor(None, _q)
+    macro_ids, sent_syms, retail_syms, watchlist = await loop.run_in_executor(None, _q)
 
     return CatalogResponse(
         groups=[
@@ -136,6 +156,13 @@ async def catalog(request: Request) -> CatalogResponse:
                 label="Price",
                 items=[
                     CatalogItem(id=f"PRICE:{s}", label=f"{s} close") for s, _ in watchlist
+                ],
+            ),
+            CatalogGroup(
+                key="retail",
+                label="Retail mentions",
+                items=[
+                    CatalogItem(id=f"RETAIL:{s}", label=f"{s} mentions") for s in retail_syms
                 ],
             ),
             CatalogGroup(
@@ -213,6 +240,20 @@ async def series(
                         points.append(point)
                 label = "News sentiment (all)" if sym == "ALL" else f"News sentiment {sym}"
                 out.append(SeriesData(id=sid, label=label, group="sentiment", points=points))
+            elif sid.startswith("RETAIL:"):
+                sym = sid.split(":", 1)[1]
+                rows = duck.fetchall(
+                    "SELECT ts, SUM(mentions) FROM ts_retail "
+                    "WHERE source LIKE 'apewisdom:%' AND symbol = ? AND ts >= ? "
+                    "GROUP BY ts ORDER BY ts",
+                    [sym, cutoff],
+                )
+                out.append(
+                    SeriesData(
+                        id=sid, label=f"{sym} mentions", group="retail",
+                        points=[SeriesPoint(t=_epoch(r[0]), v=float(r[1] or 0)) for r in rows],
+                    )
+                )
             else:
                 rows = duck.fetchall(
                     "SELECT ts, value FROM ts_macro WHERE series_id = ? AND ts >= ? "

@@ -95,6 +95,20 @@ class Settings(BaseSettings):
     # FINRA per-ticker short-vol + CoinPaprika global aggregates (daily-ish).
     flows_poll_minutes: int = 360
 
+    # --- Phase 5: retail market score ---
+    # ApeWisdom filters to merge (all-stocks + all-crypto cover the board
+    # without double-counting; add "wallstreetbets" etc. for sub-views).
+    apewisdom_filters: list[str] = ["all-stocks", "all-crypto"]
+    apewisdom_pages: int = 2  # 100 tickers/filter — plenty past the spike tail
+    # ApeWisdom updates ~2x/hr server-side; 20 min keeps snapshots distinct.
+    apewisdom_poll_minutes: int = 20
+    # StockTwits/Bluesky text polls (spiking tickers ONLY, per PLAN cadence).
+    retail_social_poll_minutes: int = 30
+    retail_spike_top_n: int = 8
+    retail_message_retention_days: int = 14
+    # Tradestie WSB cross-confirmation (Cloudflare-gated — may never deliver).
+    tradestie_poll_minutes: int = 30
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

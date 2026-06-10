@@ -20,6 +20,7 @@ from app.config import Settings
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
+from app.ingest.retail import RetailPipeline
 from app.ws.hub import hub
 
 log = logging.getLogger("market.scheduler")
@@ -46,6 +47,7 @@ def build_scheduler(
     news_pipeline: NewsPipeline | None = None,
     macro_pipeline: MacroPipeline | None = None,
     multiasset_pipeline: MultiAssetPipeline | None = None,
+    retail_pipeline: RetailPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -204,6 +206,36 @@ def build_scheduler(
             minutes=settings.flows_poll_minutes,
             next_run_time=soon + timedelta(seconds=320),
             id="multiasset_paprika",
+            **common,
+        )
+
+    if retail_pipeline is not None:
+        common = dict(max_instances=1, coalesce=True, misfire_grace_time=300, jitter=30)
+        soon = datetime.now(timezone.utc)
+        # ApeWisdom snapshots first so the social poll has a spike list; the
+        # social text run waits for FinBERT to be warm (news jobs load it).
+        scheduler.add_job(
+            retail_pipeline.run_apewisdom,
+            trigger="interval",
+            minutes=settings.apewisdom_poll_minutes,
+            next_run_time=soon + timedelta(seconds=65),
+            id="retail_apewisdom",
+            **common,
+        )
+        scheduler.add_job(
+            retail_pipeline.run_social,
+            trigger="interval",
+            minutes=settings.retail_social_poll_minutes,
+            next_run_time=soon + timedelta(seconds=180),
+            id="retail_social",
+            **common,
+        )
+        scheduler.add_job(
+            retail_pipeline.run_tradestie,
+            trigger="interval",
+            minutes=settings.tradestie_poll_minutes,
+            next_run_time=soon + timedelta(seconds=210),
+            id="retail_tradestie",
             **common,
         )
 

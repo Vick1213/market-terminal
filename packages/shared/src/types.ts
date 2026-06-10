@@ -35,6 +35,7 @@ export type WsMessage =
   | TradeMessage
   | DepthMessage
   | QuoteMessage
+  | RetailWsMessage
   | Record<string, unknown>;
 
 // --- Phase 1: news + sentiment ---
@@ -295,4 +296,83 @@ export interface MultiAssetResponse {
   metals: MetalRow[];
   equities: EquityFlow[];
   freshness: Record<string, string>;
+}
+
+// --- Phase 5: retail market score ---
+
+export interface RetailGauge {
+  score: number | null; // -100..+100 mention-weighted bull/bear
+  sentiment: number | null;
+  chatter_z: number | null;
+  total_mentions: number | null;
+  scored_symbols: number;
+  computed_at: string | null;
+}
+
+export interface RetailLeader {
+  symbol: string;
+  asset_class: string;
+  mentions: number;
+  mentions_24h_ago: number | null;
+  mention_z: number;
+  rank: number | null;
+  rank_velocity: number | null;
+  upvotes: number | null;
+  sentiment: number | null;
+  sentiment_sources: string[];
+  sources: number; // cross-source confirmation count
+  divergence: boolean;
+  spike_score: number;
+}
+
+export interface RetailResponse {
+  gauge: RetailGauge;
+  leaderboard: RetailLeader[];
+  freshness: Record<string, string | null>;
+}
+
+export interface RetailHistoryPoint {
+  t: number; // unix seconds
+  mentions: number;
+  rank: number | null;
+}
+
+export interface RetailSourceStat {
+  source: string;
+  ts: string;
+  mentions: number | null;
+  sentiment: number | null;
+}
+
+export interface RetailMessage {
+  source: string;
+  ts: string;
+  text: string;
+  url: string | null;
+  score: number | null;
+  label: string | null;
+  tag: string | null;
+}
+
+export interface RetailHeadline {
+  title: string;
+  url: string | null;
+  published: string;
+  score: number | null;
+  label: string | null;
+}
+
+export interface RetailSymbolResponse {
+  symbol: string;
+  history: RetailHistoryPoint[];
+  sources: RetailSourceStat[];
+  messages: RetailMessage[];
+  headlines: RetailHeadline[];
+}
+
+export interface RetailWsMessage {
+  type: "retail";
+  computed_at: string | null;
+  score: number | null;
+  total_mentions: number | null;
 }
