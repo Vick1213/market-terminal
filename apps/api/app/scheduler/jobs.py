@@ -18,6 +18,7 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from app.config import Settings
 from app.ingest.macro import MacroPipeline
+from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
 from app.ws.hub import hub
 
@@ -44,6 +45,7 @@ def build_scheduler(
     settings: Settings,
     news_pipeline: NewsPipeline | None = None,
     macro_pipeline: MacroPipeline | None = None,
+    multiasset_pipeline: MultiAssetPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -170,6 +172,38 @@ def build_scheduler(
             trigger="interval",
             minutes=settings.composite_poll_minutes,
             id="macro_composite",
+            **common,
+        )
+
+    if multiasset_pipeline is not None:
+        soon = datetime.now(timezone.utc)
+        # Metals spot is a fast keyless poll; jitter omitted so the ~60s
+        # cadence stays even. FINRA/paprika are daily-cadence backfills.
+        scheduler.add_job(
+            multiasset_pipeline.run_metals,
+            trigger="interval",
+            seconds=settings.metals_poll_seconds,
+            next_run_time=soon + timedelta(seconds=10),
+            id="multiasset_metals",
+            max_instances=1,
+            coalesce=True,
+            misfire_grace_time=30,
+        )
+        common = dict(max_instances=1, coalesce=True, misfire_grace_time=300, jitter=30)
+        scheduler.add_job(
+            multiasset_pipeline.run_short_vol,
+            trigger="interval",
+            minutes=settings.flows_poll_minutes,
+            next_run_time=soon + timedelta(seconds=290),
+            id="multiasset_short_vol",
+            **common,
+        )
+        scheduler.add_job(
+            multiasset_pipeline.run_paprika,
+            trigger="interval",
+            minutes=settings.flows_poll_minutes,
+            next_run_time=soon + timedelta(seconds=320),
+            id="multiasset_paprika",
             **common,
         )
 

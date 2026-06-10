@@ -32,6 +32,9 @@ export type WsMessage =
   | WelcomeMessage
   | NewsMessage
   | MacroMessage
+  | TradeMessage
+  | DepthMessage
+  | QuoteMessage
   | Record<string, unknown>;
 
 // --- Phase 1: news + sentiment ---
@@ -208,4 +211,88 @@ export interface WatchlistQuote {
 
 export interface WatchlistResponse {
   quotes: WatchlistQuote[];
+}
+
+// --- Phase 4: multi-asset liquidity & major trades ---
+
+export interface CryptoQuote {
+  exchange: string;
+  symbol: string;
+  price: number | null;
+  ts: string | null;
+  trades_seen: number;
+  connected: boolean;
+}
+
+export interface DepthSnapshot {
+  exchange: string;
+  symbol: string;
+  ts: string;
+  imbalance: number; // (bid-ask)/(bid+ask) over top levels, -1..+1
+  bid_depth: number;
+  ask_depth: number;
+  mid: number;
+  spread_bp: number;
+}
+
+export interface TradePrint {
+  exchange: string;
+  symbol: string;
+  ts: string;
+  price: number;
+  size: number;
+  side: string | null;
+  notional: number;
+  z?: number | null; // only on WS-pushed prints
+}
+
+export interface TradeMessage extends Omit<TradePrint, "side"> {
+  type: "trade";
+  side: string;
+}
+
+export interface DepthMessage extends DepthSnapshot {
+  type: "depth";
+}
+
+export interface QuoteMessage {
+  type: "quote";
+  quotes: CryptoQuote[];
+}
+
+export interface CryptoSection {
+  live: boolean;
+  quotes: CryptoQuote[];
+  books: DepthSnapshot[];
+  prints: TradePrint[];
+  btc_dominance: number | null;
+  volume_24h_usd: number | null;
+}
+
+export interface MetalRow {
+  symbol: string; // XAU | XAG
+  spot: number | null;
+  spot_ts: string | null;
+  futures_close: number | null;
+  futures_ts: string | null;
+  basis: number | null; // futures - spot
+  basis_pct: number | null;
+  etf_symbol: string | null; // GLD | SLV flow proxy
+  etf_volume_z: number | null;
+}
+
+export interface EquityFlow {
+  symbol: string;
+  volume_z: number | null;
+  short_ratio: number | null;
+  short_trend_z: number | null;
+  accumulation: number | null; // + = accumulation
+  ts: string | null;
+}
+
+export interface MultiAssetResponse {
+  crypto: CryptoSection;
+  metals: MetalRow[];
+  equities: EquityFlow[];
+  freshness: Record<string, string>;
 }

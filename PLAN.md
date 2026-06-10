@@ -339,4 +339,25 @@ We are building a **local-first, fully private market-intelligence terminal**: a
 - **Latency honesty & ToS.** → badge every datum's freshness (LIVE crypto vs DELAYED equity); weekly/lagged sources (13F ~45d, COT weekly, OTC/ATS ~4wk, CBOE 15-min) labeled as-of. The sentiment layer is clean (open weights); ToS risk lives in scraping — keep all data **strictly local, personal, no redistribution**.
 - **Backtest pitfalls.** → shift signals +1 bar (look-ahead), guard survivorship, out-of-sample/walk-forward before trusting; re-run quarterly to catch edge decay.
 
+## 9. Post-P4 API Integration Backlog (added 2026-06-09, after Panel e shipped)
+
+> Screened from a public-API list against the project's constraints (free tier real, adds something our verified sources don't, not another fragile scraper). **Verify each free tier at build time** — these were screened from a directory listing, not adversarially fact-checked like §5. Integrate in this order:
+
+| Priority | API | Free tier | What it adds | Plugs into |
+|---|---|---|---|---|
+| **1** | **Alpaca** (key, no funded account needed) | IEX real-time WS quotes + free historical bars, US equities/ETFs | **Upgrades the equity leg from EOD-delayed to live-ish** — the single biggest honesty upgrade: Watchlist (d) intraday rows + equity prints/quotes in (e) alongside crypto | (d), (e); replaces yfinance as intraday primary, yfinance→fallback |
+| **2** | **Tradier** (free dev sandbox token) | Delayed quotes + **full options chains w/ greeks & OI** | A *stable, documented* options source — replaces the fragile CBOE options JSON + yfinance `option_chain` for the GEX adapter and options-OI-surge proxy | (e) accumulation score, §6 #8 GEX |
+| **3** | **Fed Treasury FiscalData** (no key) | Daily Treasury Statement: **TGA operating balance**, auctions, debt | Second source for the net-liquidity calc (`WALCL−RRP−TGA`) — FRED's `WTREGEN` is weekly/lagged; DTS is daily and authoritative | (c) net liquidity, cookbook #8 |
+| **4** | **CongressInvests** (key, tier unverified) | Real-time Senate EFD / House Clerk stock-trade disclosures | Congressional cluster-buys = same pattern-edge as Form 4 insider clusters, different cohort | §6 extras, alongside #4 Form-4 tracker |
+| **5** | **WallstreetBets API** (no key, single operator) | Pre-scored WSB comment sentiment | Cross-confirmation for the ApeWisdom spike signal (which has NO sentiment) — multi-source confirmation rule needs exactly this | (b) Phase 5 |
+| **6** | **Twelve Data** (key, 800 credits/day, 8/min) | Real-time + historical stocks/FX/crypto JSON | Clean quota'd fallback when yfinance is banned and Alpaca is down — redundancy-by-design for the price plumbing | (d), (e) fallback chain |
+| **7** | **Financial Modeling Prep** (key, ~250 req/day) | Earnings calendar, insider trades, fundamentals | Cleanest free **earnings calendar** (§6 #10 says EDGAR scraping for this is fragile) | §6 #10 calendar |
+| **8** | **Polygon** (key, 5 req/min, EOD) | Historical OHLC, reference/ticker metadata | Another history backup + authoritative symbol list for cashtag validation | (d) history, (b) anti-gaming |
+| **9** | **Econdb** (no key) | Global macro (ECB/BoJ/PBoC etc.) | Extends the cookbook beyond Fed-only liquidity (global net-liquidity card) | (f) new cards |
+| **10** | **OpenFIGI** (key) | Bloomberg symbology mapping | Free authoritative symbol validation for the `$A/$ON/$IT` cashtag-collision filter | (b) anti-gaming |
+
+**Screened out:** IEX Cloud (**retired Aug 2024 — dead**, despite directory listings); Alpha Vantage (25 req/day total — stays on the §5 avoid list); Marketstack/StockData/Finage/Intrinio/IG/SmartAPI/Real Time Finance (paywalled or trivial free tiers); Aletheia (EDGAR already covers Form 4/filings free); BriefTape/Helium/Sugra/Styvio/Hotstoks/EconPulse (new single-operator services, unverified — re-screen later); Yahoo Finance "API" listing (third-party paid wrapper); all banking/payments/IBAN/VAT/accounting entries (out of scope); Portfolio Optimizer (external compute violates local-only; vectorbt covers Phase 8 locally).
+
+---
+
 **Sources for the two time-sensitive 2026 pivots I re-verified:** [Bluesky firehose free / no paid tier (Blotato 2026)](https://www.blotato.com/blog/bluesky-api-pricing) · [Bluesky cashtags Jan 2026 (TechCrunch)](https://techcrunch.com/2026/01/16/bluesky-rolls-out-cashtags-and-live-badges-amid-a-boost-in-app-installs/) · [CCXT Pro WebSockets merged into free CCXT (GitHub #15171)](https://github.com/ccxt/ccxt/issues/15171). All other source URLs are inline in the research dimensions above and the master table.

@@ -145,6 +145,19 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # Per-ticker FINRA daily short-sale volume (Panel e accumulation proxy).
+    # Short SELL volume incl. MM hedging, NOT short interest (PLAN §3e).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_short_vol (
+            symbol        VARCHAR NOT NULL,
+            ts            TIMESTAMP NOT NULL,
+            short_volume  DOUBLE,
+            total_volume  DOUBLE,
+            PRIMARY KEY (symbol, ts)
+        );
+        """
+    )
 
 
 def init_sqlite(sqlite: SqliteStore) -> None:

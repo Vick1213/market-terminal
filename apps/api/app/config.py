@@ -77,6 +77,24 @@ class Settings(BaseSettings):
     # Composite recompute safety-net (each ingest also recomputes on success).
     composite_poll_minutes: int = 60
 
+    # --- Phase 4: multi-asset liquidity & major trades ---
+    # CCXT Pro public WebSocket streams (no keys). Coinbase + Kraken work from
+    # US IPs; add "binance" here if your region allows it.
+    crypto_exchanges: list[str] = ["coinbase", "kraken"]
+    crypto_symbols: list[str] = ["BTC/USD", "ETH/USD"]
+    # A print is "large" at >= this notional (PLAN §3e: >$250k) OR at a rolling
+    # z-score >= large_print_z, with a floor so a z-spike on a quiet tape can't
+    # flag a $500 trade.
+    large_print_notional: float = 250_000
+    large_print_z: float = 4.0
+    large_print_floor: float = 25_000
+    # Stored large prints are pruned past this horizon (tape history).
+    trades_retention_days: int = 14
+    # gold-api.com spot poll (keyless, unlimited; plan says 30-60s).
+    metals_poll_seconds: int = 60
+    # FINRA per-ticker short-vol + CoinPaprika global aggregates (daily-ish).
+    flows_poll_minutes: int = 360
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

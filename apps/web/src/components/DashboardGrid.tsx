@@ -3,6 +3,7 @@
 import { Responsive, WidthProvider, type Layouts } from "react-grid-layout";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
 import { MacroPanel } from "./panels/MacroPanel";
+import { MultiAssetPanel } from "./panels/MultiAssetPanel";
 import { NewsPanel } from "./panels/NewsPanel";
 import { PlaceholderPanel } from "./panels/PlaceholderPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
@@ -15,7 +16,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "news", el: <NewsPanel /> },
   { i: "liquidity", el: <MacroPanel /> },
   { i: "watchlist", el: <WatchlistPanel /> },
-  { i: "multiasset", el: <PlaceholderPanel title="Multi-Asset Liquidity & Major Trades" phase="P4" note="Live crypto prints · metals · proxies" /> },
+  { i: "multiasset", el: <MultiAssetPanel /> },
   { i: "retail", el: <PlaceholderPanel title="Retail Market Score" phase="P5" note="ApeWisdom · Bluesky · StockTwits" /> },
   { i: "cookbook", el: <PlaceholderPanel title="Correlation Cookbook" phase="P6" note="12 intermarket rule-cards" /> },
 ];

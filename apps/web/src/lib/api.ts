@@ -3,6 +3,7 @@ import type {
   HealthResponse,
   MacroResponse,
   MarkersResponse,
+  MultiAssetResponse,
   NewsResponse,
   SeriesCatalogResponse,
   SeriesResponse,
@@ -87,6 +88,12 @@ export async function removeWatchlistSymbol(symbol: string): Promise<void> {
   const qs = new URLSearchParams({ symbol });
   const res = await fetch(`${API_URL}/api/watchlist?${qs}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`watchlist remove failed: ${res.status}`);
+}
+
+export async function fetchMultiAsset(): Promise<MultiAssetResponse> {
+  const res = await fetch(`${API_URL}/api/multiasset`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`multiasset request failed: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchNews(symbol?: string, limit = 100): Promise<NewsResponse> {

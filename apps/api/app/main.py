@@ -20,12 +20,15 @@ from app.config import get_settings
 from app.db.duck import DuckStore
 from app.db.schema import init_all
 from app.db.sqlite import SqliteStore
+from app.ingest.crypto import CryptoStreamer
 from app.ingest.http import HttpClient
 from app.ingest.macro import MacroPipeline
+from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
+from app.routers import multiasset as multiasset_router
 from app.routers import news as news_router
 from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
@@ -70,10 +73,24 @@ async def lifespan(app: FastAPI):
     )
 
     macro_pipeline = MacroPipeline(duck, hub, http, fred_api_key=settings.fred_api_key)
+    multiasset_pipeline = MultiAssetPipeline(duck, sqlite, http)
 
-    scheduler = build_scheduler(settings, news_pipeline, macro_pipeline)
+    scheduler = build_scheduler(settings, news_pipeline, macro_pipeline, multiasset_pipeline)
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
+
+    # Long-running CCXT Pro streams live outside the scheduler (asyncio tasks).
+    crypto_streamer = CryptoStreamer(
+        duck,
+        hub,
+        exchanges=settings.crypto_exchanges,
+        symbols=settings.crypto_symbols,
+        large_notional=settings.large_print_notional,
+        large_z=settings.large_print_z,
+        large_floor=settings.large_print_floor,
+        retention_days=settings.trades_retention_days,
+    )
+    crypto_streamer.start()
 
     app.state.settings = settings
     app.state.duck = duck
@@ -82,6 +99,8 @@ async def lifespan(app: FastAPI):
     app.state.sentiment = sentiment
     app.state.news_pipeline = news_pipeline
     app.state.macro_pipeline = macro_pipeline
+    app.state.multiasset_pipeline = multiasset_pipeline
+    app.state.crypto_streamer = crypto_streamer
     app.state.scheduler = scheduler
     app.state.hub = hub
 
@@ -89,6 +108,7 @@ async def lifespan(app: FastAPI):
         yield
     finally:
         log.info("shutting down")
+        await crypto_streamer.stop()
         scheduler.shutdown(wait=False)
         sentiment.close()
         await http.aclose()
@@ -114,6 +134,7 @@ def create_app() -> FastAPI:
     app.include_router(macro_router.router)
     app.include_router(series_router.router)
     app.include_router(markers_router.router)
+    app.include_router(multiasset_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(ws_router.router)
 
