@@ -6,6 +6,8 @@ import type {
   NewsResponse,
   SeriesCatalogResponse,
   SeriesResponse,
+  WatchlistQuote,
+  WatchlistResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -56,6 +58,35 @@ export async function createMarker(marker: Omit<ChartMarker, "id">): Promise<Cha
 export async function deleteMarker(id: string): Promise<void> {
   const res = await fetch(`${API_URL}/api/markers/${id}`, { method: "DELETE" });
   if (!res.ok) throw new Error(`marker delete failed: ${res.status}`);
+}
+
+export async function fetchWatchlist(): Promise<WatchlistResponse> {
+  const res = await fetch(`${API_URL}/api/watchlist`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`watchlist request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function addWatchlistSymbol(item: {
+  symbol: string;
+  asset_class: string;
+  display_name?: string;
+}): Promise<WatchlistQuote> {
+  const res = await fetch(`${API_URL}/api/watchlist`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) {
+    const detail = await res.json().catch(() => null);
+    throw new Error(detail?.detail ?? `watchlist add failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function removeWatchlistSymbol(symbol: string): Promise<void> {
+  const qs = new URLSearchParams({ symbol });
+  const res = await fetch(`${API_URL}/api/watchlist?${qs}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(`watchlist remove failed: ${res.status}`);
 }
 
 export async function fetchNews(symbol?: string, limit = 100): Promise<NewsResponse> {

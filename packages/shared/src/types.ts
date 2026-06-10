@@ -183,3 +183,29 @@ export interface WatchlistItem {
   asset_class: AssetClass;
   display_name?: string;
 }
+
+// --- Phase 3: watchlist panel ---
+
+export interface WatchlistQuote {
+  symbol: string;
+  asset_class: AssetClass | string;
+  display_name: string | null;
+  close: number | null;
+  prev_close: number | null;
+  change_pct: number | null; // last close vs prior close
+  open: number | null;
+  high: number | null;
+  low: number | null;
+  volume: number | null;
+  ts: string | null; // ISO timestamp of the latest daily bar
+  spark: number[]; // last ~30 daily closes, oldest first
+  sent_score: number | null;
+  sent_label: string | null;
+  sent_title: string | null;
+  sent_url: string | null;
+  sent_published: string | null;
+}
+
+export interface WatchlistResponse {
+  quotes: WatchlistQuote[];
+}

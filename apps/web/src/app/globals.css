@@ -535,6 +535,97 @@ body {
   font-weight: 600;
 }
 
+/* --- custom watchlist panel (P3) --- */
+.wl-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.wl-table th {
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-dim);
+  text-align: left;
+  padding: 2px 8px 6px 0;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+.wl-table td {
+  padding: 4px 8px 4px 0;
+  border-top: 1px solid var(--panel-border);
+  white-space: nowrap;
+}
+.wl-table .num {
+  text-align: right;
+}
+.wl-row {
+  cursor: pointer;
+}
+.wl-row:hover td {
+  background: rgba(41, 98, 255, 0.06);
+}
+.wl-sym {
+  font-weight: 600;
+  color: var(--text);
+}
+.wl-name {
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.wl-spark {
+  display: inline-block;
+  vertical-align: middle;
+}
+.wl-headline {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11px;
+}
+.wl-headline .sent-dot {
+  display: inline-block;
+  margin-right: 5px;
+  vertical-align: middle;
+}
+.wl-remove {
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 11px;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.wl-remove:hover {
+  color: var(--red);
+}
+.wl-add {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.wl-add-input,
+.wl-add-select {
+  background: var(--bg);
+  border: 1px solid var(--panel-border);
+  border-radius: 4px;
+  color: var(--text);
+  font-size: 12px;
+  padding: 4px 8px;
+}
+.wl-add-input {
+  width: 280px;
+}
+.wl-add-input:focus,
+.wl-add-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
 /* --- shared TradingView-style chart (MarketChart) --- */
 .mchart-toolbar {
   display: flex;

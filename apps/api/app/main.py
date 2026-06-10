@@ -29,6 +29,7 @@ from app.routers import markers as markers_router
 from app.routers import news as news_router
 from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
+from app.routers import watchlist as watchlist_router
 from app.routers import ws as ws_router
 from app.scheduler.jobs import build_scheduler
 from app.sentiment import SentimentService
@@ -113,6 +114,7 @@ def create_app() -> FastAPI:
     app.include_router(macro_router.router)
     app.include_router(series_router.router)
     app.include_router(markers_router.router)
+    app.include_router(watchlist_router.router)
     app.include_router(ws_router.router)
 
     @app.get("/", tags=["meta"])
