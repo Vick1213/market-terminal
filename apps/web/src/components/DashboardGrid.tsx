@@ -41,6 +41,7 @@ export function DashboardGrid() {
       rowHeight={48}
       margin={[10, 10]}
       draggableHandle=".panel-head"
+      draggableCancel="button, a, select, input"
     >
       {PANELS.map((p) => (
         <div key={p.i}>{p.el}</div>
