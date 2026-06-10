@@ -52,7 +52,9 @@ CBOE_PC_SERIES = {
     "PC_INDEX": "INDEX PUT/CALL RATIO",
     "PC_EQUITY": "EQUITY PUT/CALL RATIO",
 }
-CBOE_PC_LOOKBACK_DAYS = 14
+# Deep enough that the put/call series clears the composite's 20-point
+# z-score floor on a fresh database (~30 business days), not just 14.
+CBOE_PC_LOOKBACK_DAYS = 45
 
 FINRA_URL = "https://cdn.finra.org/equity/regsho/daily/CNMSshvol{ymd}.txt"
 FINRA_LOOKBACK_DAYS = 14

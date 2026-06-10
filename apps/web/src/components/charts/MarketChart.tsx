@@ -179,9 +179,16 @@ export function MarketChart({
             ? { type: "custom" as const, formatter: (v: number) => v.toFixed(2) }
             : undefined,
       });
-      line.setData(
-        s.points.map((p) => ({ time: p.t as UTCTimestamp, value: p.v }))
-      );
+      // lightweight-charts asserts strictly ascending times — collapse any
+      // same-second duplicates (keep latest) and drop out-of-order strays.
+      const points: { time: UTCTimestamp; value: number }[] = [];
+      for (const p of s.points) {
+        const prev = points[points.length - 1];
+        if (prev && p.t === (prev.time as number)) prev.value = p.v;
+        else if (prev && p.t < (prev.time as number)) continue;
+        else points.push({ time: p.t as UTCTimestamp, value: p.v });
+      }
+      line.setData(points);
       seriesRef.current.set(s.id, line);
     });
 

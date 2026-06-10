@@ -204,7 +204,13 @@ async def series(
                 for ts, score in rows:
                     vals.append(score)
                     window = vals[-SENT_WINDOW:]
-                    points.append(SeriesPoint(t=_epoch(ts), v=sum(window) / len(window)))
+                    point = SeriesPoint(t=_epoch(ts), v=sum(window) / len(window))
+                    # Charts need strictly ascending times; items scored in the
+                    # same second collapse to the latest rolling value.
+                    if points and points[-1].t == point.t:
+                        points[-1] = point
+                    else:
+                        points.append(point)
                 label = "News sentiment (all)" if sym == "ALL" else f"News sentiment {sym}"
                 out.append(SeriesData(id=sid, label=label, group="sentiment", points=points))
             else:
