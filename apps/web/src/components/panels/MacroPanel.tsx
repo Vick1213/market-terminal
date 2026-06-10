@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { MacroBucket, MacroMessage, MacroResponse } from "@market/shared";
@@ -111,8 +111,21 @@ const DIAL_FORMAT: Record<string, (v: number) => string> = {
   NAAIM_EXPOSURE: (v) => v.toFixed(1),
 };
 
-/** Expanded view: full chart of the composite + anything you overlay on it. */
-function MacroDetail({ onClose }: { onClose: () => void }) {
+function Stat({ label, value, color }: { label: string; value: string; color?: string }) {
+  return (
+    <div className="stat">
+      <div className="stat-value" style={color ? { color } : undefined}>
+        {value}
+      </div>
+      <div className="stat-label">{label}</div>
+    </div>
+  );
+}
+
+/** Expanded view: composite chart (overlay anything) + the full breakdown —
+ * sub-bucket contributions with per-component z-scores, regime dials, and
+ * the headline readings with their as-of dates. */
+function MacroDetail({ data, onClose }: { data: MacroResponse; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -123,22 +136,113 @@ function MacroDetail({ onClose }: { onClose: () => void }) {
     };
   }, [onClose]);
 
+  const live = data.buckets.filter((b) => b.z !== null);
+  const dials = Object.entries(data.dials);
+
   const modal = (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
-          <span>Liquidity &amp; Macro — chart</span>
+          <span>
+            Liquidity &amp; Macro — detail
+            <span style={{ color: regimeColor(data.regime), marginLeft: 10 }}>
+              {data.regime.toUpperCase()}
+            </span>
+          </span>
           <button className="expand-btn" title="Close (Esc)" onClick={onClose}>
             ✕
           </button>
         </div>
+
         <div className="modal-body">
-          <MarketChart
-            chartKey="macro"
-            initialSeriesIds={["COMPOSITE_RISK", "VIX"]}
-            days={730}
-            height={520}
-          />
+          <div className="stat-row">
+            <Stat
+              label="composite (−100..+100)"
+              value={`${(data.score ?? 0) > 0 ? "+" : ""}${data.score}`}
+              color={(data.score ?? 0) >= 0 ? "var(--green)" : "var(--red)"}
+            />
+            <Stat label="regime" value={data.regime} color={regimeColor(data.regime)} />
+            <Stat label="buckets live" value={`${live.length} / ${data.buckets.length}`} />
+            <Stat
+              label="computed"
+              value={
+                data.computed_at
+                  ? new Date(data.computed_at).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "—"
+              }
+            />
+          </div>
+
+          <div className="chart-wrap">
+            <MarketChart
+              chartKey="macro"
+              initialSeriesIds={["COMPOSITE_RISK", "VIX"]}
+              days={730}
+              height={380}
+            />
+          </div>
+
+          <div className="macro-detail-cols">
+            <div>
+              <div className="macro-detail-title">Sub-bucket contributions</div>
+              <div className="bucket-list">
+                {data.buckets.map((b) => (
+                  <BucketRow key={b.key} b={b} />
+                ))}
+              </div>
+              {data.buckets.map(
+                (b) =>
+                  b.components.length > 0 && (
+                    <div key={b.key} className="macro-components">
+                      <span className="k">{b.label}:</span>{" "}
+                      {b.components
+                        .map((c) => `${c.series_id} z=${c.z > 0 ? "+" : ""}${c.z.toFixed(2)} (${c.value}, ${c.ts})`)
+                        .join(" · ")}
+                    </div>
+                  )
+              )}
+            </div>
+            <div>
+              <div className="macro-detail-title">Regime dials</div>
+              {dials.length === 0 && (
+                <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+                  no dials yet — needs FRED history
+                </div>
+              )}
+              <div className="kv">
+                {dials.map(([key, d]) => (
+                  <span key={key} style={{ display: "contents" }}>
+                    <span className="k">
+                      {d.vote > 0 ? "▲" : "▼"} {d.label}
+                    </span>
+                    <span className="v" style={{ color: d.vote > 0 ? "var(--green)" : "var(--red)" }}>
+                      {d.value > 0 ? "+" : ""}
+                      {d.value}
+                    </span>
+                  </span>
+                ))}
+              </div>
+              <div className="macro-detail-title" style={{ marginTop: 14 }}>
+                Headline readings
+              </div>
+              <div className="kv">
+                {data.headline.map((h) => (
+                  <span key={h.series_id} style={{ display: "contents" }}>
+                    <span className="k" title={h.series_id}>
+                      {h.label}
+                      <span className="conf-note"> {h.ts.slice(0, 10)}</span>
+                    </span>
+                    <span className="v">
+                      {(DIAL_FORMAT[h.series_id] ?? ((v: number) => v.toFixed(2)))(h.value)}
+                    </span>
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     </div>
@@ -171,8 +275,28 @@ export function MacroPanel() {
   // regime (card #11: <1.0 = backwardation).
   const dials = useMemo(() => Object.entries(data?.dials ?? {}), [data]);
 
+  // Expand on a TRUE click only: not on buttons/links, and not on the
+  // mouse-up that ends a react-grid-layout drag (same pattern as NewsPanel).
+  const downAt = useRef<{ x: number; y: number } | null>(null);
+  const onPanelMouseDown = (e: React.MouseEvent) => {
+    downAt.current = { x: e.clientX, y: e.clientY };
+  };
+  const onPanelClick = (e: React.MouseEvent) => {
+    const d = downAt.current;
+    const dragged = d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5;
+    downAt.current = null;
+    if (dragged || warming) return;
+    if ((e.target as HTMLElement).closest("a, button, select")) return;
+    setExpanded(true);
+  };
+
   return (
-    <div className="panel">
+    <div
+      className="panel panel-expandable"
+      onMouseDownCapture={onPanelMouseDown}
+      onClick={onPanelClick}
+      title="Click to expand"
+    >
       <div className="panel-head">
         <span>Liquidity &amp; Macro</span>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
@@ -182,8 +306,11 @@ export function MacroPanel() {
           </span>
           <button
             className="expand-btn"
-            title="Expand chart (overlay VIX, HY OAS, prices…)"
-            onClick={() => setExpanded(true)}
+            title="Expand: full breakdown + chart (overlay VIX, HY OAS, prices…)"
+            onClick={(e) => {
+              e.stopPropagation();
+              setExpanded(true);
+            }}
           >
             ⤢
           </button>
@@ -252,7 +379,9 @@ export function MacroPanel() {
           </>
         )}
       </div>
-      {expanded && <MacroDetail onClose={() => setExpanded(false)} />}
+      {expanded && data && !warming && (
+        <MacroDetail data={data} onClose={() => setExpanded(false)} />
+      )}
     </div>
   );
 }

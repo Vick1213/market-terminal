@@ -505,6 +505,36 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
+/* expanded macro detail */
+.macro-detail-cols {
+  display: grid;
+  grid-template-columns: 1.2fr 1fr;
+  gap: 20px;
+}
+@media (max-width: 800px) {
+  .macro-detail-cols {
+    grid-template-columns: 1fr;
+  }
+}
+.macro-detail-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  margin-bottom: 8px;
+}
+.macro-components {
+  font-size: 10px;
+  color: var(--text-dim);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+.macro-components .k {
+  color: var(--text);
+  font-weight: 600;
+}
+
 /* --- shared TradingView-style chart (MarketChart) --- */
 .mchart-toolbar {
   display: flex;
