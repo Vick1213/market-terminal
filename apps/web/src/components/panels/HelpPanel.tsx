@@ -376,10 +376,15 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
           A daily cross-panel synthesis: the macro regime sets a base allocation across
           the terminal&apos;s asset classes (equities / gold &amp; silver / BTC &amp; ETH /
           cash), then every stored signal — net-liquidity trend, dealer gamma, stress
-          radar, cookbook breaks, COT crowding, retail froth, insider clusters, whale
-          new positions — nudges it a few points. Click a bucket to see exactly which
-          signals moved it and by how much; the chips at the bottom show every input
-          with its freshness (○ = stale/missing, excluded from the rules).
+          radar, cookbook breaks, COT crowding, put/call extremes, the 48h news pulse,
+          macro-event proximity (FOMC/CPI/NFP), crypto large-print flow, benchmark
+          seasonality, retail froth, insider clusters (watchlist + market-wide scan),
+          whale new positions and 10-K/Q risk-factor rewrites — nudges it a few points.
+          Click a bucket to see exactly which signals moved it and by how much; the
+          chips at the bottom show every input with its freshness (○ = stale/missing,
+          excluded from the rules). The ✓? button opens the report card: forward-return
+          scoring of past suggestions plus a regime backtest replayed over stored
+          macro history — the panel that tells you which rules to trust.
         </P>
         <Term k="tilt (+/−pp)">how far signals pushed a bucket from its regime base. Small by design — this is a tilt engine, not a market-timing model.</Term>
         <Term k="equity sleeve">the RRG quadrants translated into favor/avoid sector lists — a within-equities tilt, not extra buckets.</Term>

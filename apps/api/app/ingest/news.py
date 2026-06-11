@@ -257,19 +257,31 @@ async def fetch_gdelt(http: HttpClient) -> list[RawNews]:
 
 
 async def _cik_map(http: HttpClient, sqlite: SqliteStore) -> dict[str, int]:
-    """ticker -> CIK, fetched from SEC once and cached in app_meta for 7 days."""
+    """ticker -> CIK, fetched from SEC once and cached in app_meta for 7 days.
+    The same payload's company TITLES are cached alongside (title -> ticker) —
+    the strategist's 13F issuer-name resolution reads them with no network."""
     row = sqlite.fetchone("SELECT value FROM app_meta WHERE key = 'edgar_cik_map'")
     if row:
         cached = json.loads(row["value"])
         fetched = datetime.fromisoformat(cached["fetched"])
-        if datetime.now(timezone.utc) - fetched < timedelta(days=7):
+        if datetime.now(timezone.utc) - fetched < timedelta(days=7) and "names" in cached:
             return {k: int(v) for k, v in cached["map"].items()}
 
     data = await http.get_json(EDGAR_TICKERS)
-    mapping = {v["ticker"].upper(): int(v["cik_str"]) for v in data.values()}
+    mapping: dict[str, int] = {}
+    names: dict[str, str] = {}
+    for v in data.values():
+        ticker = v["ticker"].upper()
+        mapping[ticker] = int(v["cik_str"])
+        title = (v.get("title") or "").upper().strip()
+        # Multi-class issuers repeat the title; keep the shortest ticker
+        # (the common class) as the canonical symbol.
+        if title and (title not in names or len(ticker) < len(names[title])):
+            names[title] = ticker
     sqlite.execute(
         "INSERT OR REPLACE INTO app_meta (key, value) VALUES ('edgar_cik_map', ?)",
-        [json.dumps({"fetched": datetime.now(timezone.utc).isoformat(), "map": mapping})],
+        [json.dumps({"fetched": datetime.now(timezone.utc).isoformat(),
+                     "map": mapping, "names": names})],
     )
     log.info("edgar cik map refreshed (%s tickers)", len(mapping))
     return mapping

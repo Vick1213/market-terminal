@@ -67,6 +67,7 @@ class AlertEngine:
         insider_cluster_min_buyers: int = 2,
         insider_cluster_window_days: int = 14,
         netliq_drain_bn: float = -150.0,
+        filing_similarity_alert: float = 0.70,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -77,6 +78,7 @@ class AlertEngine:
         self._cluster_min = insider_cluster_min_buyers
         self._cluster_window = insider_cluster_window_days
         self._netliq_drain = netliq_drain_bn
+        self._filing_similarity = filing_similarity_alert
 
     # ------------------------------------------------------------------ state
 
@@ -493,6 +495,99 @@ class AlertEngine:
             ))
         return out
 
+    def _rule_filing_rewrite(self, now: datetime, regime: str) -> list[Alert]:
+        """A tracked issuer materially rewrote its 10-K/10-Q risk factors
+        (Lazy Prices: changers underperform). One alert per accession, ever."""
+        rows = self._duck.fetchall(
+            "SELECT accession, symbol, form, filed_at, similarity, detail "
+            "FROM filings_diff WHERE similarity IS NOT NULL AND similarity < ? "
+            "AND filed_at >= ?",
+            [self._filing_similarity, now - timedelta(days=30)],
+        )
+        out: list[Alert] = []
+        for acc, sym, form, filed, sim, detail in rows:
+            key = f"filing_rewrite:{acc}"
+            if self._fired_ever(key):
+                continue
+            sample = ""
+            if detail:
+                sents = (json.loads(detail) or {}).get("new_sentences") or []
+                if sents:
+                    sample = f' New language e.g.: "{sents[0][:200]}"'
+            out.append(Alert(
+                rule="filing_rewrite", key=key, severity="warn",
+                title=f"{sym} rewrote its {form} risk factors",
+                body=f"{sym}'s {form} filed {str(filed)[:10]} shares only "
+                     f"{sim:.0%} of its risk-factor language with the previous "
+                     f"{form} — issuers that rewrite Item 1A historically "
+                     f"underperform (Lazy Prices).{sample}",
+                symbol=sym, value=round(float(sim), 3),
+            ))
+        return out
+
+    def _rule_strategist_shift(self, now: datetime, regime: str) -> list[Alert]:
+        """The daily strategist materially changed its mind: a bucket moved
+        >= 5pp vs the previous snapshot, or a new single-name pick appeared.
+        One alert per (snapshot date, change), ever."""
+        rows = self._duck.fetchall(
+            "SELECT ts, detail FROM strategist_snapshots ORDER BY ts DESC LIMIT 2"
+        )
+        if len(rows) < 2 or not rows[0][1] or not rows[1][1]:
+            return []
+        try:
+            cur, prev = json.loads(rows[0][1]), json.loads(rows[1][1])
+        except ValueError:
+            return []
+        day = str(rows[0][0])[:10]
+        out: list[Alert] = []
+
+        prev_w = {b["key"]: b["weight_pct"] for b in prev.get("buckets") or []}
+        for b in cur.get("buckets") or []:
+            before = prev_w.get(b["key"])
+            if before is None:
+                continue
+            move = b["weight_pct"] - before
+            if abs(move) < 5.0:
+                continue
+            key = f"strategist_shift:{day}:{b['key']}"
+            if self._fired_ever(key):
+                continue
+            driver = max(
+                (r for r in b.get("reasons") or [] if r.get("delta")),
+                key=lambda r: abs(r["delta"]), default=None,
+            )
+            out.append(Alert(
+                rule="strategist_shift", key=key, severity="warn",
+                title=f"Strategist moved {b['label']} {move:+.0f}pp",
+                body=f"Suggested {b['label']} allocation went {before:.0f}% → "
+                     f"{b['weight_pct']:.0f}% vs the previous snapshot"
+                     + (f" — biggest driver: {driver['detail']}" if driver else "")
+                     + f". Regime: {cur.get('regime', regime)}.",
+                value=round(move, 1),
+            ))
+
+        def _picks(snap: dict) -> set[str]:
+            eq = next((b for b in snap.get("buckets") or []
+                       if b["key"] == "equities"), None)
+            return {h["symbol"] for h in (eq or {}).get("holdings") or []
+                    if h.get("kind") == "stock"}
+
+        for sym in sorted(_picks(cur) - _picks(prev)):
+            key = f"strategist_pick:{day}:{sym}"
+            if self._fired_ever(key):
+                continue
+            eq = next(b for b in cur["buckets"] if b["key"] == "equities")
+            h = next(h for h in eq["holdings"] if h["symbol"] == sym)
+            out.append(Alert(
+                rule="strategist_pick", key=key, severity="info",
+                title=f"New strategist pick: {sym}",
+                body=f"{sym} entered the single-name sleeve "
+                     f"(score {h.get('score')}, {h['weight_pct']:.1f}% of portfolio): "
+                     + "; ".join(h.get("evidence") or [])[:400],
+                symbol=sym, value=h.get("score"),
+            ))
+        return out
+
     # ------------------------------------------------------------------ sweep
 
     _RULES = (
@@ -500,6 +595,7 @@ class AlertEngine:
         _rule_retail_spike, _rule_insider_cluster, _rule_cot_extreme,
         _rule_gex_flip, _rule_large_print,
         _rule_netliq_drain, _rule_congress_watchlist, _rule_whale_new_position,
+        _rule_strategist_shift, _rule_filing_rewrite,
     )
 
     def _evaluate(self) -> list[Alert]:

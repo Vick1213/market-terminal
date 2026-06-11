@@ -355,6 +355,26 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # "Lazy Prices" 10-K/10-Q risk-factor diffs: one row per newer filing,
+    # similarity = 5-word-shingle Jaccard of Item 1A vs the previous filing
+    # of the same form (NULL when either section is too short to score).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS filings_diff (
+            accession      VARCHAR PRIMARY KEY,
+            symbol         VARCHAR NOT NULL,
+            form           VARCHAR NOT NULL,    -- 10-K | 10-Q
+            filed_at       TIMESTAMP NOT NULL,
+            prev_accession VARCHAR,
+            prev_filed     TIMESTAMP,
+            similarity     DOUBLE,
+            chars_new      INTEGER,
+            chars_prev     INTEGER,
+            url            VARCHAR,
+            detail         VARCHAR              -- JSON: sample new sentences
+        );
+        """
+    )
     # Event Horizon calendar: forward market-moving events (FOMC, CPI, NFP,
     # OPEX/quad-witching, COT prints, watchlist earnings). Upserted on refresh.
     duck.execute(

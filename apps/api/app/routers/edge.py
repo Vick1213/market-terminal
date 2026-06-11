@@ -240,6 +240,37 @@ async def strategist_run(request: Request) -> dict:
     return await request.app.state.strategist_service.run()
 
 
+@router.get("/filings/diff")
+async def filings_diff(request: Request, limit: int = Query(50, le=200)) -> dict:
+    """Lazy Prices feed: latest 10-K/10-Q risk-factor diffs per tracked
+    ticker (low similarity = the language changed = historical red flag)."""
+    from app.edge.filings_diff import latest_diffs
+
+    loop = asyncio.get_running_loop()
+    diffs = await loop.run_in_executor(
+        None, latest_diffs, request.app.state.duck, limit
+    )
+    return {"diffs": diffs}
+
+
+@router.post("/filings/diff/run")
+async def filings_diff_run(request: Request) -> dict:
+    return {"stored": await request.app.state.filings_diff_pipeline.run()}
+
+
+@router.get("/strategist/report")
+async def strategist_report(request: Request) -> dict:
+    """Report card: forward-return scoring of stored snapshots, the regime
+    backtest, and per-signal hit rates — all from stored data."""
+    from app.edge.report_card import compute_report_card
+    from app.edge.strategist import BASE_ALLOCATION
+
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, compute_report_card, request.app.state.duck, BASE_ALLOCATION
+    )
+
+
 @router.get("/brief")
 async def brief(request: Request) -> dict:
     duck = request.app.state.duck

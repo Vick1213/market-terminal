@@ -19,6 +19,7 @@ import type {
   RetailSymbolResponse,
   SeriesCatalogResponse,
   SeriesResponse,
+  ReportCardResponse,
   StrategistResponse,
   WatchlistQuote,
   WatchlistResponse,
@@ -215,6 +216,12 @@ export async function fetchStrategist(): Promise<StrategistResponse> {
 export async function runStrategist(): Promise<StrategistResponse> {
   const res = await fetch(`${API_URL}/api/strategist/run`, { method: "POST" });
   if (!res.ok) throw new Error(`strategist run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchStrategistReport(): Promise<ReportCardResponse> {
+  const res = await fetch(`${API_URL}/api/strategist/report`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`strategist report failed: ${res.status}`);
   return res.json();
 }
 

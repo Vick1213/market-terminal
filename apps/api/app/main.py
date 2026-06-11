@@ -27,7 +27,9 @@ from app.edge.calendar import CalendarPipeline
 from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
 from app.edge.gex import GexAdapter
+from app.edge.filings_diff import FilingsDiffPipeline
 from app.edge.insider import InsiderPipeline
+from app.edge.insider_scan import InsiderScanPipeline
 from app.edge.llm import LlmClient
 from app.edge.ntfy import NtfyPublisher
 from app.edge.rotation import RotationPipeline
@@ -118,12 +120,22 @@ async def lifespan(app: FastAPI):
         insider_cluster_min_buyers=settings.insider_cluster_min_buyers,
         insider_cluster_window_days=settings.insider_cluster_window_days,
         netliq_drain_bn=settings.netliq_drain_alert_bn,
+        filing_similarity_alert=settings.filings_diff_alert_similarity,
     )
     insider_pipeline = InsiderPipeline(
         duck, sqlite, http,
         lookback_days=settings.insider_lookback_days,
         min_trade_value=settings.insider_min_trade_value,
     )
+    insider_scan_pipeline = (
+        InsiderScanPipeline(
+            duck, sqlite, http,
+            max_filings_per_sweep=settings.insider_scan_max_filings,
+            min_trade_value=settings.insider_scan_min_value,
+        )
+        if settings.insider_scan_enabled else None
+    )
+    filings_diff_pipeline = FilingsDiffPipeline(duck, sqlite, http)
     rotation_pipeline = RotationPipeline(
         duck, sqlite, settings.sector_etfs, settings.rrg_benchmark
     )
@@ -167,7 +179,8 @@ async def lifespan(app: FastAPI):
         corr_pipeline, alert_engine, insider_pipeline, rotation_pipeline,
         cot_pipeline, gex_adapter, calendar_pipeline, brief_service,
         liquidity_pipeline, congress_pipeline, whales_pipeline,
-        intl_pipeline, strategist_service,
+        intl_pipeline, strategist_service, insider_scan_pipeline,
+        filings_diff_pipeline,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -201,6 +214,8 @@ async def lifespan(app: FastAPI):
     app.state.ntfy = ntfy
     app.state.alert_engine = alert_engine
     app.state.insider_pipeline = insider_pipeline
+    app.state.insider_scan_pipeline = insider_scan_pipeline
+    app.state.filings_diff_pipeline = filings_diff_pipeline
     app.state.rotation_pipeline = rotation_pipeline
     app.state.cot_pipeline = cot_pipeline
     app.state.gex_adapter = gex_adapter

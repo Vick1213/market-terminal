@@ -128,6 +128,17 @@ class Settings(BaseSettings):
     insider_cluster_window_days: int = 14
     insider_cluster_min_buyers: int = 2
     insider_min_trade_value: float = 25_000
+    # Market-wide Form 4 scanner: sweeps the EDGAR daily form index for
+    # open-market buys beyond the watchlist (discovery). Each sweep fetches at
+    # most max_filings submissions; a cursor resumes through the day's backlog.
+    insider_scan_enabled: bool = True
+    insider_scan_poll_minutes: int = 120
+    insider_scan_max_filings: int = 300
+    insider_scan_min_value: float = 50_000
+    # "Lazy Prices" 10-K/10-Q risk-factor diffs for tracked tickers. Mostly
+    # no-ops between filings; alert fires below the similarity threshold.
+    filings_diff_poll_minutes: int = 720
+    filings_diff_alert_similarity: float = 0.70
     # RS/RRG sector rotation + seasonality (pure math on cached daily bars).
     rotation_poll_minutes: int = 360
     sector_etfs: list[str] = [

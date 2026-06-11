@@ -24,7 +24,9 @@ from app.edge.calendar import CalendarPipeline
 from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
 from app.edge.gex import GexAdapter
+from app.edge.filings_diff import FilingsDiffPipeline
 from app.edge.insider import InsiderPipeline
+from app.edge.insider_scan import InsiderScanPipeline
 from app.edge.rotation import RotationPipeline
 from app.edge.strategist import StrategistService
 from app.edge.whales import WhalesPipeline
@@ -74,6 +76,8 @@ def build_scheduler(
     whales_pipeline: WhalesPipeline | None = None,
     intl_pipeline: IntlPipeline | None = None,
     strategist_service: StrategistService | None = None,
+    insider_scan_pipeline: InsiderScanPipeline | None = None,
+    filings_diff_pipeline: FilingsDiffPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -327,6 +331,24 @@ def build_scheduler(
             minutes=settings.insider_poll_minutes,
             next_run_time=soon + timedelta(seconds=500),
             id="edge_insider",
+            **common,
+        )
+    if insider_scan_pipeline is not None:
+        scheduler.add_job(
+            insider_scan_pipeline.run,
+            trigger="interval",
+            minutes=settings.insider_scan_poll_minutes,
+            next_run_time=soon + timedelta(seconds=530),
+            id="edge_insider_scan",
+            **common,
+        )
+    if filings_diff_pipeline is not None:
+        scheduler.add_job(
+            filings_diff_pipeline.run,
+            trigger="interval",
+            minutes=settings.filings_diff_poll_minutes,
+            next_run_time=soon + timedelta(seconds=550),
+            id="edge_filings_diff",
             **common,
         )
     if alert_engine is not None:

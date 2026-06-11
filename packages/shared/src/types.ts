@@ -734,3 +734,47 @@ export interface StrategistWsMessage {
   regime: string;
   model: string;
 }
+
+// --- Strategist report card ---
+
+export interface ReportCardRegime {
+  regime: string;
+  days: number;
+  n_1w: number;
+  alloc_1w: number | null; // avg fwd return of the regime's base allocation
+  spy_1w: number | null; // avg fwd SPY return over the same days
+  n_1m: number;
+  alloc_1m: number | null;
+  spy_1m: number | null;
+}
+
+export interface ReportCardSignal {
+  signal: string;
+  fired: number; // snapshots where this signal moved the allocation
+  spy_1w_after_fired: number | null;
+  spy_1w_after_quiet: number | null;
+}
+
+export interface ReportCardSnapshot {
+  date: string;
+  regime: string;
+  fired: string[];
+  ret_1w: number | null;
+  spy_1w: number | null;
+  ret_1m: number | null;
+  spy_1m: number | null;
+}
+
+export interface ReportCardResponse {
+  as_of: string;
+  summary: {
+    snapshots: number;
+    scored: number;
+    avg_excess_1w: number | null;
+    hit_rate_1w: number | null;
+  };
+  snapshots: ReportCardSnapshot[];
+  regimes: ReportCardRegime[];
+  signals: ReportCardSignal[];
+  note: string;
+}

@@ -2,8 +2,11 @@
 
 Reads ONLY data the other pipelines already store (no network on this path):
 macro composite + regime, net-liq trend, corr cookbook statuses + stress
-radar, RRG quadrants, COT extremes, GEX regime, retail spikes, insider
-clusters, whale new positions, congress watchlist hits.
+radar, RRG quadrants, COT extremes, GEX regime, put/call extremes, 48h news
+pulse, Event Horizon proximity, crypto large-print flow, benchmark
+seasonality, retail spikes, insider clusters (watchlist + market-wide scan),
+whale new positions, congress trades, short-volume pressure, earnings
+proximity and Lazy-Prices filings diffs.
 
 Three layers:
   a. Deterministic core — a transparent rules table maps regime + signals to
@@ -39,7 +42,7 @@ from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.edge.cot import cot_summary
 from app.edge.llm import LlmClient
-from app.edge.rotation import SECTOR_NAMES, compute_rrg
+from app.edge.rotation import SECTOR_NAMES, compute_rrg, compute_seasonality
 from app.edge.whales import whale_new_positions
 from app.ws.hub import ConnectionManager
 
@@ -157,16 +160,44 @@ def _norm_issuer(name: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def _resolve_issuer(issuer: str, watch_names: dict[str, str]) -> str | None:
+def _edgar_names(sqlite: SqliteStore) -> dict[str, str]:
+    """Normalized EDGAR company title -> ticker, from the cache the news
+    pipeline maintains (app_meta 'edgar_cik_map'). Empty until the first
+    EDGAR ingest has run — the static map below covers the gap."""
+    row = sqlite.fetchone("SELECT value FROM app_meta WHERE key = 'edgar_cik_map'")
+    if not row:
+        return {}
+    try:
+        names = json.loads(row["value"]).get("names") or {}
+    except ValueError:
+        return {}
+    out: dict[str, str] = {}
+    for title, ticker in names.items():
+        n = _norm_issuer(title)
+        if n and (n not in out or len(ticker) < len(out[n])):
+            out[n] = ticker
+    return out
+
+
+def _resolve_issuer(issuer: str, watch_names: dict[str, str],
+                    edgar_names: dict[str, str] | None = None) -> str | None:
     n = _norm_issuer(issuer)
     if not n:
         return None
-    hit = watch_names.get(n) or _ISSUER_TICKERS.get(n)
+    edgar_names = edgar_names or {}
+    hit = watch_names.get(n) or _ISSUER_TICKERS.get(n) or edgar_names.get(n)
     if hit:
         return hit
     for key, sym in _ISSUER_TICKERS.items():
         if n.startswith(key + " "):
             return sym
+    # 13F issuer names are often truncated ("TAIWAN SEMICONDUCTOR MANUFAC");
+    # accept a prefix match against EDGAR titles only when it is unambiguous.
+    if len(n) >= 8:
+        hits = {sym for title, sym in edgar_names.items()
+                if title.startswith(n)}
+        if len(hits) == 1:
+            return hits.pop()
     return None
 
 
@@ -251,8 +282,9 @@ def _equity_stock_picks(
         n = _norm_issuer(r["display_name"] or "")
         if n:
             watch_names[n] = r["symbol"]
+    edgar_names = _edgar_names(sqlite)
     for w in whale_new_positions(duck, days=120, top_rank=10):
-        sym = _resolve_issuer(w["issuer"] or "", watch_names)
+        sym = _resolve_issuer(w["issuer"] or "", watch_names, edgar_names)
         if sym:
             add(sym, 2.0, f"{w['fund']} opened a top-10 13F position ({w['issuer']})")
 
@@ -271,6 +303,20 @@ def _equity_stock_picks(
         elif avg <= -0.2:
             add(sym, max(-2.0, float(avg) * 4),
                 f"news sentiment {avg:+.2f} across {n_items} stories (7d)")
+
+    # Lazy Prices: a recent risk-factor rewrite is negative evidence (and a
+    # quiet re-file is mildly reassuring for names already in play).
+    for sym, sim, form in duck.fetchall(
+        "SELECT upper(symbol), similarity, form FROM filings_diff "
+        "WHERE similarity IS NOT NULL AND filed_at >= ?",
+        [now - timedelta(days=120)],
+    ):
+        if sim < 0.75:
+            add(sym, -1.5, f"{form} risk factors rewritten "
+                           f"({sim:.0%} similar) — Lazy Prices red flag")
+        elif sim > 0.95 and sym in cands:
+            add(sym, +0.5, f"{form} risk factors unchanged ({sim:.0%}) — "
+                           "no new skeletons disclosed")
 
     # Retail mention spikes read as froth, not conviction.
     for (sym,) in duck.fetchall(
@@ -296,6 +342,25 @@ def _equity_stock_picks(
                 add(sym, 0.5, f"{rel:+.1f}pp vs {benchmark} over 1m — tape confirms")
             elif rel <= -5:
                 add(sym, -1.0, f"{rel:+.1f}pp vs {benchmark} over 1m — tape disagrees")
+
+    # Short-volume pressure + earnings proximity, survivors only.
+    for sym in list(cands):
+        row = duck.fetchone(
+            "SELECT short_volume / nullif(total_volume, 0), ts FROM ts_short_vol "
+            "WHERE upper(symbol) = ? ORDER BY ts DESC LIMIT 1", [sym],
+        )
+        if row and row[0] is not None and _age_days(row[1]) is not None \
+                and _age_days(row[1]) <= 5 and float(row[0]) >= 0.6:
+            add(sym, -0.5, f"short volume {float(row[0]):.0%} of trading — "
+                           "heavy shorting pressure")
+        ev = duck.fetchone(
+            "SELECT ts FROM events WHERE kind = 'earnings' AND upper(symbol) = ? "
+            "AND ts BETWEEN ? AND ?",
+            [sym, now, now + timedelta(days=7)],
+        )
+        if ev:
+            add(sym, 0.0, f"earnings {str(ev[0])[:10]} — binary event inside "
+                          "the holding window")
 
     picks = [c for c in cands.values() if c["score"] >= 1.5]
     picks.sort(key=lambda c: c["score"], reverse=True)
@@ -561,6 +626,127 @@ def compute_strategist(
                       ("cash", +3, "gex", "short-gamma regime — expect range expansion")]
     else:
         signals.append(_signal("gex", "SPX dealer gamma", None, "no GEX snapshot yet"))
+
+    # --- put/call extreme (contrarian) -----------------------------------------
+    # The composite already consumes PC_TOTAL as a slow z-input; this tilt
+    # only reacts to EXTREMES — panic hedging is a washout buy signal, a
+    # collapsed ratio is complacency.
+    pc = duck.fetchall(
+        "SELECT ts, value FROM ts_macro WHERE series_id = 'PC_TOTAL' "
+        "AND value IS NOT NULL ORDER BY ts DESC LIMIT 252"
+    )
+    if len(pc) >= 60:
+        vals = [float(r[1]) for r in pc]
+        mu = sum(vals[1:]) / len(vals[1:])
+        sd = (sum((v - mu) ** 2 for v in vals[1:]) / len(vals[1:])) ** 0.5
+        pc_z = (vals[0] - mu) / sd if sd else 0.0
+        sig = _signal("put_call", "Put/Call (1y z)", round(pc_z, 1),
+                      f"total ratio {vals[0]:.2f}", pc[0][0], max_age_days=5)
+        signals.append(sig)
+        if not sig["stale"]:
+            if pc_z >= 2.0:
+                tilts += [("equities", +2, "put_call",
+                           f"put/call {pc_z:+.1f}σ — panic hedging, contrarian washout"),
+                          ("cash", -2, "put_call", "hedging extreme — fear already paid for")]
+            elif pc_z <= -2.0:
+                tilts += [("equities", -1, "put_call",
+                           f"put/call {pc_z:+.1f}σ — nobody hedged, complacency"),
+                          ("cash", +1, "put_call", "complacent options market — cheap to wait")]
+    else:
+        signals.append(_signal("put_call", "Put/Call (1y z)", None, "no PC_TOTAL history yet"))
+
+    # --- 48h news pulse ---------------------------------------------------------
+    row = duck.fetchone(
+        "SELECT avg(score), count(*), max(published) FROM news_items "
+        "WHERE score IS NOT NULL AND confidence >= 0.5 AND published >= ?",
+        [now - timedelta(days=2)],
+    )
+    if row and row[1] and int(row[1]) >= 20:
+        pulse, n_items = float(row[0]), int(row[1])
+        sig = _signal("news_pulse", "News pulse (48h)", round(pulse, 2),
+                      f"{n_items} FinBERT-scored headlines", row[2], max_age_days=2)
+        signals.append(sig)
+        if not sig["stale"]:
+            if pulse <= -0.15:
+                tilts += [("equities", -1, "news_pulse",
+                           f"48h news flow {pulse:+.2f} across {n_items} headlines — bearish tape reading"),
+                          ("cash", +1, "news_pulse", "negative news pulse — no rush to deploy")]
+            elif pulse >= 0.15:
+                tilts.append(("equities", +1, "news_pulse",
+                              f"48h news flow {pulse:+.2f} across {n_items} headlines — bullish tape reading"))
+    else:
+        signals.append(_signal("news_pulse", "News pulse (48h)", None,
+                               "not enough scored headlines"))
+
+    # --- event horizon proximity -------------------------------------------------
+    ev = duck.fetchone(
+        "SELECT title, ts, kind FROM events WHERE ts >= ? "
+        "AND kind IN ('fomc', 'cpi', 'nfp') ORDER BY ts LIMIT 1",
+        [datetime(now.year, now.month, now.day)],
+    )
+    if ev:
+        days_to = (ev[1].date() - now.date()).days
+        sig = _signal("event_horizon", "Next macro event",
+                      f"{str(ev[2]).upper()} in {days_to}d", str(ev[0]),
+                      now, max_age_days=1)
+        signals.append(sig)
+        if days_to <= 2:
+            tilts += [("equities", -1, "event_horizon",
+                       f"{str(ev[2]).upper()} in {days_to}d — pre-event chop, size down adds"),
+                      ("cash", +1, "event_horizon",
+                       f"{str(ev[2]).upper()} imminent — keep powder for the print")]
+    else:
+        signals.append(_signal("event_horizon", "Next macro event", None,
+                               "no calendar data yet"))
+
+    # --- crypto large-print flow (24h) --------------------------------------------
+    # trades only stores LARGE prints (streamer-side filter), so this is the
+    # whale aggressor-side imbalance, not retail noise.
+    row = duck.fetchone(
+        "SELECT sum(CASE WHEN side = 'buy' THEN notional ELSE 0 END), "
+        "sum(CASE WHEN side = 'sell' THEN notional ELSE 0 END), max(ts) "
+        "FROM trades WHERE ts >= ?",
+        [now - timedelta(days=1)],
+    )
+    if row and (row[0] or row[1]):
+        buys, sells = float(row[0] or 0), float(row[1] or 0)
+        total = buys + sells
+        imb = (buys - sells) / total if total else 0.0
+        sig = _signal("crypto_flow", "Crypto whale flow (24h)", f"{imb:+.0%}",
+                      f"${buys / 1e6:.1f}M bought vs ${sells / 1e6:.1f}M sold (large prints)",
+                      row[2], max_age_days=1)
+        signals.append(sig)
+        if not sig["stale"] and total >= 2e6:
+            if imb >= 0.3:
+                tilts.append(("crypto", +2, "crypto_flow",
+                              f"large-print flow {imb:+.0%} — whales accumulating"))
+            elif imb <= -0.3:
+                tilts.append(("crypto", -2, "crypto_flow",
+                              f"large-print flow {imb:+.0%} — whales distributing"))
+    else:
+        signals.append(_signal("crypto_flow", "Crypto whale flow (24h)", None,
+                               "no large prints in 24h"))
+
+    # --- benchmark seasonality (current month) -------------------------------------
+    season = compute_seasonality(duck, [benchmark])
+    if season and season[0]["months"]:
+        m = season[0]["months"][0]
+        sig = _signal("seasonality", f"{benchmark} seasonality",
+                      f"{m['win_rate']:.0f}% win",
+                      f"month {m['month']}: avg {m['mean_return']:+.1f}% over {m['years']}y",
+                      now, max_age_days=1)
+        signals.append(sig)
+        if m["win_rate"] >= 65 and m["mean_return"] > 0:
+            tilts.append(("equities", +1, "seasonality",
+                          f"{benchmark} closed month {m['month']} green "
+                          f"{m['win_rate']:.0f}% of the last {m['years']}y"))
+        elif m["win_rate"] <= 40 and m["mean_return"] < 0:
+            tilts.append(("equities", -1, "seasonality",
+                          f"{benchmark} historically weak in month {m['month']} "
+                          f"({m['win_rate']:.0f}% win rate, {m['mean_return']:+.1f}% avg)"))
+    else:
+        signals.append(_signal("seasonality", f"{benchmark} seasonality", None,
+                               "needs 3y+ of benchmark history"))
 
     # --- retail froth ----------------------------------------------------------
     spikes = duck.fetchall(
