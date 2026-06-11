@@ -264,6 +264,21 @@ export interface WatchlistResponse {
   quotes: WatchlistQuote[];
 }
 
+export interface WatchlistLiveQuote {
+  symbol: string;
+  price: number;
+  prev_close: number | null;
+  change_pct: number | null; // live price vs previous close
+  day_high: number | null;
+  day_low: number | null;
+  volume: number | null;
+  ts: string; // ISO timestamp of the fetch, not the trade
+}
+
+export interface WatchlistLiveResponse {
+  quotes: WatchlistLiveQuote[];
+}
+
 // --- Phase 4: multi-asset liquidity & major trades ---
 
 export interface CryptoQuote {

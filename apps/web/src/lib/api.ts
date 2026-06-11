@@ -23,6 +23,7 @@ import type {
   SourceHealthResponse,
   ReportCardResponse,
   StrategistResponse,
+  WatchlistLiveResponse,
   WatchlistQuote,
   WatchlistResponse,
   WhalesResponse,
@@ -87,6 +88,12 @@ export async function deleteMarker(id: string): Promise<void> {
 export async function fetchWatchlist(): Promise<WatchlistResponse> {
   const res = await fetch(`${API_URL}/api/watchlist`, { cache: "no-store" });
   if (!res.ok) throw new Error(`watchlist request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWatchlistLive(): Promise<WatchlistLiveResponse> {
+  const res = await fetch(`${API_URL}/api/watchlist/live`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`watchlist live request failed: ${res.status}`);
   return res.json();
 }
 

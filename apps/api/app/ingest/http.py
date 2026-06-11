@@ -83,6 +83,7 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "efdsearch.senate.gov": (1, 2.0),
     "api.db.nomics.world": (2, 1.0),
     "www.federalreserve.gov": (1, 2.0),
+    "data.alpaca.markets": (150, 60.0),  # free tier allows 200/min
 }
 
 

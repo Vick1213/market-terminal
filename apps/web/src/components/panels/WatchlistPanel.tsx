@@ -8,12 +8,32 @@ import {
   addWatchlistSymbol,
   fetchNews,
   fetchWatchlist,
+  fetchWatchlistLive,
   removeWatchlistSymbol,
 } from "@/lib/api";
 import { MarketChart } from "../charts/MarketChart";
 import { sentColor } from "./NewsPanel";
 
 const ASSET_CLASSES = ["equity", "crypto", "metal", "fx", "future"] as const;
+
+/** EOD quote with the live price overlaid when the live endpoint has one. */
+type WlRow = WatchlistQuote & { live?: boolean };
+
+// Attention-tiered polling: at most once a minute while the panel just sits
+// on the grid, faster while a detail modal is open. (React Query already
+// pauses both entirely when the tab is hidden.)
+const LIVE_INTERVAL_IDLE = 60_000;
+const LIVE_INTERVAL_ENGAGED = 15_000;
+
+function fmtAsOf(q: WlRow): string {
+  if (!q.ts) return "—";
+  if (!q.live) return q.ts.slice(0, 10);
+  return new Date(q.ts).toLocaleTimeString([], {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+}
 
 function fmtPrice(v: number | null): string {
   if (v === null) return "—";
@@ -79,7 +99,7 @@ function Stat({ label, value, color }: { label: string; value: string; color?: s
 }
 
 /** Per-symbol drill-down: stats + the shared composable chart + its news. */
-function SymbolDetail({ q, onClose }: { q: WatchlistQuote; onClose: () => void }) {
+function SymbolDetail({ q, onClose }: { q: WlRow; onClose: () => void }) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
     window.addEventListener("keydown", onKey);
@@ -119,11 +139,11 @@ function SymbolDetail({ q, onClose }: { q: WatchlistQuote; onClose: () => void }
 
         <div className="modal-body">
           <div className="stat-row">
-            <Stat label="last close" value={fmtPrice(q.close)} />
+            <Stat label={q.live ? "last (live)" : "last close"} value={fmtPrice(q.close)} />
             <Stat label="day change" value={fmtPct(q.change_pct)} color={changeColor(q.change_pct)} />
             <Stat label="day range" value={`${fmtPrice(q.low)} – ${fmtPrice(q.high)}`} />
             <Stat label="volume" value={fmtVolume(q.volume)} />
-            <Stat label="as of (EOD)" value={q.ts ? q.ts.slice(0, 10) : "—"} />
+            <Stat label={q.live ? "as of (live)" : "as of (EOD)"} value={fmtAsOf(q)} />
           </div>
 
           <div className="chart-wrap">
@@ -179,8 +199,8 @@ function WatchlistDetail({
   onPick,
   onClose,
 }: {
-  quotes: WatchlistQuote[];
-  onPick: (q: WatchlistQuote) => void;
+  quotes: WlRow[];
+  onPick: (q: WlRow) => void;
   onClose: () => void;
 }) {
   const queryClient = useQueryClient();
@@ -218,7 +238,9 @@ function WatchlistDetail({
           <span>
             Custom Watchlist — detail
             <span className="conf-note" style={{ marginLeft: 8 }}>
-              daily closes · equity prices delayed
+              {quotes.some((q) => q.live)
+                ? "live every 15s while open · equities delayed"
+                : "daily closes · equity prices delayed"}
             </span>
           </span>
           <button className="expand-btn" title="Close (Esc)" onClick={onClose}>
@@ -294,7 +316,7 @@ function WatchlistDetail({
                   <td className="num">{fmtPrice(q.high)}</td>
                   <td className="num">{fmtPrice(q.low)}</td>
                   <td className="num">{fmtVolume(q.volume)}</td>
-                  <td style={{ color: "var(--text-dim)" }}>{q.ts ? q.ts.slice(0, 10) : "—"}</td>
+                  <td style={{ color: q.live ? "var(--green)" : "var(--text-dim)" }}>{fmtAsOf(q)}</td>
                   <td className="wl-headline">
                     {q.sent_title ? (
                       <>
@@ -331,7 +353,7 @@ function WatchlistDetail({
 type SortKey = "order" | "symbol" | "change" | "sent";
 
 export function WatchlistPanel() {
-  const [detail, setDetail] = useState<WatchlistQuote | null>(null);
+  const [detail, setDetail] = useState<WlRow | null>(null);
   const [managing, setManaging] = useState(false);
   const [sortKey, setSortKey] = useState<SortKey>("order");
   const [sortDesc, setSortDesc] = useState(true);
@@ -342,8 +364,33 @@ export function WatchlistPanel() {
     refetchInterval: 90_000, // PLAN §3d: 60–120 s, cache-first server side
   });
 
-  const quotes = useMemo(() => {
-    const qs = [...(data?.quotes ?? [])];
+  // Live prices ride on top of the EOD rows. Poll slowly while the panel is
+  // just glanceable, fast only while a detail modal has the user's attention.
+  const engaged = managing || detail !== null;
+  const { data: liveData } = useQuery({
+    queryKey: ["watchlist-live"],
+    queryFn: fetchWatchlistLive,
+    refetchInterval: engaged ? LIVE_INTERVAL_ENGAGED : LIVE_INTERVAL_IDLE,
+  });
+
+  const quotes = useMemo<WlRow[]>(() => {
+    const live = new Map((liveData?.quotes ?? []).map((q) => [q.symbol, q]));
+    const qs: WlRow[] = (data?.quotes ?? []).map((q) => {
+      const lv = live.get(q.symbol);
+      if (!lv) return q;
+      return {
+        ...q,
+        close: lv.price,
+        prev_close: lv.prev_close ?? q.prev_close,
+        change_pct: lv.change_pct ?? q.change_pct,
+        high: lv.day_high ?? q.high,
+        low: lv.day_low ?? q.low,
+        volume: lv.volume ?? q.volume,
+        ts: lv.ts,
+        spark: [...q.spark, lv.price], // live tick extends the EOD sparkline
+        live: true,
+      };
+    });
     if (sortKey === "order") return qs; // server sort_order
     const dir = sortDesc ? -1 : 1;
     qs.sort((a, b) => {
@@ -352,7 +399,9 @@ export function WatchlistPanel() {
       return dir * ((a.sent_score ?? -Infinity) < (b.sent_score ?? -Infinity) ? -1 : 1);
     });
     return qs;
-  }, [data, sortKey, sortDesc]);
+  }, [data, liveData, sortKey, sortDesc]);
+
+  const anyLive = quotes.some((q) => q.live);
 
   const onSort = (key: SortKey) => {
     if (sortKey === key) {
@@ -389,8 +438,15 @@ export function WatchlistPanel() {
       <div className="panel-head">
         <span>Custom Watchlist</span>
         <span style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span className="badge soon" title="Daily closes from cached EOD history; equities are delayed">
-            EOD
+          <span
+            className={anyLive ? "badge live" : "badge soon"}
+            title={
+              anyLive
+                ? "Live prices (equities delayed) — refreshes every 60s, every 15s while a detail view is open"
+                : "Daily closes from cached EOD history; equities are delayed"
+            }
+          >
+            {anyLive ? "LIVE" : "EOD"}
           </span>
           <button
             className="expand-btn"
@@ -465,7 +521,14 @@ export function WatchlistPanel() {
         )}
       </div>
 
-      {detail && <SymbolDetail q={detail} onClose={() => setDetail(null)} />}
+      {/* Hand the drill-down the freshest merged row, not the click-time snapshot,
+          so live polls keep updating an open modal. */}
+      {detail && (
+        <SymbolDetail
+          q={quotes.find((m) => m.symbol === detail.symbol) ?? detail}
+          onClose={() => setDetail(null)}
+        />
+      )}
       {managing && (
         <WatchlistDetail
           quotes={quotes}

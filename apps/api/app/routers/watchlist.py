@@ -15,7 +15,7 @@ import asyncio
 from fastapi import APIRouter, HTTPException, Query, Request
 from pydantic import BaseModel, Field
 
-from app.ingest.prices import ensure_daily_history
+from app.ingest.prices import ensure_daily_history, fetch_live_quotes
 
 router = APIRouter(prefix="/api", tags=["watchlist"])
 
@@ -45,6 +45,21 @@ class WatchlistQuote(BaseModel):
 
 class WatchlistResponse(BaseModel):
     quotes: list[WatchlistQuote]
+
+
+class WatchlistLiveQuote(BaseModel):
+    symbol: str
+    price: float
+    prev_close: float | None = None
+    change_pct: float | None = None  # live price vs previous close
+    day_high: float | None = None
+    day_low: float | None = None
+    volume: float | None = None
+    ts: str  # ISO timestamp of the fetch, not the trade
+
+
+class WatchlistLiveResponse(BaseModel):
+    quotes: list[WatchlistLiveQuote]
 
 
 class WatchlistItemIn(BaseModel):
@@ -108,6 +123,32 @@ async def watchlist(request: Request) -> WatchlistResponse:
         return [_quote(duck, s, a, n) for s, a, n in rows]
 
     return WatchlistResponse(quotes=await loop.run_in_executor(None, _q))
+
+
+@router.get("/watchlist/live", response_model=WatchlistLiveResponse)
+async def watchlist_live(request: Request) -> WatchlistLiveResponse:
+    """Near-real-time prices for every watchlist symbol.
+
+    Alpaca IEX snapshots when keys are configured (truly live, one batched
+    call for the whole list), per-symbol yfinance fast_info otherwise
+    (delayed for equities). Either way a short TTL cache means client poll
+    rate never multiplies upstream traffic.
+    """
+    sqlite = request.app.state.sqlite
+    loop = asyncio.get_running_loop()
+    rows = await loop.run_in_executor(None, _rows, sqlite)
+
+    raw = await fetch_live_quotes(
+        request.app.state.http,
+        [(symbol, asset_class) for symbol, asset_class, _ in rows],
+    )
+    out: list[WatchlistLiveQuote] = []
+    for q in raw:
+        change = None
+        if q["prev_close"]:
+            change = (q["price"] - q["prev_close"]) / q["prev_close"] * 100
+        out.append(WatchlistLiveQuote(change_pct=change, **q))
+    return WatchlistLiveResponse(quotes=out)
 
 
 @router.post("/watchlist", response_model=WatchlistQuote)

@@ -228,6 +228,13 @@ class Settings(BaseSettings):
     # calendar covers watchlist + news tickers + current strategist picks and
     # the blocking yfinance leg is skipped.
     fmp_api_key: str = ""
+    # Alpaca market data (PLAN §10 #2 — price redundancy + live-ish quotes).
+    # Free keys (no funded account) from app.alpaca.markets. Empty = off and
+    # yfinance remains the sole price source; with keys, live watchlist quotes
+    # come from one batched IEX snapshot call and daily history gains an
+    # Alpaca fallback for when Yahoo breaks the way Stooq did.
+    alpaca_key_id: str = ""
+    alpaca_secret_key: str = ""
 
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [

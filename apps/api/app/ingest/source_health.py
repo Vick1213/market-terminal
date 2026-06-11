@@ -52,6 +52,7 @@ SOURCE_LABELS: dict[str, tuple[str, str]] = {
     "api.db.nomics.world": ("DBnomics", "intl macro (CLI/BCI cards)"),
     "www.federalreserve.gov": ("Federal Reserve", "FOMC statements/calendar"),
     "naaim.org": ("NAAIM", "manager exposure index"),
+    "data.alpaca.markets": ("Alpaca", "live watchlist quotes, daily-bar fallback"),
     "query1.finance.yahoo.com": ("Yahoo quotes", "intraday prices, earnings dates"),
     "query2.finance.yahoo.com": ("Yahoo quotes", "intraday prices, earnings dates"),
 }
