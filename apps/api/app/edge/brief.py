@@ -1,10 +1,12 @@
 """Daily pre-market auto-brief (PLAN §6 #1 — the #1 edge-per-effort extra).
 
-Builds a grounded JSON digest from data already in DuckDB (regime, 24h alerts,
-cookbook breaks, retail spikes, insider clusters, COT extremes, GEX, upcoming
-events) and asks the LOCAL LLM (Qwen3 via Ollama, $0 tokens) for a 30-second
-morning read. If Ollama is down the deterministic markdown template renders
-the same digest — the brief never silently fails.
+Builds a grounded JSON digest from data already in DuckDB (regime, net
+liquidity, 24h alerts, cookbook breaks, retail spikes, insider clusters,
+congress watchlist hits, new whale positions, COT extremes, GEX, upcoming
+events) and asks the configured LLM (edge/llm.py — local Ollama by default,
+or OpenAI/DeepSeek/Anthropic) for a 30-second morning read. If the LLM is
+unreachable the deterministic markdown template renders the same digest —
+the brief never silently fails.
 
 Runs on a pre-market cron and on demand via POST /api/brief/run.
 """
@@ -14,15 +16,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import re
 from datetime import datetime, timedelta, timezone
 
-import httpx
-
 from app.db.duck import DuckStore
+from app.db.sqlite import SqliteStore
 from app.edge.cot import cot_summary
 from app.edge.calendar import upcoming_events
+from app.edge.llm import LlmClient
 from app.edge.ntfy import NtfyPublisher
+from app.edge.whales import whale_new_positions
 from app.ws.hub import ConnectionManager
 
 log = logging.getLogger("market.edge.brief")
@@ -41,7 +43,7 @@ DIGEST:
 """
 
 
-def build_digest(duck: DuckStore) -> dict:
+def build_digest(duck: DuckStore, sqlite: SqliteStore | None = None) -> dict:
     now = datetime.now(timezone.utc).replace(tzinfo=None)
     digest: dict = {"generated_at": now.isoformat(timespec="minutes")}
 
@@ -51,6 +53,19 @@ def build_digest(duck: DuckStore) -> dict:
     if row:
         digest["regime"] = {"name": row[1], "score": round(float(row[0]), 1),
                             "as_of": str(row[2])[:10]}
+
+    # Daily net liquidity ($bn): level + ~1-month (20-print) delta.
+    netliq = duck.fetchall(
+        "SELECT ts, value FROM ts_macro WHERE series_id = 'NET_LIQUIDITY' "
+        "ORDER BY ts DESC LIMIT 21"
+    )
+    if netliq:
+        d20 = (float(netliq[0][1]) - float(netliq[20][1])) if len(netliq) == 21 else None
+        digest["net_liquidity"] = {
+            "bn": round(float(netliq[0][1])),
+            "d1m_bn": round(d20) if d20 is not None else None,
+            "as_of": str(netliq[0][0])[:10],
+        }
 
     row = duck.fetchone(
         "SELECT detail FROM corr_snapshots WHERE card_id = '_meta' "
@@ -106,6 +121,35 @@ def build_digest(duck: DuckStore) -> dict:
             for c in clusters
         ]
 
+    # Senate PTR trades on watchlist tickers, last 7 days (Phase 8 + 9).
+    if sqlite is not None:
+        watch = {r[0].upper() for r in sqlite.fetchall("SELECT symbol FROM watchlist")}
+        ptr_rows = duck.fetchall(
+            "SELECT senator, ticker, side, amount_min, filed_at FROM congress_trades "
+            "WHERE ticker IS NOT NULL AND filed_at >= ? "
+            "ORDER BY amount_min DESC NULLS LAST",
+            [now - timedelta(days=7)],
+        )
+        hits = [r for r in ptr_rows if str(r[1]).upper() in watch]
+        if hits:
+            digest["congress_watchlist_7d"] = {
+                "count": len(hits),
+                "top": [
+                    {"senator": h[0], "ticker": h[1], "side": h[2],
+                     "filed": str(h[4])[:10]}
+                    for h in hits[:5]
+                ],
+            }
+
+    # New top-10 whale positions from 13Fs filed in the last 7 days.
+    whale_new = whale_new_positions(duck, days=7, top_rank=10)
+    if whale_new:
+        digest["whale_new_positions_7d"] = [
+            {"fund": w["fund"], "issuer": w["issuer"], "rank": w["rank"],
+             "put_call": w["put_call"] or None}
+            for w in whale_new[:8]
+        ]
+
     extremes = [c for c in cot_summary(duck)
                 if c["cot_index"] is not None and (c["cot_index"] >= 90 or c["cot_index"] <= 10)]
     if extremes:
@@ -143,6 +187,10 @@ def render_template(digest: dict) -> str:
                      f"(composite {reg['score']:+}, as of {reg['as_of']})")
     if digest.get("stress_radar"):
         lines.append("**Stress radar is ON.**")
+    nl = digest.get("net_liquidity")
+    if nl:
+        delta = (f", {nl['d1m_bn']:+,} $bn/1m" if nl.get("d1m_bn") is not None else "")
+        lines.append(f"**Net liquidity:** {nl['bn']:,} $bn{delta} (as of {nl['as_of']})")
     if digest.get("alerts_24h"):
         lines.append("\n**Last 24h alerts**")
         lines += [f"- [{a['severity']}] {a['title']}" for a in digest["alerts_24h"]]
@@ -159,6 +207,19 @@ def render_template(digest: dict) -> str:
         lines.append("\n**Insider buys (14d)**")
         lines += [f"- {c['symbol']}: {c['buyers']} buyer(s), ~${c['total_usd']:,}"
                   for c in digest["insider_buys_14d"]]
+    cw = digest.get("congress_watchlist_7d")
+    if cw:
+        lines.append("\n**Congress trades on your watchlist (7d)**")
+        lines += [f"- {t['senator']}: {t['side'] or '?'} {t['ticker']} (filed {t['filed']})"
+                  for t in cw["top"]]
+        if cw["count"] > len(cw["top"]):
+            lines.append(f"- …and {cw['count'] - len(cw['top'])} more")
+    if digest.get("whale_new_positions_7d"):
+        lines.append("\n**New whale top-10 positions (13Fs filed this week)**")
+        lines += [f"- {w['fund']}: {w['issuer'] or '?'}"
+                  + (f" ({w['put_call']})" if w.get("put_call") else "")
+                  + f" — rank {w['rank']}"
+                  for w in digest["whale_new_positions_7d"]]
     if digest.get("cot_extremes"):
         lines.append("\n**COT extremes**")
         lines += [f"- {c['market']}: index {c['cot_index']}" for c in digest["cot_extremes"]]
@@ -181,51 +242,34 @@ class BriefService:
     def __init__(
         self,
         duck: DuckStore,
+        sqlite: SqliteStore,
         hub: ConnectionManager,
         ntfy: NtfyPublisher,
-        *,
-        ollama_url: str,
-        ollama_model: str,
-        ollama_timeout: float = 180.0,
+        llm: LlmClient,
     ) -> None:
         self._duck = duck
+        self._sqlite = sqlite
         self._hub = hub
         self._ntfy = ntfy
-        self._ollama_url = ollama_url.rstrip("/")
-        self._model = ollama_model
-        self._timeout = ollama_timeout
+        self._llm = llm
 
     async def _narrate(self, digest: dict) -> tuple[str, str]:
         """Returns (markdown, model). Falls back to the template on any failure."""
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(
-                    f"{self._ollama_url}/api/chat",
-                    json={
-                        "model": self._model,
-                        "messages": [{
-                            "role": "user",
-                            "content": _PROMPT.format(
-                                digest=json.dumps(digest, indent=1)),
-                        }],
-                        "stream": False,
-                        "options": {"temperature": 0.3},
-                    },
-                )
-                resp.raise_for_status()
-                text = resp.json()["message"]["content"]
-            # Qwen3 thinking models wrap reasoning in <think> — strip it.
-            text = re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL).strip()
-            if len(text) < 40:
-                raise ValueError("LLM returned an empty/too-short brief")
-            return text, self._model
+            text = await self._llm.generate(
+                _PROMPT.format(digest=json.dumps(digest, indent=1))
+            )
+            return text, self._llm.label
         except Exception as exc:
-            log.warning("ollama brief failed (%s) — using template fallback", exc)
+            log.warning("%s brief failed (%s) — using template fallback",
+                        self._llm.label, exc)
             return render_template(digest), "template"
 
     async def run(self, push: bool = True) -> dict:
         loop = asyncio.get_running_loop()
-        digest = await loop.run_in_executor(None, build_digest, self._duck)
+        digest = await loop.run_in_executor(
+            None, build_digest, self._duck, self._sqlite
+        )
         text, model = await self._narrate(digest)
 
         now = datetime.now(timezone.utc)

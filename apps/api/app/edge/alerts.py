@@ -66,6 +66,7 @@ class AlertEngine:
         large_print_notional: float = 250_000,
         insider_cluster_min_buyers: int = 2,
         insider_cluster_window_days: int = 14,
+        netliq_drain_bn: float = -150.0,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -75,6 +76,7 @@ class AlertEngine:
         self._large_notional = large_print_notional
         self._cluster_min = insider_cluster_min_buyers
         self._cluster_window = insider_cluster_window_days
+        self._netliq_drain = netliq_drain_bn
 
     # ------------------------------------------------------------------ state
 
@@ -105,6 +107,11 @@ class AlertEngine:
     def _cooled(self, key: str, now: datetime) -> bool:
         fired, _, _ = self._state(key)
         return fired is None or now - fired >= self._cooldown
+
+    def _fired_ever(self, key: str) -> bool:
+        """One-shot events (a specific PTR row, a specific 13F position) fire
+        once per key forever — a cooldown would re-fire them daily."""
+        return self._state(key)[0] is not None
 
     # ------------------------------------------------------------------ rules
 
@@ -398,12 +405,101 @@ class AlertEngine:
             ))
         return out
 
+    # --------------------------------------------------- Phase 8/9 rules
+
+    def _rule_netliq_drain(self, now: datetime, regime: str) -> list[Alert]:
+        """NET_LIQUIDITY 20-print (~1 month) change below the threshold —
+        crossing semantics: fires entering the drained state, not every sweep."""
+        rows = self._duck.fetchall(
+            "SELECT value FROM ts_macro WHERE series_id = 'NET_LIQUIDITY' "
+            "ORDER BY ts DESC LIMIT 21"
+        )
+        if len(rows) < 21:
+            return []
+        delta = float(rows[0][0]) - float(rows[20][0])
+        key = "netliq_drain"
+        _, prev, _ = self._state(key)
+        self._save_state(key, value=delta)
+        if delta >= self._netliq_drain:
+            return []
+        if prev is not None and prev < self._netliq_drain:
+            return []  # already in the drained state last sweep
+        if not self._cooled(key, now):
+            return []
+        return [Alert(
+            rule="netliq_drain", key=key, severity="warn",
+            title=f"Net liquidity draining: {delta:+,.0f} $bn/1m",
+            body=f"Daily Fed net liquidity (WALCL − TGA − RRP) is down "
+                 f"{delta:+,.0f} $bn over the last 20 prints (~1 month), past the "
+                 f"{self._netliq_drain:+,.0f} $bn threshold. Liquidity leads risk "
+                 f"assets by ~5-6 weeks — a sustained drain is a headwind. "
+                 f"Level: {float(rows[0][0]):,.0f} $bn. Regime: {regime}.",
+            value=round(delta, 1),
+        )]
+
+    def _rule_congress_watchlist(self, now: datetime, regime: str) -> list[Alert]:
+        """New Senate PTR row on a watchlist ticker — one alert per
+        (senator, ticker, ptr_id), ever."""
+        watch = {
+            r[0].upper() for r in self._sqlite.fetchall("SELECT symbol FROM watchlist")
+        }
+        if not watch:
+            return []
+        rows = self._duck.fetchall(
+            "SELECT ptr_id, senator, ticker, side, amount_min, amount_max, filed_at "
+            "FROM congress_trades WHERE ticker IS NOT NULL AND filed_at >= ?",
+            [now - timedelta(days=14)],
+        )
+        out: list[Alert] = []
+        for ptr_id, senator, ticker, side, lo, hi, filed in rows:
+            if str(ticker).upper() not in watch:
+                continue
+            key = f"congress_watch:{ptr_id}:{senator}:{ticker}"
+            if self._fired_ever(key):
+                continue
+            band = ""
+            if lo is not None:
+                band = f" (${lo:,.0f}–${hi:,.0f})" if hi is not None else f" (>${lo:,.0f})"
+            out.append(Alert(
+                rule="congress_watchlist", key=key, severity="info",
+                title=f"Senator traded {ticker}: {senator} {side or '?'}",
+                body=f"{senator} filed a PTR ({str(filed)[:10]}) reporting a "
+                     f"{side or 'trade'} of {ticker}{band} — the ticker is on "
+                     "your watchlist. Single trades are noise; clusters matter.",
+                symbol=str(ticker), value=float(lo) if lo is not None else None,
+            ))
+        return out
+
+    def _rule_whale_new_position(self, now: datetime, regime: str) -> list[Alert]:
+        """A top-10 holding absent from the fund's previous 13F — one alert
+        per (cik, cusip, latest accession), ever."""
+        from app.edge.whales import whale_new_positions
+
+        out: list[Alert] = []
+        for w in whale_new_positions(self._duck, days=30, top_rank=10):
+            key = f"whale_new:{w['cik']}:{w['cusip']}:{w['accession']}"
+            if self._fired_ever(key):
+                continue
+            pc = f" ({w['put_call']})" if w.get("put_call") else ""
+            val = f" (~${w['value'] / 1e9:.1f}bn)" if w.get("value") else ""
+            out.append(Alert(
+                rule="whale_new_position", key=key, severity="info",
+                title=f"Whale new position: {w['fund']} → {w['issuer'] or w['cusip']}",
+                body=f"{w['fund']}'s latest 13F (quarter ending {w['period']}, "
+                     f"filed {w['filed_at']}) shows {w['issuer'] or w['cusip']}{pc} "
+                     f"as a NEW top-10 position at rank {w['rank']}{val}. "
+                     "13F data lags up to 45 days.",
+                symbol=w["issuer"], value=w.get("value"),
+            ))
+        return out
+
     # ------------------------------------------------------------------ sweep
 
     _RULES = (
         _rule_regime_flip, _rule_macro_z, _rule_vix_term, _rule_corr_break,
         _rule_retail_spike, _rule_insider_cluster, _rule_cot_extreme,
         _rule_gex_flip, _rule_large_print,
+        _rule_netliq_drain, _rule_congress_watchlist, _rule_whale_new_position,
     )
 
     def _evaluate(self) -> list[Alert]:

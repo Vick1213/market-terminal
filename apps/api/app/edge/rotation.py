@@ -26,6 +26,7 @@ import pandas as pd
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.prices import ensure_daily_history
+from app.macro.breadth import compute_breadth_series
 
 log = logging.getLogger("market.edge.rotation")
 
@@ -159,3 +160,12 @@ class RotationPipeline:
             except Exception as exc:
                 log.warning("sector leg %s failed: %s", sym, exc)
         log.info("rotation history ensured (%s sectors)", len(self._sectors))
+        # The sector bars double as the composite's breadth input — recompute
+        # the BREADTH_PCT_ABOVE_200DMA series while they're fresh.
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None, compute_breadth_series, self._duck, self._sectors
+            )
+        except Exception as exc:
+            log.warning("breadth compute failed: %s", exc)

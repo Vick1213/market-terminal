@@ -3,6 +3,7 @@ import type {
   BriefResponse,
   CalendarResponse,
   ChartMarker,
+  CongressResponse,
   CotResponse,
   GexResponse,
   InsiderResponse,
@@ -18,8 +19,10 @@ import type {
   RetailSymbolResponse,
   SeriesCatalogResponse,
   SeriesResponse,
+  StrategistResponse,
   WatchlistQuote,
   WatchlistResponse,
+  WhalesResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -171,6 +174,20 @@ export async function fetchInsider(days = 30): Promise<InsiderResponse> {
   return res.json();
 }
 
+export async function fetchCongress(days = 90, limit = 60): Promise<CongressResponse> {
+  const res = await fetch(`${API_URL}/api/congress?days=${days}&limit=${limit}`, {
+    cache: "no-store",
+  });
+  if (!res.ok) throw new Error(`congress request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchWhales(): Promise<WhalesResponse> {
+  const res = await fetch(`${API_URL}/api/whales`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`whales request failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchCalendar(days = 30): Promise<CalendarResponse> {
   const res = await fetch(`${API_URL}/api/calendar?days=${days}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`calendar request failed: ${res.status}`);
@@ -189,6 +206,18 @@ export async function runBrief(): Promise<BriefResponse> {
   return res.json();
 }
 
+export async function fetchStrategist(): Promise<StrategistResponse> {
+  const res = await fetch(`${API_URL}/api/strategist`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`strategist request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runStrategist(): Promise<StrategistResponse> {
+  const res = await fetch(`${API_URL}/api/strategist/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`strategist run failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchNews(symbol?: string, limit = 100): Promise<NewsResponse> {
   const qs = new URLSearchParams();
   if (symbol) qs.set("symbol", symbol);
@@ -196,4 +225,24 @@ export async function fetchNews(symbol?: string, limit = 100): Promise<NewsRespo
   const res = await fetch(`${API_URL}/api/news?${qs}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`news request failed: ${res.status}`);
   return res.json();
+}
+
+export async function addNewsTicker(symbol: string): Promise<{ symbol: string; new_items: number }> {
+  const res = await fetch(`${API_URL}/api/news/tickers`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ symbol }),
+  });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => null))?.detail;
+    throw new Error(detail ?? `add news ticker failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function removeNewsTicker(symbol: string): Promise<void> {
+  const res = await fetch(`${API_URL}/api/news/tickers?symbol=${encodeURIComponent(symbol)}`, {
+    method: "DELETE",
+  });
+  if (!res.ok) throw new Error(`remove news ticker failed: ${res.status}`);
 }

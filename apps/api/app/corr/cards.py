@@ -31,6 +31,7 @@ PRICE_LEGS: dict[str, str] = {
     "HG=F": "future",
     "USDJPY=X": "fx",
     "DX-Y.NYB": "index",
+    "EURUSD=X": "fx",
 }
 
 # ts_macro series the engine loads (besides prices).
@@ -41,7 +42,14 @@ MACRO_SERIES = [
     "VIXCLS", "VIX", "VIX3M",
     "DTWEXBGS", "DCOILWTICO",
     "WALCL", "RRPONTSYD", "WTREGEN",
+    "NET_LIQUIDITY",  # daily ($bn), stored by the Phase-8 liquidity pipeline
+    "CN_CLI", "G20_CLI", "EA_BCI",  # monthly intl prints (Phase-9 DBnomics)
 ]
+
+# Monthly series get a bounded daily forward-fill at load time (engine.py):
+# without it the 10-business-day ffill leaves them stale/NaN against daily
+# legs and every intl card would read no-data between prints.
+MONTHLY_SERIES = {"CN_CLI", "G20_CLI", "EA_BCI"}
 
 
 @dataclass(frozen=True)
@@ -164,6 +172,31 @@ CARDS: list[CardSpec] = [
         normal="+ (energy → inflation expectations)",
         rationale="Oil feeds inflation expectations.",
         breaks_when="Supply-shock spikes break it.",
+    ),
+    # --- Phase 9: international legs (monthly DBnomics prints, weekly grid) ---
+    CardSpec(
+        id="cn_cli_copper", num=13, title="China cycle vs Copper", mode="corr",
+        legs=(Leg("M:CN_CLI", "China CLI", ret="diff"), Leg("P:HG=F", "Copper")),
+        expected_sign=+1, weekly=True, leader="China CLI",
+        normal="+ (China growth drives copper demand)",
+        rationale="China consumes ~half of global copper; its cycle (OECD CLI) leads the metal.",
+        breaks_when="Supply shocks (mine outages) or a non-China demand impulse (grid/EV buildout) decouple copper from the Chinese cycle.",
+    ),
+    CardSpec(
+        id="ea_bci_eurusd", num=14, title="EU confidence vs EURUSD", mode="corr",
+        legs=(Leg("M:EA_BCI", "EA business confidence", ret="diff"), Leg("P:EURUSD=X", "EURUSD")),
+        expected_sign=+1, weekly=True, leader="EA business confidence",
+        normal="+ (relative EU strength bids the euro)",
+        rationale="Improving euro-area business confidence → relative growth/rate expectations → EUR.",
+        breaks_when="Rate differentials dominate (Fed/ECB divergence) or energy shocks hit the euro regardless of surveys.",
+    ),
+    CardSpec(
+        id="g20_cli_btc", num=15, title="Global cycle vs BTC", mode="corr",
+        legs=(Leg("M:G20_CLI", "G20 CLI", ret="diff"), Leg("P:BTC/USD", "BTC")),
+        expected_sign=+1, weekly=True, leader="G20 CLI",
+        normal="+ (BTC trades the global liquidity/growth cycle)",
+        rationale="BTC behaves as a high-beta global-cycle asset; the G20 CLI proxies that cycle.",
+        breaks_when="BTC decouples on idiosyncratic flows (ETF launches, halvings) or trades as digital gold in stress.",
     ),
 ]
 

@@ -76,6 +76,11 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "api.stocktwits.com": (1, 3.0),
     "api.bsky.app": (3, 1.0),
     "tradestie.com": (1, 5.0),
+    "api.fiscaldata.treasury.gov": (2, 1.0),
+    "markets.newyorkfed.org": (2, 1.0),
+    "efdsearch.senate.gov": (1, 2.0),
+    "api.db.nomics.world": (2, 1.0),
+    "www.federalreserve.gov": (1, 2.0),
 }
 
 
@@ -157,6 +162,35 @@ class HttpClient:
             body=resp.content,
             headers=dict(resp.headers),
         )
+
+    @retry(
+        retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=20),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    async def post(
+        self,
+        url: str,
+        *,
+        data: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> HttpResponse:
+        """Rate-limited form POST (no conditional caching — POSTs aren't cacheable).
+        Session cookies set by prior requests ride along on the shared client."""
+        host = urlsplit(url).netloc
+        async with self._limiter(host):
+            resp = await self._client.post(url, data=data, headers=headers or {})
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise RetryableStatus(resp)
+        resp.raise_for_status()
+        return HttpResponse(
+            url=url, status=resp.status_code, body=resp.content, headers=dict(resp.headers)
+        )
+
+    def cookie(self, name: str) -> str | None:
+        """A cookie from the shared jar (e.g. the eFD csrftoken)."""
+        return self._client.cookies.get(name)
 
     async def get_json(self, url: str, **kw):
         return (await self.get(url, **kw)).json()

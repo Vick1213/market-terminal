@@ -69,9 +69,11 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
         <P>
           A pre-market synthesis of everything below: regime, last-24h alerts, broken
           correlations, retail spikes, insider buys, COT extremes, SPX gamma, and the
-          week&apos;s events. Written by the local LLM (chip shows the model); if the
-          chip says <em>template</em>, Ollama isn&apos;t running and you get the same facts
-          as plain bullet points.
+          week&apos;s events, plus net liquidity, congress watchlist trades and new whale
+          positions. Written by the configured LLM (chip shows provider:model — local
+          Ollama by default, or OpenAI / DeepSeek / Anthropic via MARKET_LLM_PROVIDER +
+          MARKET_LLM_API_KEY); if the chip says <em>template</em>, the LLM was
+          unreachable and you get the same facts as plain bullet points.
         </P>
         <Use>
           read it once with coffee instead of scanning 11 panels. ↻ regenerates on
@@ -140,6 +142,7 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
         </P>
         <Term k="multi-outlet badge">the same story arrived from N independent outlets — convergence makes it more likely to matter.</Term>
         <Term k="EDGAR chips">8-K item codes; 1.05 (cyber incident), 2.02 (results), 8.01 (other material) are the ones that gap stocks.</Term>
+        <Term k="+ticker">type a symbol in the chip row to track it in every per-symbol news source (Yahoo/EDGAR/Finnhub/SeekingAlpha) without putting it on the watchlist; × on its chip stops tracking and clears its items.</Term>
         <Use>
           treat single-outlet, low-confidence scores as noise. What matters: clusters of
           same-direction headlines on one name, or an 8-K chip on a watchlist ticker.
@@ -181,6 +184,13 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
           regime word (risk-on / neutral / risk-off / stress) comes from this.
         </P>
         <Term k="Net liquidity">Fed balance sheet − reverse repo − Treasury account: the &quot;money available to markets&quot; proxy that has led SPY/BTC for years.</Term>
+        <Term k="NET LIQ strip">
+          the daily version of that number (in $tn) — TGA from Treasury&apos;s daily
+          statement and ON RRP from the NY Fed, not the weekly FRED prints. RISING is
+          a tailwind for risk with a ~5-6 week lead; the 1w/1m deltas show whether
+          liquidity is being added or drained <em>right now</em>. Chart it from any
+          chart picker as &quot;Fed net liquidity ($bn, daily)&quot;.
+        </Term>
         <Term k="Contrarian extremes">NAAIM bottom decile + AAII bears ≫ bulls + elevated put/call together mark capitulation — historically a better buy signal than any headline.</Term>
         <Use>
           expand it to see <em>which bucket</em> drives the score. A risk-off print driven
@@ -302,6 +312,40 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
     ),
   },
   {
+    id: "whales",
+    title: "Whales — 13F Funds · Congress",
+    body: (
+      <>
+        <P>
+          <strong>13F whale portfolios:</strong> famous funds (Berkshire, Bridgewater,
+          Pershing Square, Scion, Druckenmiller&apos;s Duquesne, ...) must disclose US
+          equity holdings quarterly, within 45 days. Each row is a fund; click it for
+          the top holdings with quarter-over-quarter share-count changes. NEW marks a
+          position that entered the top-20; new/exit counts summarize turnover.
+        </P>
+        <Use>
+          this is a <em>conviction</em> feed, not a timing feed — the data is up to 45
+          days stale and funds can hedge invisibly. What matters: several whales
+          initiating the same name, a famous bear (Scion) going long, or a fund
+          concentrating into fewer names. Ignore small trims.
+        </Use>
+        <P>
+          <strong>Senate stock trades (PTRs):</strong> senators must disclose personal
+          trades within 45 days, in dollar bands. Scraped from the official Senate eFD
+          site — electronic filings only (paper filings are scanned images; House
+          disclosures are PDF-only and not tracked). ⚑ = the ticker is on your
+          watchlist.
+        </P>
+        <Use>
+          single trades are noise (spouses, advisers, index funds). The signal is
+          clustering: several senators buying the same sector ahead of legislation, or
+          committee members trading their own subject matter. Treat as a curiosity
+          screen that occasionally surfaces something worth researching.
+        </Use>
+      </>
+    ),
+  },
+  {
     id: "cookbook",
     title: "Correlation Cookbook",
     body: (
@@ -319,6 +363,34 @@ const SECTIONS: { id: string; title: string; body: React.ReactNode }[] = [
           pair is a candidate to fade (expect re-convergence). In stress, breaks are
           how new regimes announce themselves — do not fade them. Expand a card for
           rolling correlation history, rebased legs and lead-lag.
+        </Use>
+      </>
+    ),
+  },
+  {
+    id: "strategist",
+    title: "Strategist (signal synthesis)",
+    body: (
+      <>
+        <P>
+          A daily cross-panel synthesis: the macro regime sets a base allocation across
+          the terminal&apos;s asset classes (equities / gold &amp; silver / BTC &amp; ETH /
+          cash), then every stored signal — net-liquidity trend, dealer gamma, stress
+          radar, cookbook breaks, COT crowding, retail froth, insider clusters, whale
+          new positions — nudges it a few points. Click a bucket to see exactly which
+          signals moved it and by how much; the chips at the bottom show every input
+          with its freshness (○ = stale/missing, excluded from the rules).
+        </P>
+        <Term k="tilt (+/−pp)">how far signals pushed a bucket from its regime base. Small by design — this is a tilt engine, not a market-timing model.</Term>
+        <Term k="equity sleeve">the RRG quadrants translated into favor/avoid sector lists — a within-equities tilt, not extra buckets.</Term>
+        <Term k="inside this sleeve">each bucket split into individual holdings: equities into RRG-weighted sector ETFs plus single-name picks scored across insider clusters, Senate PTR flow, 13F whale adds, 7d news sentiment and relative tape (hover a row for all evidence); metals into GLD/SLV by the gold/silver ratio + COT; crypto into BTC/ETH by 3m relative momentum + COT.</Term>
+        <Term k="score">a pick&apos;s summed signal points — single names only appear when independent signals overlap (≥1.5), and are capped at ~10% of the equity sleeve each.</Term>
+        <Term k="strategy notes">3-5 one-liners connecting signals to positioning (e.g. &quot;gamma short + risk-off: size down, expect range expansion&quot;), written by the configured LLM; the chip shows which (or <em>template</em> when the LLM is off).</Term>
+        <Use>
+          read it as a daily &quot;what does everything together say&quot; sanity check
+          and review old snapshots in hindsight (one is stored per day). It is signal
+          synthesis from lagged, mechanical inputs — NOT financial advice and NOT an
+          execution target.
         </Use>
       </>
     ),

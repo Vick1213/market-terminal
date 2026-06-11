@@ -24,13 +24,19 @@ from app.db.sqlite import SqliteStore
 from app.edge.alerts import AlertEngine
 from app.edge.brief import BriefService
 from app.edge.calendar import CalendarPipeline
+from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
 from app.edge.gex import GexAdapter
 from app.edge.insider import InsiderPipeline
+from app.edge.llm import LlmClient
 from app.edge.ntfy import NtfyPublisher
 from app.edge.rotation import RotationPipeline
+from app.edge.strategist import StrategistService
+from app.edge.whales import WhalesPipeline
 from app.ingest.crypto import CryptoStreamer
 from app.ingest.http import HttpClient
+from app.ingest.intl import IntlPipeline
+from app.ingest.liquidity import LiquidityPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -111,6 +117,7 @@ async def lifespan(app: FastAPI):
         large_print_notional=settings.large_print_notional,
         insider_cluster_min_buyers=settings.insider_cluster_min_buyers,
         insider_cluster_window_days=settings.insider_cluster_window_days,
+        netliq_drain_bn=settings.netliq_drain_alert_bn,
     )
     insider_pipeline = InsiderPipeline(
         duck, sqlite, http,
@@ -125,17 +132,42 @@ async def lifespan(app: FastAPI):
     calendar_pipeline = CalendarPipeline(
         duck, sqlite, http, fred_api_key=settings.fred_api_key
     )
-    brief_service = BriefService(
-        duck, hub, ntfy,
+    # Phase 9: one LLM client behind both narratives (Ollama by default;
+    # OpenAI/DeepSeek/Anthropic via MARKET_LLM_PROVIDER + MARKET_LLM_API_KEY).
+    llm = LlmClient(
+        provider=settings.llm_provider,
+        model=settings.llm_model,
+        api_key=settings.llm_api_key,
+        base_url=settings.llm_base_url,
         ollama_url=settings.ollama_url,
         ollama_model=settings.ollama_model,
-        ollama_timeout=settings.ollama_timeout_seconds,
+        timeout=settings.llm_timeout_seconds,
+    )
+    log.info("llm narrative provider: %s (template fallback always on)", llm.label)
+    brief_service = BriefService(duck, sqlite, hub, ntfy, llm)
+
+    # Phase 8: true net liquidity + smart money 2.0.
+    liquidity_pipeline = LiquidityPipeline(duck, http, start=settings.liquidity_start)
+    congress_pipeline = CongressPipeline(
+        duck, sqlite, http, lookback_days=settings.congress_lookback_days
+    )
+    whales_pipeline = WhalesPipeline(
+        duck, http, settings.whale_funds, top_holdings=settings.whale_top_holdings
+    )
+
+    # Phase 9: international macro + strategist synthesis.
+    intl_pipeline = IntlPipeline(duck, http)
+    strategist_service = StrategistService(
+        duck, sqlite, hub, llm,
+        sectors=settings.sector_etfs, benchmark=settings.rrg_benchmark,
     )
 
     scheduler = build_scheduler(
         settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline,
         corr_pipeline, alert_engine, insider_pipeline, rotation_pipeline,
         cot_pipeline, gex_adapter, calendar_pipeline, brief_service,
+        liquidity_pipeline, congress_pipeline, whales_pipeline,
+        intl_pipeline, strategist_service,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -174,6 +206,12 @@ async def lifespan(app: FastAPI):
     app.state.gex_adapter = gex_adapter
     app.state.calendar_pipeline = calendar_pipeline
     app.state.brief_service = brief_service
+    app.state.liquidity_pipeline = liquidity_pipeline
+    app.state.congress_pipeline = congress_pipeline
+    app.state.whales_pipeline = whales_pipeline
+    app.state.llm = llm
+    app.state.intl_pipeline = intl_pipeline
+    app.state.strategist_service = strategist_service
 
     try:
         yield

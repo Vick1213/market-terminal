@@ -1,9 +1,9 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type { NewsItem, NewsMessage } from "@market/shared";
-import { fetchNews } from "@/lib/api";
+import { addNewsTicker, fetchNews, removeNewsTicker } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { NewsDetail } from "./NewsDetail";
 
@@ -102,11 +102,29 @@ function Sparkline({ items }: { items: NewsItem[] }) {
 export function NewsPanel() {
   const [symbol, setSymbol] = useState<string | null>(null);
   const [expanded, setExpanded] = useState(false);
+  const [draft, setDraft] = useState("");
+  const queryClient = useQueryClient();
 
   const { data, isLoading, isError } = useQuery({
     queryKey: ["news", symbol],
     queryFn: () => fetchNews(symbol ?? undefined),
     refetchInterval: 60_000,
+  });
+
+  const addTicker = useMutation({
+    mutationFn: addNewsTicker,
+    onSuccess: (r) => {
+      setDraft("");
+      setSymbol(r.symbol);
+      queryClient.invalidateQueries({ queryKey: ["news"] });
+    },
+  });
+  const removeTicker = useMutation({
+    mutationFn: removeNewsTicker,
+    onSuccess: (_d, removed) => {
+      if (symbol === removed) setSymbol(null);
+      queryClient.invalidateQueries({ queryKey: ["news"] });
+    },
   });
 
   const { status, messages } = useWebSocket("news", 100);
@@ -128,7 +146,11 @@ export function NewsPanel() {
     return [...byId.values()].sort((a, b) => b.published.localeCompare(a.published));
   }, [liveItems, data, symbol]);
 
-  const chips = data?.symbols ?? [];
+  const custom = useMemo(() => new Set(data?.custom ?? []), [data]);
+  const chips = useMemo(
+    () => [...new Set([...(data?.symbols ?? []), ...(data?.custom ?? [])])].sort(),
+    [data]
+  );
 
   // Expand on a TRUE click only: not on links/buttons/chips, and not on the
   // mouse-up that ends a react-grid-layout drag or resize — if the pointer
@@ -142,7 +164,7 @@ export function NewsPanel() {
     const dragged = d && Math.hypot(e.clientX - d.x, e.clientY - d.y) > 5;
     downAt.current = null;
     if (dragged) return;
-    if ((e.target as HTMLElement).closest("a, button")) return;
+    if ((e.target as HTMLElement).closest("a, button, input, form")) return;
     setExpanded(true);
   };
 
@@ -173,25 +195,63 @@ export function NewsPanel() {
         </span>
       </div>
       <div className="panel-body">
-        {chips.length > 0 && (
-          <div className="chip-row">
+        <div className="chip-row">
+          {chips.length > 0 && (
             <button
               className={`chip ${symbol === null ? "active" : ""}`}
               onClick={() => setSymbol(null)}
             >
               ALL
             </button>
-            {chips.map((s) => (
-              <button
-                key={s}
-                className={`chip ${symbol === s ? "active" : ""}`}
-                onClick={() => setSymbol(symbol === s ? null : s)}
-              >
-                {s}
-              </button>
-            ))}
-          </div>
-        )}
+          )}
+          {chips.map((s) => (
+            <button
+              key={s}
+              className={`chip ${symbol === s ? "active" : ""}`}
+              onClick={() => setSymbol(symbol === s ? null : s)}
+              title={custom.has(s) ? "custom news ticker" : undefined}
+            >
+              {s}
+              {custom.has(s) && (
+                <span
+                  title={`stop tracking ${s}`}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    removeTicker.mutate(s);
+                  }}
+                  style={{ marginLeft: 4, opacity: 0.6 }}
+                >
+                  ×
+                </span>
+              )}
+            </button>
+          ))}
+          <form
+            style={{ display: "inline-flex" }}
+            onSubmit={(e) => {
+              e.preventDefault();
+              const sym = draft.trim().toUpperCase();
+              if (sym && !addTicker.isPending) addTicker.mutate(sym);
+            }}
+          >
+            <input
+              className="chip"
+              value={draft}
+              onChange={(e) => setDraft(e.target.value.toUpperCase())}
+              placeholder={addTicker.isPending ? "fetching…" : "+ticker"}
+              disabled={addTicker.isPending}
+              maxLength={10}
+              spellCheck={false}
+              title="Track a custom ticker: Yahoo/EDGAR/Finnhub/SeekingAlpha news without adding it to the watchlist"
+              style={{ width: 64, background: "transparent", color: "inherit", border: "1px dashed var(--panel-border, #2a2a2a)" }}
+            />
+          </form>
+          {addTicker.isError && (
+            <span style={{ fontSize: 10, color: "var(--red)" }}>
+              {(addTicker.error as Error).message}
+            </span>
+          )}
+        </div>
 
         {isError && (
           <div style={{ color: "var(--red)" }}>API unreachable — is the backend running?</div>

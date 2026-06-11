@@ -47,9 +47,12 @@ MACRO_LABELS: dict[str, str] = {
     "DFF": "Fed funds",
     "SOFR": "SOFR",
     "WALCL": "Fed balance sheet",
-    "RRPONTSYD": "Reverse repo",
-    "WTREGEN": "Treasury TGA",
+    "RRPONTSYD": "Reverse repo (FRED, weekly-ish)",
+    "WTREGEN": "Treasury TGA (FRED, weekly)",
     "WRESBAL": "Bank reserves",
+    "NET_LIQUIDITY": "Fed net liquidity ($bn, daily)",
+    "TGA_CLOSE": "Treasury TGA ($bn, daily)",
+    "RRP_ON": "ON reverse repo ($bn, daily)",
     "NAAIM_EXPOSURE": "NAAIM exposure",
     "AAII_BULL": "AAII bulls %",
     "AAII_BEAR": "AAII bears %",
@@ -72,6 +75,13 @@ MACRO_LABELS: dict[str, str] = {
     "CORR_USD_COMMOD": "Corr 90d: DXY↔Gold",
     "CORR_VIX_TERM": "VIX3M/VIX ratio",
     "CORR_OIL_BREAKEVEN": "Corr 90d: Oil↔Breakevens",
+    "BREADTH_PCT_ABOVE_200DMA": "Breadth: % sectors > 200DMA",
+    "CN_CLI": "China leading indicator (OECD)",
+    "G20_CLI": "G20 leading indicator (OECD)",
+    "EA_BCI": "Euro-area business confidence",
+    "CORR_CN_CLI_COPPER": "Corr 26w: China CLI↔Copper",
+    "CORR_EA_BCI_EURUSD": "Corr 26w: EA conf↔EURUSD",
+    "CORR_G20_CLI_BTC": "Corr 26w: G20 CLI↔BTC",
 }
 
 RETAIL_CATALOG_LIMIT = 30  # top movers only — the long tail isn't chartworthy

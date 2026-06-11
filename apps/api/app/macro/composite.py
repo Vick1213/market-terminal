@@ -79,6 +79,7 @@ _RAW_SERIES = [
     "NAAIM_EXPOSURE", "AAII_BULL", "AAII_BEAR", "PC_TOTAL",
     "DFII10", "DTWEXBGS", "T10Y2Y",
     "WALCL", "RRPONTSYD", "WTREGEN",
+    "NET_LIQUIDITY",  # daily ($bn), stored by the Phase-8 liquidity pipeline
 ]
 
 
@@ -150,13 +151,21 @@ def _derive(series: dict[str, pd.Series]) -> None:
             series["AAII_SPREAD"] = spread
     walcl, rrp, tga = series.get("WALCL"), series.get("RRPONTSYD"), series.get("WTREGEN")
     if walcl is not None and rrp is not None and tga is not None:
+        # Weekly FRED proxy in $bn (WALCL/WTREGEN are $mn; RRPONTSYD is $bn).
         # Mixed cadences (weekly/daily) — align on a union calendar and ffill.
         idx = walcl.index.union(rrp.index).union(tga.index)
         net = (
-            walcl.reindex(idx).ffill()
+            walcl.reindex(idx).ffill() / 1000.0
             - rrp.reindex(idx).ffill()
-            - tga.reindex(idx).ffill()
+            - tga.reindex(idx).ffill() / 1000.0
         ).dropna()
+        # The Phase-8 pipeline stores a daily NET_LIQUIDITY ($bn) from
+        # FiscalData TGA + NY Fed RRP — splice it over the weekly proxy so
+        # recent data is daily and pre-2022 history is preserved.
+        daily = series.get("NET_LIQUIDITY")
+        if daily is not None and not daily.dropna().empty:
+            daily = daily.dropna()
+            net = pd.concat([net[net.index < daily.index.min()], daily])
         if not net.empty:
             series["NET_LIQUIDITY"] = net
 

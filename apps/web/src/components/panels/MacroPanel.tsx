@@ -3,7 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import type { MacroBucket, MacroMessage, MacroResponse } from "@market/shared";
+import type { LiquidityBlock, MacroBucket, MacroMessage, MacroResponse } from "@market/shared";
 import { fetchMacro } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 import { MarketChart } from "../charts/MarketChart";
@@ -103,6 +103,36 @@ function HistorySpark({ data }: { data: MacroResponse }) {
         strokeWidth={1.5}
       />
     </svg>
+  );
+}
+
+/** Daily Fed net liquidity (WALCL − TGA − RRP, $bn) with the 1-month delta —
+ * the Phase-8 upgrade over the weekly FRED proxy. Rising = tailwind for risk. */
+function LiquidityStrip({ liq }: { liq: LiquidityBlock }) {
+  const d20 = liq.d20_bn;
+  const rising = d20 !== null && d20 >= 0;
+  const color = d20 === null ? "var(--text-dim)" : rising ? "var(--green)" : "var(--red)";
+  const fmt = (v: number | null) => (v === null ? "—" : `$${(v / 1000).toFixed(2)}tn`);
+  return (
+    <div
+      className="regime-banner"
+      style={{ borderColor: color, marginTop: 8 }}
+      title={
+        `Fed net liquidity = balance sheet (WALCL ${fmt(liq.walcl_bn)}) − TGA ($${liq.tga_bn ?? "?"}bn, daily Treasury data)` +
+        ` − ON RRP ($${liq.rrp_bn ?? "?"}bn, daily NY Fed data) — as of ${liq.as_of}.` +
+        ` Rising net liquidity historically leads risk assets by ~5-6 weeks.`
+      }
+    >
+      <span className="regime-tag" style={{ color }}>
+        NET LIQ {d20 === null ? "" : rising ? "RISING" : "FALLING"}
+      </span>
+      <span style={{ fontSize: 11, color: "var(--text-dim)" }}>
+        {fmt(liq.net_bn)}
+        {liq.d5_bn !== null && ` · 1w ${liq.d5_bn >= 0 ? "+" : ""}${liq.d5_bn}bn`}
+        {d20 !== null && ` · 1m ${d20 >= 0 ? "+" : ""}${d20}bn`}
+        {` · ${liq.as_of}`}
+      </span>
+    </div>
   );
 }
 
@@ -342,6 +372,8 @@ export function MacroPanel() {
               </span>
             </div>
             <Gauge score={data.score ?? 0} />
+
+            {data.liquidity && <LiquidityStrip liq={data.liquidity} />}
 
             <div className="bucket-list">
               {data.buckets.map((b) => (

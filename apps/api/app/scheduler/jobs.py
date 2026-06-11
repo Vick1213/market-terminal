@@ -21,10 +21,15 @@ from app.corr.pipeline import CorrPipeline
 from app.edge.alerts import AlertEngine
 from app.edge.brief import BriefService
 from app.edge.calendar import CalendarPipeline
+from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
 from app.edge.gex import GexAdapter
 from app.edge.insider import InsiderPipeline
 from app.edge.rotation import RotationPipeline
+from app.edge.strategist import StrategistService
+from app.edge.whales import WhalesPipeline
+from app.ingest.intl import IntlPipeline
+from app.ingest.liquidity import LiquidityPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -64,6 +69,11 @@ def build_scheduler(
     gex_adapter: GexAdapter | None = None,
     calendar_pipeline: CalendarPipeline | None = None,
     brief_service: BriefService | None = None,
+    liquidity_pipeline: LiquidityPipeline | None = None,
+    congress_pipeline: CongressPipeline | None = None,
+    whales_pipeline: WhalesPipeline | None = None,
+    intl_pipeline: IntlPipeline | None = None,
+    strategist_service: StrategistService | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -328,6 +338,55 @@ def build_scheduler(
             minutes=settings.alerts_poll_minutes,
             next_run_time=soon + timedelta(seconds=560),
             id="edge_alerts",
+            **common,
+        )
+    # --- Phase 8: true net liquidity + smart money 2.0 ---
+    if liquidity_pipeline is not None:
+        scheduler.add_job(
+            liquidity_pipeline.run,
+            trigger="interval",
+            minutes=settings.liquidity_poll_minutes,
+            next_run_time=soon + timedelta(seconds=590),
+            id="liquidity",
+            **common,
+        )
+    if congress_pipeline is not None:
+        scheduler.add_job(
+            congress_pipeline.run,
+            trigger="interval",
+            minutes=settings.congress_poll_minutes,
+            next_run_time=soon + timedelta(seconds=620),
+            id="edge_congress",
+            **common,
+        )
+    if whales_pipeline is not None:
+        scheduler.add_job(
+            whales_pipeline.run,
+            trigger="interval",
+            minutes=settings.whales_poll_minutes,
+            next_run_time=soon + timedelta(seconds=650),
+            id="edge_whales",
+            **common,
+        )
+    # --- Phase 9: intl macro + strategist ---
+    if intl_pipeline is not None:
+        scheduler.add_job(
+            intl_pipeline.run,
+            trigger="interval",
+            minutes=settings.intl_poll_minutes,
+            next_run_time=soon + timedelta(seconds=680),
+            id="ingest_intl",
+            **common,
+        )
+    if strategist_service is not None:
+        # Runs after the first full round of ingests/computes so the rules
+        # table has live signals to synthesize from.
+        scheduler.add_job(
+            strategist_service.run,
+            trigger="interval",
+            minutes=settings.strategist_poll_minutes,
+            next_run_time=soon + timedelta(seconds=710),
+            id="edge_strategist",
             **common,
         )
     if brief_service is not None:

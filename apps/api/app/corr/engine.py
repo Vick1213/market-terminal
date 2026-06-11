@@ -22,7 +22,10 @@ from datetime import date, datetime, timedelta, timezone
 import numpy as np
 import pandas as pd
 
-from app.corr.cards import CARDS, CARDS_BY_ID, HEATMAP_LEGS, MACRO_SERIES, PRICE_LEGS, CardSpec, Leg
+from app.corr.cards import (
+    CARDS, CARDS_BY_ID, HEATMAP_LEGS, MACRO_SERIES, MONTHLY_SERIES, PRICE_LEGS,
+    CardSpec, Leg,
+)
 from app.db.duck import DuckStore
 
 log = logging.getLogger("market.corr")
@@ -36,6 +39,11 @@ LAG_SCAN = 20             # ±days for the daily lead-lag scan
 LAG_WINDOW = 252          # trailing window the lag scan correlates over
 WEEKLY_LAG_MAX = 8        # net-liq leads by ~5-6 weeks; scan 0..8
 WEEKLY_LAG_WINDOW = 104   # trailing weeks for the weekly lag scan
+# Monthly series carry forward up to this many calendar days past their last
+# print (one print + publication lag). Bounded so a dead DBnomics mirror
+# still degrades to no-data via the normal staleness gate instead of posing
+# as a current reading forever.
+MONTHLY_EXTEND_DAYS = 45
 
 
 def _f(x) -> float | None:
@@ -75,6 +83,20 @@ def load_series(duck: DuckStore) -> dict[str, pd.Series]:
         df["date"] = pd.to_datetime(df["ts"]).dt.normalize()
         for sid, g in df.groupby("series_id"):
             out[f"M:{sid}"] = g.groupby("date")["value"].last().sort_index()
+
+    # Monthly prints -> daily step series with a bounded carry-forward, so
+    # the weekly cards see full coverage between prints (the generic 10-bday
+    # ffill in _align can't bridge a monthly gap).
+    for sid in MONTHLY_SERIES:
+        s = out.get(f"M:{sid}")
+        if s is None or s.empty:
+            continue
+        end = min(
+            pd.Timestamp.now().normalize(),
+            s.index.max() + pd.Timedelta(days=MONTHLY_EXTEND_DAYS),
+        )
+        idx = pd.date_range(s.index.min(), end, freq="D")
+        out[f"M:{sid}"] = s.reindex(idx).ffill()
 
     ph = ", ".join("?" for _ in PRICE_LEGS)
     df = duck.fetchdf(
@@ -119,12 +141,19 @@ def _derive(series: dict[str, pd.Series]) -> None:
             series["D:VIX_TERM"] = term
     walcl, rrp, tga = (series.get(k) for k in ("M:WALCL", "M:RRPONTSYD", "M:WTREGEN"))
     if walcl is not None and rrp is not None and tga is not None:
+        # Weekly FRED proxy in $bn (WALCL/WTREGEN are $mn; RRPONTSYD is $bn).
         idx = walcl.index.union(rrp.index).union(tga.index)
         net = (
-            walcl.reindex(idx).ffill()
+            walcl.reindex(idx).ffill() / 1000.0
             - rrp.reindex(idx).ffill()
-            - tga.reindex(idx).ffill()
+            - tga.reindex(idx).ffill() / 1000.0
         ).dropna()
+        # Splice the stored daily series (Phase-8 liquidity pipeline, $bn)
+        # over the weekly proxy: daily resolution now, 2015+ history intact.
+        daily = series.get("M:NET_LIQUIDITY")
+        if daily is not None and not daily.dropna().empty:
+            daily = daily.dropna()
+            net = pd.concat([net[net.index < daily.index.min()], daily])
         if not net.empty:
             series["D:NET_LIQUIDITY"] = net
 

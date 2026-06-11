@@ -273,6 +273,62 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # --- Phase 8: true net liquidity + smart money 2.0 ---
+    # Senate PTR (Periodic Transaction Report) stock trades scraped from the
+    # official eFD site. Electronic filings only — paper PTRs are scanned
+    # images. House PTRs are PDF-only and not ingested.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS congress_trades (
+            ptr_id      VARCHAR NOT NULL,   -- eFD report uuid
+            row_no      INTEGER NOT NULL,   -- row inside the PTR table
+            senator     VARCHAR NOT NULL,
+            filed_at    TIMESTAMP NOT NULL,
+            tx_date     TIMESTAMP,
+            ticker      VARCHAR,            -- NULL for non-equity assets
+            asset       VARCHAR,
+            asset_type  VARCHAR,
+            side        VARCHAR,            -- buy | sell | exchange
+            tx_type     VARCHAR,            -- raw eFD label (Sale (Full) ...)
+            amount_min  DOUBLE,             -- disclosed band, USD
+            amount_max  DOUBLE,             -- NULL on open-ended bands
+            url         VARCHAR,
+            PRIMARY KEY (ptr_id, row_no)
+        );
+        """
+    )
+    # 13F-HR filings for the tracked whale funds (one row per filing) plus
+    # their top holdings. Holdings are aggregated by (cusip, class, put/call)
+    # across the filing's infoTable entries; only the top N by value are kept.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS whale_filings (
+            accession    VARCHAR PRIMARY KEY,
+            cik          BIGINT NOT NULL,
+            fund         VARCHAR NOT NULL,
+            period       TIMESTAMP NOT NULL,  -- report quarter end
+            filed_at     TIMESTAMP NOT NULL,
+            total_value  DOUBLE,              -- USD, whole portfolio
+            positions    INTEGER              -- distinct holdings in the filing
+        );
+        """
+    )
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS whale_holdings (
+            accession  VARCHAR NOT NULL,
+            cusip      VARCHAR NOT NULL,
+            cls        VARCHAR NOT NULL,     -- titleOfClass (COM, CL A ...)
+            put_call   VARCHAR NOT NULL,     -- '' | Put | Call
+            issuer     VARCHAR,
+            value      DOUBLE,               -- USD
+            shares     DOUBLE,
+            pct        DOUBLE,               -- value / filing total_value
+            rank       INTEGER,              -- 1 = largest position
+            PRIMARY KEY (accession, cusip, cls, put_call)
+        );
+        """
+    )
     # Daily pre-market auto-brief (one row per day; re-runs replace).
     duck.execute(
         """
@@ -282,6 +338,20 @@ def init_duckdb(duck: DuckStore) -> None:
             text    VARCHAR,               -- markdown narrative
             model   VARCHAR,               -- LLM used, or 'template'
             detail  VARCHAR                -- JSON digest the narrative grounds on
+        );
+        """
+    )
+    # --- Phase 9: strategist ---
+    # Daily strategist snapshots (one row per day; re-runs replace). detail =
+    # full JSON output (allocation, reasons, signals) so suggestions are
+    # reviewable in hindsight against what actually happened.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS strategist_snapshots (
+            ts      TIMESTAMP PRIMARY KEY,
+            regime  VARCHAR,
+            model   VARCHAR,               -- LLM used for notes, or 'template'
+            detail  VARCHAR                -- JSON: buckets, signals, notes
         );
         """
     )
@@ -387,6 +457,16 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         CREATE TABLE IF NOT EXISTS app_meta (
             key   TEXT PRIMARY KEY,
             value TEXT
+        );
+        """
+    )
+    # Extra tickers tracked by the news ingestors only (added from the News
+    # panel) — news coverage without putting the symbol on the watchlist.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS news_tickers (
+            symbol   TEXT PRIMARY KEY,
+            added_at TEXT DEFAULT (datetime('now'))
         );
         """
     )

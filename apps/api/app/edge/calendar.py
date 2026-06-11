@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 from datetime import date, datetime, timedelta, timezone
 
 from app.db.duck import DuckStore
@@ -27,11 +28,83 @@ from app.ingest.http import HttpClient
 
 log = logging.getLogger("market.edge.calendar")
 
-# FOMC decision (statement) days. Extend yearly when the Fed publishes.
+# FOMC decision (statement) days — FALLBACK only; the live schedule is now
+# scraped from federalreserve.gov each run (Phase 9 §3). Extend yearly so the
+# fallback stays useful when the scrape breaks.
 FOMC_DECISIONS = [
     "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17",
     "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09",
 ]
+
+FOMC_URL = "https://www.federalreserve.gov/monetarypolicy/fomccalendars.htm"
+
+# DOM verified 2026-06-10: per-year panels headed by <h4>…YYYY FOMC Meetings…
+# </h4>, each meeting a row with a fomc-meeting__month div (<strong>January
+# </strong>, or "April/May" when a meeting straddles months) and a
+# fomc-meeting__date div ("27-28", "3-4*", single "29" possible).
+_FOMC_YEAR_RE = re.compile(r"(\d{4})\s+FOMC\s+Meetings", re.I)
+_FOMC_MONTH_RE = re.compile(
+    r'fomc-meeting__month[^>]*>\s*(?:<strong>)?\s*([A-Za-z./ ]+(?:/[A-Za-z.]+)?)', re.I
+)
+_FOMC_DATE_RE = re.compile(r'fomc-meeting__date[^>]*>([^<]*)<', re.I)
+
+_MONTHS = {
+    m.lower(): i + 1 for i, m in enumerate(
+        ["January", "February", "March", "April", "May", "June", "July",
+         "August", "September", "October", "November", "December"]
+    )
+}
+
+
+def _month_num(name: str) -> int | None:
+    name = name.strip().strip(".").lower()
+    if name in _MONTHS:
+        return _MONTHS[name]
+    for full, num in _MONTHS.items():  # tolerate "Jan", "Sept" abbreviations
+        if full.startswith(name[:3]) and len(name) >= 3:
+            return num
+    return None
+
+
+def parse_fomc_meetings(html: str) -> list[date]:
+    """Fed calendar page -> decision days (the LAST day of each meeting)."""
+    years = [(m.start(), int(m.group(1))) for m in _FOMC_YEAR_RE.finditer(html)]
+    if not years:
+        return []
+    months = [(m.start(), m.group(1)) for m in _FOMC_MONTH_RE.finditer(html)]
+    dates = [(m.start(), m.group(1)) for m in _FOMC_DATE_RE.finditer(html)]
+
+    def _year_at(pos: int) -> int | None:
+        prior = [y for p, y in years if p < pos]
+        return prior[-1] if prior else None
+
+    out: list[date] = []
+    di = 0
+    for pos, month_text in months:
+        # The date cell that belongs to this month cell is the next one after it.
+        while di < len(dates) and dates[di][0] < pos:
+            di += 1
+        if di >= len(dates):
+            break
+        date_text = dates[di][1]
+        di += 1
+        year = _year_at(pos)
+        if year is None:
+            continue
+        day_nums = re.findall(r"\d+", date_text)
+        if not day_nums:
+            continue
+        # "April/May" + "28-29" -> the decision day is the last day in the
+        # last-listed month; a single month keeps that month for both days.
+        month_names = [p for p in month_text.split("/") if p.strip()]
+        last_month = _month_num(month_names[-1]) if month_names else None
+        if last_month is None:
+            continue
+        try:
+            out.append(date(year, last_month, int(day_nums[-1])))
+        except ValueError:
+            continue
+    return sorted(set(out))
 
 # FRED release ids for the prints that move markets.
 FRED_RELEASES = {
@@ -74,19 +147,33 @@ class CalendarPipeline:
              for eid, d, kind, title, sym, src in events],
         )
 
+    async def _fomc_events(self) -> list[tuple]:
+        """Scrape the live FOMC schedule; static table is the fallback."""
+        today = date.today()
+        horizon = today + timedelta(days=HORIZON_DAYS)
+        days: list[date] = []
+        source = "federalreserve.gov (scraped)"
+        try:
+            html = await self._http.get_text(FOMC_URL)
+            days = [d for d in parse_fomc_meetings(html) if today <= d <= horizon]
+            if not days:
+                log.warning("FOMC scrape returned no upcoming meetings — using static table")
+        except Exception as exc:
+            log.warning("FOMC calendar scrape failed (%s) — using static table", exc)
+        if not days:
+            source = "federalreserve.gov (static fallback)"
+            days = [d for i in FOMC_DECISIONS
+                    if today <= (d := date.fromisoformat(i)) <= horizon]
+            if not days and not any(date.fromisoformat(i) >= today for i in FOMC_DECISIONS):
+                log.warning("FOMC static table exhausted — add the new year's dates")
+        return [(f"fomc:{d}", d, "fomc",
+                 "FOMC rate decision (14:00 ET) + presser", None, source)
+                for d in days]
+
     def _static_events(self) -> list[tuple]:
         today = date.today()
         horizon = today + timedelta(days=HORIZON_DAYS)
         ev: list[tuple] = []
-        for iso in FOMC_DECISIONS:
-            d = date.fromisoformat(iso)
-            if today <= d <= horizon:
-                ev.append((f"fomc:{iso}", d, "fomc",
-                           "FOMC rate decision (14:00 ET) + presser", None,
-                           "federalreserve.gov (static schedule)"))
-        if not any(date.fromisoformat(i) >= today for i in FOMC_DECISIONS):
-            log.warning("FOMC schedule table exhausted — add the new year's dates")
-
         m_year, m_month = today.year, today.month
         for _ in range(5):
             opex = _third_friday(m_year, m_month)
@@ -179,6 +266,7 @@ class CalendarPipeline:
     async def run(self) -> int:
         loop = asyncio.get_running_loop()
         events = self._static_events()
+        events += await self._fomc_events()
         events += await self._fred_release_events()
         try:
             events += await loop.run_in_executor(None, self._earnings_events)

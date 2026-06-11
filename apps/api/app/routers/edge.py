@@ -147,6 +147,70 @@ async def insider(request: Request, days: int = Query(30, le=120)) -> dict:
     }
 
 
+@router.get("/congress")
+async def congress(request: Request, days: int = Query(90, le=365), limit: int = Query(60, le=200)) -> dict:
+    """Recent Senate PTR stock trades (electronic filings), newest first.
+    Watchlist tickers are flagged so the panel can highlight overlap."""
+    duck = request.app.state.duck
+    sqlite = request.app.state.sqlite
+    loop = asyncio.get_running_loop()
+
+    def _q():
+        trades = duck.fetchall(
+            "SELECT ptr_id, row_no, senator, filed_at, tx_date, ticker, asset, "
+            "asset_type, side, amount_min, amount_max, url "
+            "FROM congress_trades WHERE filed_at >= current_date - INTERVAL (?) DAY "
+            "ORDER BY filed_at DESC, ptr_id, row_no LIMIT ?",
+            [days, limit],
+        )
+        watch = {
+            r[0].upper() for r in sqlite.fetchall("SELECT symbol FROM watchlist")
+        }
+        return trades, watch
+
+    trades, watch = await loop.run_in_executor(None, _q)
+    return {
+        "trades": [
+            {
+                "ptr_id": t[0], "row": t[1], "senator": t[2],
+                "filed_at": str(t[3])[:10],
+                "tx_date": str(t[4])[:10] if t[4] else None,
+                "ticker": t[5], "asset": t[6], "asset_type": t[7], "side": t[8],
+                "amount_min": float(t[9]) if t[9] is not None else None,
+                "amount_max": float(t[10]) if t[10] is not None else None,
+                "url": t[11],
+                "on_watchlist": bool(t[5] and t[5].upper() in watch),
+            }
+            for t in trades
+        ],
+    }
+
+
+@router.get("/whales")
+async def whales(request: Request) -> dict:
+    """13F whale funds: latest filing, top holdings, QoQ changes."""
+    from app.edge.whales import whales_summary
+
+    loop = asyncio.get_running_loop()
+    funds = await loop.run_in_executor(None, whales_summary, request.app.state.duck)
+    return {"funds": funds}
+
+
+@router.post("/congress/run")
+async def congress_run(request: Request) -> dict:
+    """Trigger the Senate PTR ingest now instead of waiting for the
+    scheduled sweep (first run ~10 min after boot, then every 12h)."""
+    stored = await request.app.state.congress_pipeline.run()
+    return {"stored_transactions": stored}
+
+
+@router.post("/whales/run")
+async def whales_run(request: Request) -> dict:
+    """Trigger the 13F whale ingest now (scheduled run is daily)."""
+    stored = await request.app.state.whales_pipeline.run()
+    return {"stored_filings": stored}
+
+
 @router.get("/calendar")
 async def calendar(request: Request, days: int = Query(30, le=120)) -> dict:
     from app.edge.calendar import upcoming_events
@@ -156,6 +220,24 @@ async def calendar(request: Request, days: int = Query(30, le=120)) -> dict:
         None, upcoming_events, request.app.state.duck, days
     )
     return {"events": events}
+
+
+@router.get("/strategist")
+async def strategist(request: Request) -> dict:
+    """Latest stored strategist snapshot (the daily job fills it ~12 min
+    after boot; POST /api/strategist/run regenerates on demand)."""
+    from app.edge.strategist import latest_snapshot
+
+    loop = asyncio.get_running_loop()
+    snap = await loop.run_in_executor(None, latest_snapshot, request.app.state.duck)
+    if snap is None:
+        return {"status": "warming-up"}
+    return snap
+
+
+@router.post("/strategist/run")
+async def strategist_run(request: Request) -> dict:
+    return await request.app.state.strategist_service.run()
 
 
 @router.get("/brief")

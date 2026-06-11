@@ -34,6 +34,18 @@ class MacroDial(BaseModel):
     ts: str
 
 
+class LiquidityBlock(BaseModel):
+    """Daily Fed net liquidity = WALCL − TGA − RRP, all in $bn (Phase 8)."""
+
+    as_of: str
+    net_bn: float
+    d5_bn: float | None    # change vs 5 daily prints ago
+    d20_bn: float | None   # change vs 20 daily prints ago (~1 month)
+    walcl_bn: float | None
+    tga_bn: float | None
+    rrp_bn: float | None
+
+
 class MacroHistoryPoint(BaseModel):
     ts: str
     score: float
@@ -47,6 +59,7 @@ class MacroResponse(BaseModel):
     dials: dict[str, dict]  # regime-classifier votes
     headline: list[MacroDial]
     history: list[MacroHistoryPoint]
+    liquidity: LiquidityBlock | None = None
 
 
 @router.get("/macro", response_model=MacroResponse)
@@ -76,14 +89,37 @@ async def macro(
             )
             if row:
                 dials.append((sid, label, row[1], row[0]))
-        return latest, hist, dials
+        net = duck.fetchall(
+            "SELECT ts, value FROM ts_macro WHERE series_id = 'NET_LIQUIDITY' "
+            "AND value IS NOT NULL ORDER BY ts DESC LIMIT 21"
+        )
+        liq = None
+        if net:
+            comp = {}
+            for sid in ("WALCL", "TGA_CLOSE", "RRP_ON"):
+                r = duck.fetchone(
+                    "SELECT value FROM ts_macro WHERE series_id = ? "
+                    "AND value IS NOT NULL ORDER BY ts DESC LIMIT 1",
+                    [sid],
+                )
+                comp[sid] = r[0] if r else None
+            liq = LiquidityBlock(
+                as_of=str(net[0][0])[:10],
+                net_bn=round(float(net[0][1]), 1),
+                d5_bn=round(float(net[0][1] - net[5][1]), 1) if len(net) > 5 else None,
+                d20_bn=round(float(net[0][1] - net[20][1]), 1) if len(net) > 20 else None,
+                walcl_bn=round(comp["WALCL"] / 1000.0, 1) if comp["WALCL"] is not None else None,
+                tga_bn=round(comp["TGA_CLOSE"], 1) if comp["TGA_CLOSE"] is not None else None,
+                rrp_bn=round(comp["RRP_ON"], 1) if comp["RRP_ON"] is not None else None,
+            )
+        return latest, hist, dials, liq
 
-    latest, hist, dial_rows = await loop.run_in_executor(None, _q)
+    latest, hist, dial_rows, liquidity = await loop.run_in_executor(None, _q)
 
     if latest is None:
         return MacroResponse(
             score=None, regime="warming-up", computed_at=None,
-            buckets=[], dials={}, headline=[], history=[],
+            buckets=[], dials={}, headline=[], history=[], liquidity=liquidity,
         )
 
     detail = json.loads(latest[3]) if latest[3] else {}
@@ -100,4 +136,5 @@ async def macro(
         history=[
             MacroHistoryPoint(ts=r[0].isoformat(), score=r[1]) for r in reversed(hist)
         ],
+        liquidity=liquidity,
     )

@@ -13,7 +13,9 @@ import { NewsPanel } from "./panels/NewsPanel";
 import { PositioningPanel } from "./panels/PositioningPanel";
 import { RetailPanel } from "./panels/RetailPanel";
 import { RotationPanel } from "./panels/RotationPanel";
+import { StrategistPanel } from "./panels/StrategistPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
+import { WhalesPanel } from "./panels/WhalesPanel";
 
 const Grid = WidthProvider(Responsive);
 
@@ -32,6 +34,8 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "calendar", el: <CalendarPanel /> },
   { i: "rotation", el: <RotationPanel /> },
   { i: "positioning", el: <PositioningPanel /> },
+  { i: "whales", el: <WhalesPanel /> },
+  { i: "strategist", el: <StrategistPanel /> },
   { i: "help", el: <HelpPanel /> },
 ];
 
@@ -49,8 +53,10 @@ const layouts: Layouts = {
     { i: "positioning", x: 8, y: 12, w: 4, h: 6 },
     { i: "rotation", x: 0, y: 18, w: 6, h: 8 },
     { i: "cookbook", x: 6, y: 18, w: 6, h: 8 },
-    { i: "system", x: 0, y: 26, w: 4, h: 6 },
-    { i: "help", x: 4, y: 26, w: 8, h: 6 },
+    { i: "whales", x: 0, y: 26, w: 6, h: 8 },
+    { i: "strategist", x: 6, y: 26, w: 6, h: 8 },
+    { i: "system", x: 0, y: 34, w: 6, h: 6 },
+    { i: "help", x: 6, y: 34, w: 6, h: 6 },
   ],
 };
 

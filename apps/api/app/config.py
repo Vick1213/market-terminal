@@ -152,6 +152,59 @@ class Settings(BaseSettings):
     # are static or computed locally and cost nothing).
     calendar_poll_minutes: int = 720
 
+    # --- Phase 8: true net liquidity + smart money 2.0 ---
+    # Daily TGA (FiscalData) + ON RRP (NY Fed) — both keyless. Together with
+    # FRED's weekly WALCL they form the daily NET_LIQUIDITY series ($bn).
+    liquidity_poll_minutes: int = 360
+    # First-run history start. 2022-05 is when the DTS "TGA Closing Balance"
+    # account label stabilised; earlier history comes from weekly WTREGEN.
+    liquidity_start: str = "2022-05-01"
+    # Senate eFD PTR scraper (electronic filings only; House PTRs are
+    # PDF-only and skipped). Filings trickle in — 12h cadence is plenty.
+    congress_poll_minutes: int = 720
+    congress_lookback_days: int = 90
+    # EDGAR 13F whale tracker: "CIK:Display Name" pairs (all verified CIKs).
+    # Quarterly prints with a 45-day lag — daily poll is generous.
+    whales_poll_minutes: int = 1440
+    whale_top_holdings: int = 20
+    whale_funds: list[str] = [
+        "1067983:Berkshire Hathaway",
+        "1350694:Bridgewater",
+        "1336528:Pershing Square",
+        "1649339:Scion Asset Mgmt",
+        "1536411:Duquesne Family Office",
+        "1167483:Tiger Global",
+        "1061768:Baupost Group",
+        "1040273:Third Point",
+        "1029160:Soros Fund Mgmt",
+        "1006438:Appaloosa",
+    ]
+
+    # --- Phase 9: breadth, intl macro, FOMC scrape, strategist, LLM providers ---
+    # DBnomics international series (monthly prints — 12h poll is generous).
+    # Econdb was the planned source but is hard Cloudflare-blocked for
+    # non-browser clients (verified 2026-06-10); DBnomics is the same kind of
+    # keyless aggregator and serves the OECD/Eurostat series directly.
+    intl_poll_minutes: int = 720
+    # Net-liquidity drain alert: 20-print (~1 month) change below this fires
+    # a warn ($bn). Crossing-not-level semantics like every threshold rule.
+    netliq_drain_alert_bn: float = -150.0
+    # Strategist snapshot cadence (pure local reads + optional LLM notes).
+    strategist_poll_minutes: int = 360
+
+    # LLM provider for the brief/strategist narratives.
+    #   ollama    — local, default ($0 tokens; uses ollama_url/ollama_model)
+    #   openai    — api.openai.com (needs MARKET_LLM_API_KEY)
+    #   deepseek  — api.deepseek.com (needs MARKET_LLM_API_KEY)
+    #   anthropic — api.anthropic.com (needs MARKET_LLM_API_KEY)
+    # Every provider falls back to the deterministic template on failure —
+    # narratives never silently fail and never block the digest.
+    llm_provider: str = "ollama"
+    llm_model: str = ""        # empty -> per-provider default (see edge/llm.py)
+    llm_api_key: str = ""
+    llm_base_url: str = ""     # override, e.g. a self-hosted OpenAI-compatible server
+    llm_timeout_seconds: float = 180.0
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

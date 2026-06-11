@@ -68,6 +68,7 @@ export interface NewsMessage {
 export interface NewsResponse {
   items: NewsItem[];
   symbols: string[];
+  custom?: string[]; // user-added news-only tickers (removable chips)
 }
 
 export interface SentimentResult {
@@ -120,6 +121,17 @@ export interface MacroHistoryPoint {
   score: number;
 }
 
+/** Daily Fed net liquidity = WALCL − TGA − RRP, all $bn (Phase 8). */
+export interface LiquidityBlock {
+  as_of: string;
+  net_bn: number;
+  d5_bn: number | null; // change vs 5 daily prints ago (~1 week)
+  d20_bn: number | null; // change vs 20 daily prints ago (~1 month)
+  walcl_bn: number | null;
+  tga_bn: number | null;
+  rrp_bn: number | null;
+}
+
 export interface MacroResponse {
   score: number | null; // -100..+100, + = risk-on; null while warming up
   regime: Regime | string;
@@ -128,6 +140,7 @@ export interface MacroResponse {
   dials: Record<string, MacroRegimeDial>;
   headline: MacroHeadlineDial[];
   history: MacroHistoryPoint[];
+  liquidity?: LiquidityBlock | null;
 }
 
 export interface MacroMessage {
@@ -581,6 +594,56 @@ export interface InsiderResponse {
   clusters: InsiderCluster[];
 }
 
+// --- Phase 8: smart money 2.0 ---
+
+export interface CongressTrade {
+  ptr_id: string;
+  row: number;
+  senator: string;
+  filed_at: string;
+  tx_date: string | null;
+  ticker: string | null; // null = non-equity asset
+  asset: string | null;
+  asset_type: string | null;
+  side: string | null; // buy | sell | exchange
+  amount_min: number | null; // disclosed band, USD
+  amount_max: number | null; // null on open-ended bands
+  url: string | null;
+  on_watchlist: boolean;
+}
+
+export interface CongressResponse {
+  trades: CongressTrade[];
+}
+
+export interface WhaleHolding {
+  issuer: string | null;
+  cls: string;
+  put_call: string; // '' | Put | Call
+  value: number | null; // USD
+  pct: number | null; // % of portfolio
+  rank: number;
+  shares_chg_pct: number | null; // QoQ share-count change; null = no prior
+  status: "held" | "new";
+}
+
+export interface WhaleFund {
+  cik: number;
+  fund: string;
+  period: string; // report quarter end
+  filed_at: string;
+  total_value: number | null; // USD
+  positions: number | null;
+  prev_period: string | null;
+  holdings: WhaleHolding[];
+  new_count: number;
+  exits: string[]; // issuers that left the stored top-N
+}
+
+export interface WhalesResponse {
+  funds: WhaleFund[];
+}
+
 export interface CalendarEvent {
   id: string;
   date: string;
@@ -605,6 +668,68 @@ export interface BriefResponse {
 
 export interface BriefWsMessage {
   type: "brief";
+  date: string;
+  regime: string;
+  model: string;
+}
+
+// --- Phase 9: strategist ---
+
+export interface StrategistReason {
+  signal: string; // key of the signal that drove this tilt
+  detail: string; // human reasoning string
+  delta: number; // percentage points added/removed (0 = the regime base)
+}
+
+export interface StrategistHolding {
+  symbol: string;
+  name?: string | null;
+  kind: "sector" | "stock" | "asset" | string;
+  sleeve_pct: number; // share of this bucket
+  weight_pct: number; // share of the whole portfolio
+  score?: number | null; // conviction score (single-name picks only)
+  evidence: string[]; // the signal lines that produced this holding
+}
+
+export interface StrategistBucket {
+  key: "equities" | "metals" | "crypto" | "cash" | string;
+  label: string;
+  base_pct: number; // regime base before tilts
+  weight_pct: number; // final suggested weight (sums to ~100)
+  reasons: StrategistReason[];
+  holdings?: StrategistHolding[]; // individual assets inside the sleeve
+}
+
+export interface StrategistSignal {
+  key: string;
+  label: string;
+  value: string | number | null;
+  detail: string;
+  asof: string | null; // freshness of this input
+  stale: boolean; // too old/missing — excluded from the rules
+}
+
+export interface StrategistEquityTilt {
+  benchmark: string;
+  favor: string[]; // leading/improving RRG sectors
+  avoid: string[]; // lagging RRG sectors
+}
+
+export interface StrategistResponse {
+  status?: "warming-up"; // only set when no snapshot exists yet
+  as_of?: string;
+  regime?: string;
+  score?: number | null;
+  buckets?: StrategistBucket[];
+  equity_tilt?: StrategistEquityTilt | null;
+  signals?: StrategistSignal[];
+  notes?: string[]; // 3-5 strategy notes (LLM or template)
+  model?: string; // LLM label or "template"
+  disclaimer?: string;
+}
+
+export interface StrategistWsMessage {
+  type: "strategist";
   date: string;
   regime: string;
   model: string;

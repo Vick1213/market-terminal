@@ -120,10 +120,16 @@ def _h(s: str) -> str:
 
 
 def watchlist_tickers(sqlite: SqliteStore) -> list[str]:
+    """Watchlist equities/metals plus the news-only custom tickers — every
+    per-symbol ingestor (yahoo, EDGAR, finnhub, seekingalpha) covers both."""
     rows = sqlite.fetchall(
         "SELECT symbol FROM watchlist WHERE asset_class IN ('equity', 'metal') ORDER BY sort_order"
     )
-    return [r["symbol"] for r in rows if _TICKER_RE.match(r["symbol"])]
+    syms = [r["symbol"] for r in rows if _TICKER_RE.match(r["symbol"])]
+    extra = sqlite.fetchall("SELECT symbol FROM news_tickers ORDER BY added_at")
+    syms += [r["symbol"] for r in extra
+             if _TICKER_RE.match(r["symbol"]) and r["symbol"] not in syms]
+    return syms
 
 
 # --------------------------------------------------------------- ingestors
@@ -559,3 +565,19 @@ class NewsPipeline:
         symbols = watchlist_tickers(self._sqlite)
         n = await self.process(await fetch_seekingalpha(self._http, symbols))
         log.info("seekingalpha ingest: %s new items (%s tickers)", n, len(symbols))
+
+    async def run_symbol(self, symbol: str) -> int:
+        """Targeted ingest for one (just-added) ticker: pull every per-symbol
+        source once so the panel fills without waiting for the next sweep."""
+        items = await fetch_yahoo(self._http, [symbol])
+        items += await fetch_seekingalpha(self._http, [symbol])
+        items += await fetch_finnhub(self._http, self._finnhub_key, [symbol])
+        try:
+            items += await fetch_edgar(
+                self._http, self._sqlite, [symbol], self._edgar_lookback_days
+            )
+        except Exception as exc:  # the CIK-map fetch itself can fail
+            log.warning("edgar targeted ingest failed for %s: %s", symbol, exc)
+        n = await self.process(items)
+        log.info("targeted ingest for %s: %s new items", symbol, n)
+        return n
