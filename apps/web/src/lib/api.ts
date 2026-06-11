@@ -19,6 +19,8 @@ import type {
   RetailSymbolResponse,
   SeriesCatalogResponse,
   SeriesResponse,
+  ShortInterestResponse,
+  SourceHealthResponse,
   ReportCardResponse,
   StrategistResponse,
   WatchlistQuote,
@@ -32,6 +34,12 @@ export const WS_URL = process.env.NEXT_PUBLIC_WS_URL ?? "ws://127.0.0.1:8000";
 export async function fetchHealth(): Promise<HealthResponse> {
   const res = await fetch(`${API_URL}/api/health`, { cache: "no-store" });
   if (!res.ok) throw new Error(`health request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSourceHealth(): Promise<SourceHealthResponse> {
+  const res = await fetch(`${API_URL}/api/health/sources`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`source health request failed: ${res.status}`);
   return res.json();
 }
 
@@ -160,6 +168,12 @@ export async function fetchRotation(): Promise<RotationResponse> {
 export async function fetchCot(): Promise<CotResponse> {
   const res = await fetch(`${API_URL}/api/cot`, { cache: "no-store" });
   if (!res.ok) throw new Error(`cot request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchShortInterest(): Promise<ShortInterestResponse> {
+  const res = await fetch(`${API_URL}/api/short-interest`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`short interest request failed: ${res.status}`);
   return res.json();
 }
 

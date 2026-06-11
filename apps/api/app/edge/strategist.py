@@ -727,6 +727,26 @@ def compute_strategist(
         signals.append(_signal("crypto_flow", "Crypto whale flow (24h)", None,
                                "no large prints in 24h"))
 
+    # --- Fed statement delta --------------------------------------------------------
+    row = duck.fetchone(
+        "SELECT similarity, filed_at FROM filings_diff WHERE symbol = '_FOMC' "
+        "AND similarity IS NOT NULL ORDER BY filed_at DESC LIMIT 1"
+    )
+    if row:
+        fed_sim = float(row[0])
+        sig = _signal("fed_statement", "Fed statement delta",
+                      f"{(1 - fed_sim):.0%} changed",
+                      f"latest FOMC statement vs prior ({fed_sim:.0%} similar)",
+                      row[1], max_age_days=70)  # meetings are ~6-8 weeks apart
+        signals.append(sig)
+        if not sig["stale"] and fed_sim < 0.70:
+            tilts.append(("cash", +1, "fed_statement",
+                          f"Fed rewrote {(1 - fed_sim):.0%} of its statement — "
+                          "policy messaging in motion, wait for repricing"))
+    else:
+        signals.append(_signal("fed_statement", "Fed statement delta", None,
+                               "no statement diff stored yet"))
+
     # --- benchmark seasonality (current month) -------------------------------------
     season = compute_seasonality(duck, [benchmark])
     if season and season[0]["months"]:

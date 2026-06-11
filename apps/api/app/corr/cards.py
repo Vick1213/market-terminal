@@ -32,6 +32,14 @@ PRICE_LEGS: dict[str, str] = {
     "USDJPY=X": "fx",
     "DX-Y.NYB": "index",
     "EURUSD=X": "fx",
+    # Phase 10 cards: risk-appetite ratios + stock/bond + energy legs.
+    "SPY": "equity",
+    "TLT": "equity",
+    "XLY": "equity",
+    "XLP": "equity",
+    "XLE": "equity",
+    "SMH": "equity",
+    "LBR=F": "future",  # lumber — relisted 2022, short history is expected
 }
 
 # ts_macro series the engine loads (besides prices).
@@ -197,6 +205,44 @@ CARDS: list[CardSpec] = [
         normal="+ (BTC trades the global liquidity/growth cycle)",
         rationale="BTC behaves as a high-beta global-cycle asset; the G20 CLI proxies that cycle.",
         breaks_when="BTC decouples on idiosyncratic flows (ETF launches, halvings) or trades as digital gold in stress.",
+    ),
+    # --- Phase 10: risk-appetite ratios + the stock/bond hedge ---
+    CardSpec(
+        id="xly_xlp", num=16, title="Discretionary/Staples", mode="ratio",
+        legs=(Leg("D:XLY_XLP", "XLY/XLP"),),
+        normal="rising = consumer risk appetite; the classic offense/defense ratio",
+        rationale="Same consumer, two postures: discretionary spend vs must-haves.",
+        breaks_when="Ratio rolling over while SPX makes highs = narrow, defensive tape under the surface.",
+    ),
+    CardSpec(
+        id="spy_tlt", num=17, title="Stock/bond correlation", mode="corr",
+        legs=(Leg("P:SPY", "S&P 500"), Leg("P:TLT", "20y+ Treasuries")),
+        expected_sign=-1,
+        normal="− (bonds hedge stocks in growth-shock regimes)",
+        rationale="The 60/40 hedge only works while the correlation is negative.",
+        breaks_when="Inflation-driven regimes flip it positive (2022) — bonds stop hedging and risk parity de-levers.",
+    ),
+    CardSpec(
+        id="smh_spx", num=18, title="Semis leadership", mode="ratio",
+        legs=(Leg("D:SMH_SPX", "SMH/SPX"),),
+        normal="rising = cyclical growth leadership intact (semis lead the market)",
+        rationale="Semiconductors are the tape's highest-beta growth cyclical — they top and bottom first.",
+        breaks_when="Ratio breaking down while indexes hold up = leadership rot, late-cycle warning.",
+    ),
+    CardSpec(
+        id="lumber_gold", num=19, title="Lumber/Gold", mode="ratio",
+        legs=(Leg("D:LUMBER_GOLD", "Lumber/Gold"),),
+        normal="rising = risk-on (Gayed 2015: lumber = housing/growth, gold = fear)",
+        rationale="13w lumber-vs-gold outperformance historically front-runs equity vol regimes.",
+        breaks_when="Sharp drops led 2000/2007/2018 risk-off turns; lumber futures relisted 2022 so history is short.",
+    ),
+    CardSpec(
+        id="xle_wti", num=20, title="Energy equities vs crude", mode="corr",
+        legs=(Leg("P:XLE", "XLE"), Leg("M:DCOILWTICO", "WTI crude")),
+        expected_sign=+1, lead_lag=True, leader="XLE",
+        normal="+ (energy stocks track the commodity); equities sniff turns first",
+        rationale="XLE diverging from crude = equity market pricing a supply/demand shift before spot does.",
+        breaks_when="Persistent divergence (XLE down, WTI flat) preceded the 2014 and 2020 crude breaks.",
     ),
 ]
 

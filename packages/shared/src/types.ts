@@ -15,6 +15,40 @@ export interface HealthResponse {
   duckdb_tables: Record<string, number>;
 }
 
+export interface ShortInterestItem {
+  symbol: string;
+  settlement_date: string;
+  shares_short: number | null;
+  change_pct: number | null;
+  days_to_cover: number | null;
+  dtc_percentile: number | null;
+  prints: number;
+}
+
+export interface ShortInterestResponse {
+  symbols: ShortInterestItem[];
+}
+
+export type SourceStatus = "ok" | "degraded" | "dead";
+
+export interface SourceHealthItem {
+  host: string;
+  label: string;
+  covers: string;
+  status: SourceStatus;
+  last_success: string | null;
+  last_failure: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
+  success_count: number;
+  failure_count: number;
+}
+
+export interface SourceHealthResponse {
+  status: SourceStatus;
+  sources: SourceHealthItem[];
+}
+
 export interface HeartbeatMessage {
   type: "heartbeat";
   n: number;

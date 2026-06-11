@@ -216,6 +216,19 @@ class Settings(BaseSettings):
     llm_base_url: str = ""     # override, e.g. a self-hosted OpenAI-compatible server
     llm_timeout_seconds: float = 180.0
 
+    # --- Phase 11: gap-audit backlog (PLAN §10) ---
+    # FINRA true short interest publishes bi-monthly (~9-day lag); the daily
+    # run is a partition-list diff and a no-op between publication days.
+    short_interest_poll_minutes: int = 1440
+    # Squeeze-watch alert: days-to-cover at/above this plus a retail mention
+    # spike fires a warn; days-to-cover alone at this level fires an info.
+    squeeze_days_to_cover: float = 5.0
+    # FMP earnings calendar (market-wide Event Horizon — PLAN §9 #7). Empty
+    # key = off and the watchlist yfinance leg keeps working; with a key the
+    # calendar covers watchlist + news tickers + current strategist picks and
+    # the blocking yfinance leg is skipped.
+    fmp_api_key: str = ""
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

@@ -129,6 +129,15 @@ def _derive(series: dict[str, pd.Series]) -> None:
     gs = ratio("P:XAU", "P:XAG")
     if gs is not None:
         series["D:GOLD_SILVER"] = gs
+    # Phase 10 risk-appetite ratios (cards 16/18/19).
+    for key, num, den in (
+        ("D:XLY_XLP", "P:XLY", "P:XLP"),
+        ("D:SMH_SPX", "P:SMH", "P:^GSPC"),
+        ("D:LUMBER_GOLD", "P:LBR=F", "P:XAU"),
+    ):
+        r = ratio(num, den)
+        if r is not None:
+            series[key] = r
     # VIX term structure: CBOE closes preferred, FRED VIXCLS fills the denominator.
     vix = series.get("M:VIX") if "M:VIX" in series else series.get("M:VIXCLS")
     if vix is not None and "M:VIX3M" in series:
@@ -417,7 +426,8 @@ def _ratio_card(spec: CardSpec, series: dict[str, pd.Series]) -> CardResult:
         id=spec.id, num=spec.num, title=spec.title, mode=spec.mode, status=status,
         legs=[spec.legs[0].label], asof=s.dropna().index[-1].date().isoformat(),
         baseline_mean=_r(mean), baseline_n=n, z=_r(z, 2),
-        value=_r(v, 2), value_label=f"{v:.1f}:1", notes=notes,
+        value=_r(v, 4), value_label=f"{v:.1f}:1" if v >= 10 else f"{v:.3f}",
+        notes=notes,
         normal=spec.normal, rationale=spec.rationale, breaks_when=spec.breaks_when,
     )
 

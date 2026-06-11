@@ -26,8 +26,10 @@ from app.edge.brief import BriefService
 from app.edge.calendar import CalendarPipeline
 from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
+from app.edge.short_interest import ShortInterestPipeline
 from app.edge.gex import GexAdapter
 from app.edge.filings_diff import FilingsDiffPipeline
+from app.edge.fomc_diff import FomcDiffPipeline
 from app.edge.insider import InsiderPipeline
 from app.edge.insider_scan import InsiderScanPipeline
 from app.edge.llm import LlmClient
@@ -43,6 +45,7 @@ from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
 from app.ingest.retail import RetailPipeline
+from app.ingest.source_health import SourceHealthRegistry
 from app.routers import corr as corr_router
 from app.routers import edge as edge_router
 from app.routers import health as health_router
@@ -77,7 +80,12 @@ async def lifespan(app: FastAPI):
     init_all(duck, sqlite)
     log.info("schema ready — duckdb tables: %s", list(duck.table_counts().keys()))
 
-    http = HttpClient(user_agent=settings.user_agent, cache_dir=str(settings.http_cache_dir))
+    source_health = SourceHealthRegistry(sqlite)
+    http = HttpClient(
+        user_agent=settings.user_agent,
+        cache_dir=str(settings.http_cache_dir),
+        health=source_health,
+    )
 
     # FinBERT loads lazily on first score (in its own thread-pool, off the loop).
     sentiment = SentimentService(
@@ -121,6 +129,7 @@ async def lifespan(app: FastAPI):
         insider_cluster_window_days=settings.insider_cluster_window_days,
         netliq_drain_bn=settings.netliq_drain_alert_bn,
         filing_similarity_alert=settings.filings_diff_alert_similarity,
+        squeeze_days_to_cover=settings.squeeze_days_to_cover,
     )
     insider_pipeline = InsiderPipeline(
         duck, sqlite, http,
@@ -136,13 +145,17 @@ async def lifespan(app: FastAPI):
         if settings.insider_scan_enabled else None
     )
     filings_diff_pipeline = FilingsDiffPipeline(duck, sqlite, http)
+    fomc_diff_pipeline = FomcDiffPipeline(duck, http)
     rotation_pipeline = RotationPipeline(
         duck, sqlite, settings.sector_etfs, settings.rrg_benchmark
     )
     cot_pipeline = CotPipeline(duck, http)
+    short_interest_pipeline = ShortInterestPipeline(duck, sqlite, http)
     gex_adapter = GexAdapter(duck, http, settings.gex_symbols)
     calendar_pipeline = CalendarPipeline(
-        duck, sqlite, http, fred_api_key=settings.fred_api_key
+        duck, sqlite, http,
+        fred_api_key=settings.fred_api_key,
+        fmp_api_key=settings.fmp_api_key,
     )
     # Phase 9: one LLM client behind both narratives (Ollama by default;
     # OpenAI/DeepSeek/Anthropic via MARKET_LLM_PROVIDER + MARKET_LLM_API_KEY).
@@ -180,7 +193,8 @@ async def lifespan(app: FastAPI):
         cot_pipeline, gex_adapter, calendar_pipeline, brief_service,
         liquidity_pipeline, congress_pipeline, whales_pipeline,
         intl_pipeline, strategist_service, insider_scan_pipeline,
-        filings_diff_pipeline,
+        filings_diff_pipeline, fomc_diff_pipeline,
+        short_interest_pipeline=short_interest_pipeline,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -202,6 +216,7 @@ async def lifespan(app: FastAPI):
     app.state.duck = duck
     app.state.sqlite = sqlite
     app.state.http = http
+    app.state.source_health = source_health
     app.state.sentiment = sentiment
     app.state.news_pipeline = news_pipeline
     app.state.macro_pipeline = macro_pipeline
@@ -216,8 +231,10 @@ async def lifespan(app: FastAPI):
     app.state.insider_pipeline = insider_pipeline
     app.state.insider_scan_pipeline = insider_scan_pipeline
     app.state.filings_diff_pipeline = filings_diff_pipeline
+    app.state.fomc_diff_pipeline = fomc_diff_pipeline
     app.state.rotation_pipeline = rotation_pipeline
     app.state.cot_pipeline = cot_pipeline
+    app.state.short_interest_pipeline = short_interest_pipeline
     app.state.gex_adapter = gex_adapter
     app.state.calendar_pipeline = calendar_pipeline
     app.state.brief_service = brief_service

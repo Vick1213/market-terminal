@@ -360,4 +360,35 @@ We are building a **local-first, fully private market-intelligence terminal**: a
 
 ---
 
+## 10. Gap Audit → Phase 11 Roadmap (added 2026-06-11, after Phase 10 shipped)
+
+> Full implemented-vs-planned audit of the codebase. **Everything in §3 (all 6 panels), §6 (all 11 extras incl. the backtest harness — custom pandas/DuckDB regime replay in `edge/report_card.py`, not vectorbt), plus FOMC statement diffs, Lazy Prices filings diffs, Senate PTRs, 13F whales, market-wide insider scan, DBnomics intl cards, strategist + picks + report card is SHIPPED.** From §9 only FiscalData daily TGA (#3) is integrated; congressional trades were built directly on Senate eFD (no CongressInvests needed); Econdb (#9) is dead (Cloudflare) — DBnomics replaced it. Alpaca/Tradier/Twelve Data/FMP/Polygon/OpenFIGI remain unbuilt.
+
+### ⚠️ Standing risk discovered during the audit
+
+**Stooq now serves a JS challenge to headless clients** (see comment in `ingest/prices.py`), which silently broke the §8 "never a single point of failure" promise: **yfinance is currently the sole equity price source.** Items 1–2 below exist to fix exactly this.
+
+### Phase 11 backlog (ranked by edge-per-effort, same method as §6)
+
+| Rank | Feature | Why it's the gap | Free source | Effort |
+|---|---|---|---|---|
+| 1 | **Source-health watchdog panel** ✅ *shipped 2026-06-11* | The Stooq breakage was discovered by accident, in a code comment. Every fragile source (§5/§8) needs: last-success timestamp, consecutive-failure count, quota burn %, per-source status chip in the UI, ntfy on source-death. Protects every other feature; the terminal must never go quietly blind again. | self (instrument `ingest/http.py` — all fetches already flow through it) | **Low** |
+| 2 | **Alpaca integration** (§9 #1, still top) | Now *urgent*, not just an upgrade: with Stooq JS-challenged, this restores price redundancy AND upgrades equities from delayed-EOD to IEX live-ish WS quotes. Watchlist (d) intraday rows + equity prints in (e); yfinance demoted to fallback. | Alpaca free (key, no funded acct) | **Med** |
+| 3 | **Portfolio / holdings layer** | The biggest conceptual hole: the terminal knows everything about the market and *nothing about what I hold*. A `positions` table (symbol, qty, cost basis — manual/CSV entry, stays local+private) unlocks: P&L, exposure-vs-strategist-allocation drift, regime-aware *personal* alerts ("overweight equities entering stress regime"), and lets report_card score *my actual decisions*, not just hypothetical picks. | none needed (local data) | **Med** |
+| 4 | **Unusual-options scanner + Tradier chains** (§9 #2) | Panel (e)'s accumulation score still lacks its "options OI surge" leg — never built. Tradier sandbox = stable documented chains w/ greeks & OI; also de-risks the fragile CBOE JSON that `edge/gex.py` depends on (keep CBOE as fallback). Scan: today's volume vs trailing-avg OI z-score per watchlist name. | Tradier dev sandbox | **Med** |
+| 5 | **True short interest** ✅ *shipped 2026-06-11* | We ingest FINRA daily short-SALE volume, which §5 explicitly warns ≠ short interest. FINRA publishes actual bi-monthly equity short interest (shares short, days-to-cover) free via the keyless Query API (`api.finra.org`, dataset `consolidatedShortInterest`, partitioned by settlement date). High SI + retail mention-spike = squeeze-watch cross-signal panel (b)×(d) can't currently produce. | FINRA Query API (no key) | **Low** |
+| 6 | **Market-wide earnings calendar** (§9 #7) ✅ *shipped 2026-06-11 (needs `MARKET_FMP_API_KEY`)* | Current calendar is watchlist-only via blocking yfinance calls. FMP free tier (~250/day) gives the full calendar → Event Horizon completeness + a hard "don't let strategist pick into earnings week" gate. Covers watchlist + news tickers + current strategist picks; yfinance stays the keyless fallback. | FMP (key) | **Low** |
+| 7 | **ETF flows (shares-outstanding deltas)** | GLD/SLV/SPY/QQQ daily shares-outstanding changes = *actual* creation/redemption flow — strictly better than the volume proxies in (e) for metals accumulation + risk appetite. | issuer CSVs / yfinance `sharesOutstanding` (cached) | **Low-Med** |
+| 8 | **Decision journal** | report_card scores the strategist; nothing scores *me*. Log each real decision with a frozen snapshot of regime+signals at entry; auto-score forward returns later. The only way to separate edge from luck over time. | none needed (local) | **Low-Med** |
+| 9 | **OpenFIGI cashtag validation** (§9 #10) | Anti-gaming ticker validation in (b) still heuristic; `$A/$ON/$IT` collisions survive. | OpenFIGI (key) | **Low** |
+| 10 | **FOMC presser tone (Whisper)** | `edge/fomc_diff.py` diffs the written statement; local Whisper on the press-conference audio adds spoken-tone delta (hawkish/dovish drift between statement and Q&A). Batch job, off the hot path — exactly the §3a carve-out. | federalreserve.gov audio + local Whisper | **Med** |
+| 11 | **Per-card cookbook backtests** | Extend report_card's regime replay down to individual correlation-card rules (e.g. "BROKEN card #1 → what happened next, historically?") with walk-forward + 1-bar shift per §8. Re-run quarterly for decay. | self (stored series) | **Med** |
+| 12 | **ETH exchange netflow** (optional) | Last unbuilt §5 source. Etherscan free is ETH-mainnet-only; Routescan as fallback. Low edge unless crypto allocation grows. | Etherscan/Routescan (key) | **Med** |
+
+**Deliberately NOT planned:** Google Trends (pytrends archived, random 429s — fragility > signal); PRAW (confirmed dead per §8); CongressInvests (Senate eFD direct already shipped); vectorbt migration (custom replay in report_card is sufficient and dependency-free per §6 #11's actual goal).
+
+*Suggested order: 1 → 5 → 6 (three Low-effort wins, one afternoon each) → 2 → 3 → 4 → 8, then re-rank.*
+
+---
+
 **Sources for the two time-sensitive 2026 pivots I re-verified:** [Bluesky firehose free / no paid tier (Blotato 2026)](https://www.blotato.com/blog/bluesky-api-pricing) · [Bluesky cashtags Jan 2026 (TechCrunch)](https://techcrunch.com/2026/01/16/bluesky-rolls-out-cashtags-and-live-badges-amid-a-boost-in-app-installs/) · [CCXT Pro WebSockets merged into free CCXT (GitHub #15171)](https://github.com/ccxt/ccxt/issues/15171). All other source URLs are inline in the research dimensions above and the master table.

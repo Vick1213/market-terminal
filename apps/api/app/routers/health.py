@@ -27,6 +27,22 @@ class HealthResponse(BaseModel):
     duckdb_tables: dict[str, int]
 
 
+@router.get("/health/sources")
+async def health_sources(request: Request) -> dict:
+    """Source-health watchdog snapshot: one row per outbound host with its
+    status (ok / degraded / dead), failure streak, and last success/error."""
+    registry = request.app.state.source_health
+    sources = registry.snapshot()
+    worst = "ok"
+    for s in sources:
+        if s["status"] == "dead":
+            worst = "dead"
+            break
+        if s["status"] == "degraded":
+            worst = "degraded"
+    return {"status": worst, "sources": sources}
+
+
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> HealthResponse:
     app = request.app

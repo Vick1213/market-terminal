@@ -1,8 +1,8 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import type { CotMarket, GexSnapshot } from "@market/shared";
-import { fetchCot, fetchGex, fetchInsider } from "@/lib/api";
+import type { CotMarket, GexSnapshot, ShortInterestItem } from "@market/shared";
+import { fetchCot, fetchGex, fetchInsider, fetchShortInterest } from "@/lib/api";
 
 function cotColor(idx: number | null): string {
   if (idx === null) return "var(--text-dim)";
@@ -86,6 +86,59 @@ function GexStrip({ snap }: { snap: GexSnapshot }) {
   );
 }
 
+function dtcColor(s: ShortInterestItem): string {
+  if (s.days_to_cover !== null && s.days_to_cover >= 5) return "var(--red)";
+  if ((s.dtc_percentile ?? 0) >= 90 || (s.change_pct ?? 0) >= 25) return "var(--yellow)";
+  return "var(--text-dim)";
+}
+
+function ShortInterestTable({ symbols }: { symbols: ShortInterestItem[] }) {
+  return (
+    <table className="wl-table">
+      <thead>
+        <tr>
+          <th>symbol</th>
+          <th className="num">shares short</th>
+          <th className="num">Δ print</th>
+          <th className="num">days to cover</th>
+        </tr>
+      </thead>
+      <tbody>
+        {symbols.map((s) => (
+          <tr
+            key={s.symbol}
+            className="wl-row"
+            title={`FINRA settlement ${s.settlement_date} (${s.prints} bi-monthly prints stored) · days-to-cover percentile ${s.dtc_percentile ?? "—"} vs own history`}
+          >
+            <td className="wl-sym">{s.symbol}</td>
+            <td className="num">
+              {s.shares_short !== null ? `${(s.shares_short / 1e6).toFixed(1)}M` : "—"}
+            </td>
+            <td
+              className="num"
+              style={{
+                color:
+                  s.change_pct === null
+                    ? undefined
+                    : s.change_pct > 0
+                      ? "var(--red)"
+                      : "var(--green)",
+              }}
+            >
+              {s.change_pct !== null
+                ? `${s.change_pct >= 0 ? "+" : ""}${s.change_pct.toFixed(1)}%`
+                : "—"}
+            </td>
+            <td className="num" style={{ color: dtcColor(s) }}>
+              {s.days_to_cover !== null ? s.days_to_cover.toFixed(2) : "—"}
+            </td>
+          </tr>
+        ))}
+      </tbody>
+    </table>
+  );
+}
+
 export function PositioningPanel() {
   const cot = useQuery({ queryKey: ["cot"], queryFn: fetchCot, refetchInterval: 60 * 60_000 });
   const gex = useQuery({ queryKey: ["gex"], queryFn: fetchGex, refetchInterval: 15 * 60_000 });
@@ -93,6 +146,11 @@ export function PositioningPanel() {
     queryKey: ["insider"],
     queryFn: () => fetchInsider(30),
     refetchInterval: 60 * 60_000,
+  });
+  const shortInterest = useQuery({
+    queryKey: ["shortInterest"],
+    queryFn: fetchShortInterest,
+    refetchInterval: 6 * 60 * 60_000, // bi-monthly prints — slow poll
   });
 
   const anyError = cot.isError && gex.isError && insider.isError;
@@ -127,6 +185,15 @@ export function PositioningPanel() {
               CFTC positioning (non-commercial)
             </div>
             <CotTable markets={cot.data.markets} />
+          </>
+        )}
+
+        {!!shortInterest.data?.symbols.length && (
+          <>
+            <div className="macro-detail-title" style={{ marginTop: 10 }}>
+              True short interest — FINRA bi-monthly (≠ daily short volume)
+            </div>
+            <ShortInterestTable symbols={shortInterest.data.symbols} />
           </>
         )}
 

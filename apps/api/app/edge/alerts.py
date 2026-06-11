@@ -68,6 +68,7 @@ class AlertEngine:
         insider_cluster_window_days: int = 14,
         netliq_drain_bn: float = -150.0,
         filing_similarity_alert: float = 0.70,
+        squeeze_days_to_cover: float = 5.0,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -79,6 +80,7 @@ class AlertEngine:
         self._cluster_window = insider_cluster_window_days
         self._netliq_drain = netliq_drain_bn
         self._filing_similarity = filing_similarity_alert
+        self._squeeze_dtc = squeeze_days_to_cover
 
     # ------------------------------------------------------------------ state
 
@@ -501,7 +503,7 @@ class AlertEngine:
         rows = self._duck.fetchall(
             "SELECT accession, symbol, form, filed_at, similarity, detail "
             "FROM filings_diff WHERE similarity IS NOT NULL AND similarity < ? "
-            "AND filed_at >= ?",
+            "AND filed_at >= ? AND symbol <> '_FOMC'",
             [self._filing_similarity, now - timedelta(days=30)],
         )
         out: list[Alert] = []
@@ -522,6 +524,33 @@ class AlertEngine:
                      f"{form} — issuers that rewrite Item 1A historically "
                      f"underperform (Lazy Prices).{sample}",
                 symbol=sym, value=round(float(sim), 3),
+            ))
+        return out
+
+    def _rule_fomc_statement(self, now: datetime, regime: str) -> list[Alert]:
+        """The Fed changed more of its statement than usual (the template is
+        deliberately stable — every changed sentence is a signal). One alert
+        per statement, ever."""
+        rows = self._duck.fetchall(
+            "SELECT accession, filed_at, similarity, detail FROM filings_diff "
+            "WHERE symbol = '_FOMC' AND similarity IS NOT NULL "
+            "AND similarity < 0.85 AND filed_at >= ?",
+            [now - timedelta(days=10)],
+        )
+        out: list[Alert] = []
+        for acc, filed, sim, detail in rows:
+            key = f"fomc_statement:{acc}"
+            if self._fired_ever(key):
+                continue
+            sents = (json.loads(detail) or {}).get("new_sentences") or [] if detail else []
+            sample = f' New: "{sents[0][:200]}"' if sents else ""
+            out.append(Alert(
+                rule="fomc_statement", key=key, severity="warn",
+                title=f"FOMC statement rewritten ({sim:.0%} similar)",
+                body=f"The {str(filed)[:10]} FOMC statement shares only "
+                     f"{sim:.0%} of its language with the previous one — the "
+                     f"Fed changed more than its usual edit.{sample}",
+                value=round(float(sim), 3),
             ))
         return out
 
@@ -588,6 +617,116 @@ class AlertEngine:
             ))
         return out
 
+    def _rule_squeeze_watch(self, now: datetime, regime: str) -> list[Alert]:
+        """TRUE short interest cross-signal (PLAN §10 #5): elevated days-to-
+        cover is the fuel; a concurrent retail mention spike is the spark.
+        Fuel + spark = warn; unusual fuel alone (DTC well past threshold or
+        shorts up >25% in one print) = info. One alert per (symbol,
+        settlement date), ever — prints are bi-monthly."""
+        rows = self._duck.fetchall(
+            """
+            SELECT settlement_date, symbol, shares_short, change_pct, days_to_cover
+            FROM ts_short_interest
+            WHERE settlement_date = (SELECT max(settlement_date) FROM ts_short_interest)
+            """
+        )
+        if not rows:
+            return []
+        spiking: dict[str, float] = {}
+        retail = self._duck.fetchdf(
+            """
+            SELECT symbol, mentions, mentions_prev FROM ts_retail
+            WHERE source = 'apewisdom'
+              AND ts = (SELECT max(ts) FROM ts_retail WHERE source = 'apewisdom')
+              AND mentions_prev >= 10
+            """
+        )
+        if retail is not None and not retail.empty:
+            for _, r in retail.iterrows():
+                spiking[str(r["symbol"]).upper()] = r["mentions"] / r["mentions_prev"]
+        out: list[Alert] = []
+        for settle, sym, shares, chg, dtc in rows:
+            if dtc is None:
+                continue
+            ratio = spiking.get(str(sym).upper(), 0.0)
+            sparked = ratio >= 2.0 and dtc >= self._squeeze_dtc
+            fuel_only = dtc >= 2 * self._squeeze_dtc or (
+                dtc >= self._squeeze_dtc and chg is not None and chg >= 25.0
+            )
+            if not sparked and not fuel_only:
+                continue
+            key = f"squeeze:{sym}:{str(settle)[:10]}"
+            if self._fired_ever(key):
+                continue
+            chg_s = f", shorts {chg:+.0f}% vs prior print" if chg is not None else ""
+            spark_s = (
+                f" Retail mentions are {ratio:.1f}x their day-ago print — squeeze fuel meets spark."
+                if sparked else ""
+            )
+            out.append(Alert(
+                rule="squeeze_watch", key=key,
+                severity="warn" if sparked else "info",
+                title=f"Squeeze watch: {sym} ({dtc:.1f} days to cover)",
+                body=f"{sym} short interest at {(shares or 0) / 1e6:.1f}M shares "
+                     f"({dtc:.1f} days to cover{chg_s}) as of the {str(settle)[:10]} "
+                     f"FINRA settlement.{spark_s}",
+                symbol=str(sym), value=float(dtc),
+            ))
+        return out
+
+    def _rule_source_death(self, now: datetime, regime: str) -> list[Alert]:
+        """A data source crossed the dead threshold (consecutive failures) —
+        the terminal is going blind on whatever that host feeds. Crossing
+        semantics on the streak so a dead source alerts once, not every sweep."""
+        from app.ingest.source_health import DEAD_AFTER, SOURCE_LABELS
+
+        rows = self._sqlite.fetchall(
+            "SELECT host, consecutive_failures, last_success, last_error "
+            "FROM source_health WHERE consecutive_failures >= ?",
+            [DEAD_AFTER],
+        )
+        out: list[Alert] = []
+        for host, streak, last_ok, last_err in rows:
+            key = f"source_death:{host}"
+            _, prev, _ = self._state(key)
+            if prev is not None and prev >= DEAD_AFTER:
+                continue  # already known-dead last sweep
+            if not self._cooled(key, now):
+                continue  # flap guard — prev stays as-is, retried next sweep
+            self._save_state(key, value=float(streak))
+            label, covers = SOURCE_LABELS.get(host, (host, ""))
+            since = f" Last success: {str(last_ok)[:16]}." if last_ok else " Never succeeded."
+            out.append(Alert(
+                rule="source_death", key=key, severity="warn",
+                title=f"Data source DOWN: {label}",
+                body=f"{label} ({host}) has failed {int(streak)} consecutive "
+                     f"requests{' — feeds ' + covers if covers else ''}.{since} "
+                     f"Last error: {last_err or 'unknown'}",
+                value=float(streak),
+            ))
+        # Recovery: streak back to 0 after a known-dead state -> info alert.
+        recovered = self._sqlite.fetchall(
+            "SELECT rule_key FROM alert_state WHERE rule_key LIKE 'source_death:%' "
+            "AND last_value >= ?",
+            [DEAD_AFTER],
+        )
+        for (rk,) in recovered:
+            host = rk.split(":", 1)[1]
+            row = self._sqlite.fetchone(
+                "SELECT consecutive_failures FROM source_health WHERE host = ?", [host]
+            )
+            if row is None or int(row[0]) != 0:
+                continue
+            self._save_state(rk, value=0.0)
+            label, _ = SOURCE_LABELS.get(host, (host, ""))
+            out.append(Alert(
+                rule="source_death", key=rk, severity="info",
+                title=f"Data source recovered: {label}",
+                body=f"{label} ({host}) is answering again after an outage.",
+                value=0.0,
+            ))
+        return out
+
     # ------------------------------------------------------------------ sweep
 
     _RULES = (
@@ -595,7 +734,8 @@ class AlertEngine:
         _rule_retail_spike, _rule_insider_cluster, _rule_cot_extreme,
         _rule_gex_flip, _rule_large_print,
         _rule_netliq_drain, _rule_congress_watchlist, _rule_whale_new_position,
-        _rule_strategist_shift, _rule_filing_rewrite,
+        _rule_strategist_shift, _rule_filing_rewrite, _rule_fomc_statement,
+        _rule_source_death, _rule_squeeze_watch,
     )
 
     def _evaluate(self) -> list[Alert]:

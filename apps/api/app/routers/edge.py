@@ -75,6 +75,17 @@ async def cot(request: Request) -> dict:
     return {"markets": markets}
 
 
+@router.get("/short-interest")
+async def short_interest(request: Request) -> dict:
+    from app.edge.short_interest import short_interest_summary
+
+    loop = asyncio.get_running_loop()
+    symbols = await loop.run_in_executor(
+        None, short_interest_summary, request.app.state.duck
+    )
+    return {"symbols": symbols}
+
+
 @router.get("/gex")
 async def gex(request: Request) -> dict:
     duck = request.app.state.duck

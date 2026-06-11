@@ -133,11 +133,12 @@ def _next_fridays(start: date, n: int) -> list[date]:
 
 class CalendarPipeline:
     def __init__(self, duck: DuckStore, sqlite: SqliteStore, http: HttpClient,
-                 fred_api_key: str = "") -> None:
+                 fred_api_key: str = "", fmp_api_key: str = "") -> None:
         self._duck = duck
         self._sqlite = sqlite
         self._http = http
         self._fred_key = fred_api_key
+        self._fmp_key = fmp_api_key
 
     def _upsert(self, events: list[tuple[str, date, str, str, str | None, str]]) -> None:
         self._duck.executemany(
@@ -235,6 +236,73 @@ class CalendarPipeline:
                     ev.append((f"{kind}:{d}", d, kind, title, None, "fred"))
         return ev
 
+    def _earnings_symbols(self) -> set[str]:
+        """Symbols whose earnings matter here: watchlist equities, extra news
+        tickers, and the strategist's current single-name picks (those are
+        exactly the names you'd act on into a print)."""
+        import json as _json
+
+        syms = {
+            r[0].upper() for r in self._sqlite.fetchall(
+                "SELECT symbol FROM watchlist WHERE asset_class = 'equity'"
+            )
+        }
+        syms |= {
+            r[0].upper() for r in self._sqlite.fetchall("SELECT symbol FROM news_tickers")
+        }
+        row = self._duck.fetchone(
+            "SELECT detail FROM strategist_snapshots ORDER BY ts DESC LIMIT 1"
+        )
+        if row and row[0]:
+            try:
+                snap = _json.loads(row[0])
+                for b in snap.get("buckets") or []:
+                    for h in b.get("holdings") or []:
+                        if h.get("kind") == "stock" and h.get("symbol"):
+                            syms.add(str(h["symbol"]).upper())
+            except ValueError:
+                pass
+        return syms
+
+    async def _fmp_earnings_events(self) -> list[tuple]:
+        """Market-wide earnings calendar (PLAN §9 #7) — one request covers the
+        whole horizon; filtered locally to the symbols we track. Returns []
+        without a key (the yfinance leg then covers the watchlist)."""
+        if not self._fmp_key:
+            return []
+        today = date.today()
+        horizon = today + timedelta(days=90)  # free tier caps range ~3 months
+        try:
+            rows = await self._http.get_json(
+                "https://financialmodelingprep.com/api/v3/earning_calendar",
+                params={
+                    "from": today.isoformat(),
+                    "to": horizon.isoformat(),
+                    "apikey": self._fmp_key,
+                },
+            )
+        except Exception as exc:
+            log.warning("FMP earnings calendar failed: %s", exc)
+            return []
+        if not isinstance(rows, list):
+            log.warning("FMP earnings calendar: unexpected payload %r", rows)
+            return []
+        loop = asyncio.get_running_loop()
+        track = await loop.run_in_executor(None, self._earnings_symbols)
+        first_date: dict[str, date] = {}
+        for r in rows:
+            sym = str(r.get("symbol", "")).upper()
+            if sym not in track:
+                continue
+            try:
+                d = date.fromisoformat(str(r.get("date", ""))[:10])
+            except ValueError:
+                continue
+            if today <= d and (sym not in first_date or d < first_date[sym]):
+                first_date[sym] = d
+        return [(f"earnings:{d}:{sym}", d, "earnings", f"{sym} earnings", sym, "fmp")
+                for sym, d in first_date.items()]
+
     def _earnings_events(self) -> list[tuple]:
         """Blocking (yfinance) — run in executor."""
         import yfinance as yf
@@ -268,10 +336,15 @@ class CalendarPipeline:
         events = self._static_events()
         events += await self._fomc_events()
         events += await self._fred_release_events()
-        try:
-            events += await loop.run_in_executor(None, self._earnings_events)
-        except Exception as exc:
-            log.warning("earnings leg failed: %s", exc)
+        # FMP (keyed) covers watchlist + news tickers + strategist picks in one
+        # request; yfinance stays the keyless watchlist fallback.
+        fmp_events = await self._fmp_earnings_events()
+        events += fmp_events
+        if not fmp_events:
+            try:
+                events += await loop.run_in_executor(None, self._earnings_events)
+            except Exception as exc:
+                log.warning("earnings leg failed: %s", exc)
         # Every leg is fully regenerated each run, so drop all future rows
         # first — a rescheduled release/earnings date can't leave a ghost.
         await loop.run_in_executor(

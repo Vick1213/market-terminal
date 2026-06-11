@@ -23,8 +23,10 @@ from app.edge.brief import BriefService
 from app.edge.calendar import CalendarPipeline
 from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
+from app.edge.short_interest import ShortInterestPipeline
 from app.edge.gex import GexAdapter
 from app.edge.filings_diff import FilingsDiffPipeline
+from app.edge.fomc_diff import FomcDiffPipeline
 from app.edge.insider import InsiderPipeline
 from app.edge.insider_scan import InsiderScanPipeline
 from app.edge.rotation import RotationPipeline
@@ -78,6 +80,8 @@ def build_scheduler(
     strategist_service: StrategistService | None = None,
     insider_scan_pipeline: InsiderScanPipeline | None = None,
     filings_diff_pipeline: FilingsDiffPipeline | None = None,
+    fomc_diff_pipeline: FomcDiffPipeline | None = None,
+    short_interest_pipeline: ShortInterestPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -315,6 +319,17 @@ def build_scheduler(
             id="edge_gex",
             **common,
         )
+    if short_interest_pipeline is not None:
+        # Bi-monthly prints; the daily run diffs FINRA's partition list and
+        # is a no-op between publication days.
+        scheduler.add_job(
+            short_interest_pipeline.run,
+            trigger="interval",
+            minutes=settings.short_interest_poll_minutes,
+            next_run_time=soon + timedelta(seconds=430),
+            id="edge_short_interest",
+            **common,
+        )
     if rotation_pipeline is not None:
         scheduler.add_job(
             rotation_pipeline.run,
@@ -351,14 +366,27 @@ def build_scheduler(
             id="edge_filings_diff",
             **common,
         )
+    if fomc_diff_pipeline is not None:
+        # Hourly conditional-GET no-op between meetings; catches the statement
+        # within an hour of a decision-day release.
+        scheduler.add_job(
+            fomc_diff_pipeline.run,
+            trigger="interval",
+            minutes=60,
+            next_run_time=soon + timedelta(seconds=575),
+            id="edge_fomc_diff",
+            **common,
+        )
     if alert_engine is not None:
-        # First sweep waits for the first round of ingests so it has data
-        # to judge but fires before the user's first coffee refill.
+        # Rules only read data already in DuckDB, so the first sweep can run
+        # almost immediately — a long warmup starves alerts under uvicorn
+        # --reload, where every file save resets this timer and one-shot
+        # alerts (whales, PTRs, filings) sit pending for days.
         scheduler.add_job(
             alert_engine.run,
             trigger="interval",
             minutes=settings.alerts_poll_minutes,
-            next_run_time=soon + timedelta(seconds=560),
+            next_run_time=soon + timedelta(seconds=90),
             id="edge_alerts",
             **common,
         )

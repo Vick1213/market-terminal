@@ -70,6 +70,8 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "cdn.cboe.com": (2, 1.0),
     "www.cboe.com": (1, 2.0),
     "cdn.finra.org": (2, 1.0),
+    "api.finra.org": (2, 1.0),
+    "financialmodelingprep.com": (1, 2.0),  # free tier ~250 req/day
     "naaim.org": (1, 2.0),
     "www.aaii.com": (1, 2.0),
     "apewisdom.io": (1, 2.0),
@@ -84,8 +86,22 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
 }
 
 
+# Hosts whose failures arrive as HTTP 200 with a poison body (PLAN §8): Stooq
+# returns plain-text "Exceeded the daily hits limit" on quota and an HTML JS
+# challenge to headless clients — both fatal for a CSV consumer.
+_BODY_FAILURE_PREFIXES: dict[str, tuple[bytes, ...]] = {
+    "stooq.com": (b"Exceeded", b"<"),
+}
+
+
 class HttpClient:
-    def __init__(self, user_agent: str, cache_dir: str, default_timeout: float = 20.0) -> None:
+    def __init__(
+        self,
+        user_agent: str,
+        cache_dir: str,
+        default_timeout: float = 20.0,
+        health=None,  # SourceHealthRegistry | None — duck-typed, optional
+    ) -> None:
         self._client = httpx.AsyncClient(
             headers={"User-Agent": user_agent},
             timeout=default_timeout,
@@ -93,6 +109,24 @@ class HttpClient:
         )
         self._cache = diskcache.Cache(cache_dir)
         self._limiters: dict[str, AsyncLimiter] = {}
+        self._health = health
+
+    def _record(self, host: str, resp: HttpResponse | None, exc: Exception | None) -> None:
+        """Final outcome (after retries) -> watchdog. A 304-from-cache is a
+        success (the source answered); a poison 200 body is a failure."""
+        if self._health is None:
+            return
+        if exc is not None:
+            self._health.record_failure(host, str(exc))
+            return
+        if resp is not None and not resp.from_cache:
+            for prefix in _BODY_FAILURE_PREFIXES.get(host, ()):
+                if resp.body.lstrip()[:32].startswith(prefix):
+                    self._health.record_failure(
+                        host, f"poison body: {resp.body.lstrip()[:60]!r}"
+                    )
+                    return
+        self._health.record_success(host)
 
     def _limiter(self, host: str) -> AsyncLimiter:
         if host not in self._limiters:
@@ -100,13 +134,32 @@ class HttpClient:
             self._limiters[host] = AsyncLimiter(rate, period)
         return self._limiters[host]
 
+    async def get(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict | None = None,
+        conditional: bool = True,
+    ) -> HttpResponse:
+        host = urlsplit(url).netloc
+        try:
+            resp = await self._get_with_retry(
+                url, headers=headers, params=params, conditional=conditional
+            )
+        except Exception as exc:
+            self._record(host, None, exc)
+            raise
+        self._record(host, resp, None)
+        return resp
+
     @retry(
         retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=20),
         stop=stop_after_attempt(4),
         reraise=True,
     )
-    async def get(
+    async def _get_with_retry(
         self,
         url: str,
         *,
@@ -163,24 +216,47 @@ class HttpClient:
             headers=dict(resp.headers),
         )
 
+    async def post(
+        self,
+        url: str,
+        *,
+        data: dict | None = None,
+        json_body: dict | None = None,
+        headers: dict[str, str] | None = None,
+    ) -> HttpResponse:
+        host = urlsplit(url).netloc
+        try:
+            resp = await self._post_with_retry(
+                url, data=data, json_body=json_body, headers=headers
+            )
+        except Exception as exc:
+            self._record(host, None, exc)
+            raise
+        self._record(host, resp, None)
+        return resp
+
     @retry(
         retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
         wait=wait_exponential(multiplier=0.5, min=0.5, max=20),
         stop=stop_after_attempt(3),
         reraise=True,
     )
-    async def post(
+    async def _post_with_retry(
         self,
         url: str,
         *,
         data: dict | None = None,
+        json_body: dict | None = None,
         headers: dict[str, str] | None = None,
     ) -> HttpResponse:
-        """Rate-limited form POST (no conditional caching — POSTs aren't cacheable).
-        Session cookies set by prior requests ride along on the shared client."""
+        """Rate-limited POST, form (``data``) or JSON (``json_body``) — no
+        conditional caching, POSTs aren't cacheable. Session cookies set by
+        prior requests ride along on the shared client."""
         host = urlsplit(url).netloc
         async with self._limiter(host):
-            resp = await self._client.post(url, data=data, headers=headers or {})
+            resp = await self._client.post(
+                url, data=data, json=json_body, headers=headers or {}
+            )
         if resp.status_code == 429 or resp.status_code >= 500:
             raise RetryableStatus(resp)
         resp.raise_for_status()

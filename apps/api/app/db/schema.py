@@ -197,6 +197,22 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # TRUE short interest (shares held short, bi-monthly) from the FINRA
+    # Query API — Phase 11 #5. Distinct from ts_short_vol above.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_short_interest (
+            settlement_date   TIMESTAMP NOT NULL,
+            symbol            VARCHAR NOT NULL,
+            shares_short      DOUBLE,
+            shares_short_prev DOUBLE,
+            change_pct        DOUBLE,
+            avg_daily_volume  DOUBLE,
+            days_to_cover     DOUBLE,
+            PRIMARY KEY (settlement_date, symbol)
+        );
+        """
+    )
     # --- Phase 7: edge extras ---
     # Fired alerts (the in-app feed; ntfy push is fan-out only). id = rule:key:day
     # hash so a re-evaluated rule can never double-insert.
@@ -499,6 +515,22 @@ def init_sqlite(sqlite: SqliteStore) -> None:
             last_fired TEXT,
             last_value REAL,
             last_text  TEXT
+        );
+        """
+    )
+    # Source-health watchdog: one row per outbound host, written by HttpClient
+    # on every final request outcome (post-retries). The consecutive-failure
+    # streak is the dead-source signal; counters are lifetime totals.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS source_health (
+            host                 TEXT PRIMARY KEY,
+            last_success         TEXT,
+            last_failure         TEXT,
+            last_error           TEXT,
+            consecutive_failures INTEGER NOT NULL DEFAULT 0,
+            success_count        INTEGER NOT NULL DEFAULT 0,
+            failure_count        INTEGER NOT NULL DEFAULT 0
         );
         """
     )
