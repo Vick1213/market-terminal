@@ -18,7 +18,10 @@ from app.db.duck import DuckStore
 from app.db.schema import init_all
 from app.db.sqlite import SqliteStore
 from app.trading.broker import AlpacaPaperBroker, BrokerError
-from app.trading.bot import TradingBotService, build_proposals
+from app.trading.broker_cache import BrokerState
+from app.trading.bot import TradingBotService, build_proposals, sleeve_holdings
+from app.trading.optimizer import compute_split
+from app.trading.signals import intraday_signal, portfolio_conflict
 from app.trading.guardrails import (
     GuardrailConfig,
     buys_halted,
@@ -27,6 +30,13 @@ from app.trading.guardrails import (
     is_dust,
     norm_symbol,
 )
+
+
+class FakeOptimizer:
+    def __init__(self, swing_pct=100.0):
+        self._s = swing_pct
+    def latest(self):
+        return {"swing_pct": self._s, "day_pct": round(100 - self._s, 1), "regime": "neutral"}
 
 CFG = GuardrailConfig(
     max_position_pct=15.0, max_position_notional=5000.0, min_order_notional=100.0,
@@ -261,6 +271,8 @@ class FakeBroker:
         return dict(ACCOUNT)
     async def get_positions(self):
         return [dict(p) for p in POSITIONS]
+    async def get_clock(self):
+        return {"is_open": True}
     async def submit_order(self, symbol, side, *, qty=None, notional=None,
                            order_type="market", time_in_force="day", client_order_id=None):
         o = {"id": f"brk-{len(self.submitted)+1}", "client_order_id": client_order_id,
@@ -295,7 +307,8 @@ async def test_service():
              json.dumps(SNAPSHOT)],
         )
         broker = FakeBroker()
-        bot = TradingBotService(duck, sqlite, FakeHub(), broker, CFG,
+        state = BrokerState(broker, ttl=0.0)
+        bot = TradingBotService(duck, sqlite, FakeHub(), state, CFG, FakeOptimizer(100.0),
                                 stop_pct=STOP, default_mode="proposal")
 
         res = await bot.propose()
@@ -348,10 +361,93 @@ async def test_service():
         sqlite.close()
 
 
+def test_pending_sleeve():
+    print("\n[stale / pending-aware + sleeve sizing]")
+    snap = {"buckets": [{"key": "equities",
+            "holdings": [{"symbol": "AAPL", "kind": "stock", "weight_pct": 10, "evidence": []}]}]}
+    acct = {"equity": "10000", "last_equity": "10000", "buying_power": "10000"}
+    watch = {"AAPL"}
+    plan = build_proposals(snap, acct, [], watch, CFG, STOP,
+                           open_orders=[{"symbol": "AAPL", "side": "buy", "notional": "1000"}])
+    a = {p["symbol"]: p for p in plan["proposals"]}["AAPL"]
+    ok(a["status"] == "skipped" and any("working" in b for b in a["blocks"]),
+       "in-flight buy makes AAPL skipped (the stale-info fix)")
+    a = {p["symbol"]: p for p in build_proposals(snap, acct, [], watch, CFG, STOP)["proposals"]}["AAPL"]
+    ok(a["status"] == "proposed" and a["notional"] == 1000.0, "no pending -> buy 1000")
+    a = {p["symbol"]: p for p in build_proposals(snap, acct, [], watch, CFG, STOP, sleeve_pct=50.0)["proposals"]}["AAPL"]
+    ok(a["notional"] == 500.0, "sleeve_pct=50 scales target to the swing budget (500)")
+    pos = [{"symbol": "AAPL", "qty": "15", "market_value": "3000", "current_price": "200"}]
+    a = {p["symbol"]: p for p in build_proposals(snap, acct, pos, watch, CFG, STOP, exclude_qty={"AAPL": 15.0})["proposals"]}["AAPL"]
+    ok(a["side"] == "buy", "exclude_qty carves the other sleeve's shares (bots don't fight)")
+
+
+def test_sleeve_holdings():
+    print("\n[sleeve_holdings attribution]")
+    with tempfile.TemporaryDirectory() as d:
+        duck = DuckStore(Path(d) / "m.duckdb")
+        sq = SqliteStore(Path(d) / "a.db")
+        init_all(duck, sq)
+        for sym, side, q, sleeve in [("AAPL", "buy", 5, "swing"), ("AAPL", "buy", 3, "swing"),
+                                     ("AAPL", "sell", 2, "swing"), ("BTC/USD", "buy", 1, "day")]:
+            sq.execute("INSERT INTO bot_orders (symbol, side, status, filled_qty, sleeve) "
+                       "VALUES (?,?,?,?,?)", [sym, side, "filled", q, sleeve])
+        sw = sleeve_holdings(sq, "swing")
+        dy = sleeve_holdings(sq, "day")
+        ok(abs(sw.get("AAPL", 0) - 6) < 1e-9, "swing AAPL net = 5+3-2 = 6")
+        ok(abs(dy.get("BTCUSD", 0) - 1) < 1e-9, "day BTC/USD net = 1 (normalized key)")
+        ok("AAPL" not in dy, "sleeves are isolated")
+        duck.close()
+        sq.close()
+
+
+def test_optimizer():
+    print("\n[portfolio optimizer split]")
+    with tempfile.TemporaryDirectory() as d:
+        duck = DuckStore(Path(d) / "m.duckdb")
+        sq = SqliteStore(Path(d) / "a.db")
+        init_all(duck, sq)
+        duck.execute("INSERT INTO macro_composite (ts, score, regime, detail) VALUES (?,?,?,?)",
+                     [datetime(2026, 6, 24), 1.0, "risk-on", "{}"])
+        s = compute_split(duck, 5.0, 10.0)
+        ok(5.0 <= s["day_pct"] <= 10.0, "day_pct clamped to [5,10]")
+        ok(abs(s["swing_pct"] + s["day_pct"] - 100) < 1e-6, "swing + day = 100")
+        ok(s["day_pct"] > 7.5, "risk-on tilts the day sleeve above midpoint")
+        duck.execute("INSERT INTO macro_composite (ts, score, regime, detail) VALUES (?,?,?,?)",
+                     [datetime(2026, 6, 25), -2.0, "stress", "{}"])
+        ok(compute_split(duck, 5.0, 10.0)["day_pct"] == 5.0, "stress regime -> day floor")
+        duck.close()
+        sq.close()
+
+
+def test_day_signals():
+    print("\n[day-trade signals + portfolio conflict]")
+    up = [{"o": 100 + i * 0.1, "h": 100 + i * 0.1, "l": 99.9 + i * 0.1,
+           "c": 100 + i * 0.1, "v": 1000, "vw": 100 + i * 0.1} for i in range(11)]
+    s = intraday_signal(up, breakout_buffer_pct=0.05, momentum_min_pct=0.3, reversion_z=2.0)
+    ok(s["kind"] == "momentum" and s["direction"] == "buy", "uptrend into the high -> momentum buy")
+    rev = [{"o": 101, "h": 101, "l": 101, "c": 101, "v": 1000, "vw": 101} for _ in range(9)] + \
+          [{"o": 99, "h": 99, "l": 99, "c": 99, "v": 1000, "vw": 99}]
+    s = intraday_signal(rev, breakout_buffer_pct=0.05, momentum_min_pct=0.3, reversion_z=2.0)
+    ok(s["direction"] == "buy" and s["kind"] == "reversion", "stretched below VWAP -> reversion buy")
+    flat = [{"o": 100, "h": 100, "l": 100, "c": 100, "v": 1000, "vw": 100} for _ in range(10)]
+    ok(intraday_signal(flat, breakout_buffer_pct=0.05, momentum_min_pct=0.3,
+                       reversion_z=2.0)["direction"] == "none", "flat tape -> no setup")
+    ok(portfolio_conflict(symbol="AAPL", side="buy", swing_value=1000, equity=10000) is not None,
+       "day buy blocked when swing already holds >=8%")
+    ok(portfolio_conflict(symbol="AAPL", side="buy", swing_value=500, equity=10000) is None,
+       "day buy ok when swing holds <8%")
+    ok(portfolio_conflict(symbol="AAPL", side="sell", swing_value=9999, equity=10000) is None,
+       "sells never conflict (de-risking)")
+
+
 async def main():
     test_norm()
     test_guardrails()
     test_build_proposals()
+    test_pending_sleeve()
+    test_sleeve_holdings()
+    test_optimizer()
+    test_day_signals()
     await test_broker_gate()
     await test_service()
     print(f"\nALL {PASS} CHECKS PASSED")

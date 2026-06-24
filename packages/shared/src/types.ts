@@ -904,6 +904,8 @@ export interface BotProposal {
   blocks?: string[] | null;
   strategist_asof?: string | null;
   updated_at?: string;
+  sleeve?: string;
+  stale?: boolean; // fresh state no longer calls for this (already satisfied)
 }
 
 export interface BotOrder {
@@ -930,16 +932,101 @@ export interface BotUntrackedPosition {
   qty: number | null;
 }
 
+export interface BotOptimizerSignal {
+  key: string;
+  value: string;
+  detail?: string;
+}
+
+export interface BotOptimizer {
+  ts?: string | null;
+  swing_pct: number;
+  day_pct: number;
+  regime?: string | null;
+  reason?: string;
+  signals?: BotOptimizerSignal[];
+}
+
 export interface BotStatusResponse {
   config: BotConfig;
   broker: BotBroker;
   guardrails: BotGuardrails;
+  sleeve?: string;
+  optimizer?: BotOptimizer;
   proposals: BotProposal[];
   recent_orders: BotOrder[];
   account?: BotAccount;
   positions?: BotPosition[];
   account_error?: string;
   disclaimer: string;
+}
+
+export interface DaySignal {
+  kind: string;
+  direction: string;
+  strength: number;
+  last?: number | null;
+  vwap?: number | null;
+  z?: number;
+  detail?: string;
+}
+
+export interface DayAction {
+  symbol: string;
+  strategist_sym?: string;
+  asset_class?: string;
+  signal?: DaySignal;
+  news?: { title: string; score: number; outlets: number } | null;
+  act?: boolean;
+  side?: string | null;
+  notional?: number | null;
+  qty?: number | null;
+  reason?: string;
+  submitted?: boolean;
+  max_loss_est?: number;
+}
+
+export interface DayProposal {
+  id: number;
+  symbol: string;
+  side: string;
+  qty: number | null;
+  notional: number | null;
+  conviction: number | null;
+  max_loss_est: number | null;
+  rationale?: Record<string, unknown> | null;
+  status: string;
+  created_at?: string;
+}
+
+export interface DayStatusResponse {
+  config: { enabled: boolean };
+  universe: string[];
+  optimizer?: BotOptimizer;
+  guardrails?: {
+    max_position_pct: number;
+    min_order_notional: number;
+    daily_loss_limit_pct: number;
+  };
+  market_open?: boolean;
+  holdings?: Record<string, number>;
+  recent_orders: BotOrder[];
+  recent_proposals: DayProposal[];
+  account_error?: string;
+  disclaimer: string;
+}
+
+export interface DayRunResponse {
+  ok: boolean;
+  detail?: string;
+  config?: { enabled: boolean };
+  market_open?: boolean;
+  day_pct?: number;
+  day_budget?: number;
+  deployed?: number;
+  actions?: DayAction[];
+  note?: string;
+  disclaimer?: string;
 }
 
 export interface BotProposeResponse {

@@ -635,6 +635,35 @@ def init_sqlite(sqlite: SqliteStore) -> None:
     # Seed the singleton bot_config row (idempotent — never clobbers a toggle).
     sqlite.execute("INSERT OR IGNORE INTO bot_config (id, enabled, mode) VALUES (1, 0, 'proposal');")
 
+    # --- Phase 13: two sleeves (swing + day) + portfolio optimizer ---
+    # Tag every proposal/order with its sleeve so per-sleeve holdings can be
+    # tracked independently on the one shared paper account (existing rows
+    # default to 'swing'). bot_config gains a separate kill switch for the day
+    # bot (it is always auto-exec, so no mode column).
+    for stmt in (
+        "ALTER TABLE bot_proposals ADD COLUMN sleeve TEXT NOT NULL DEFAULT 'swing'",
+        "ALTER TABLE bot_orders ADD COLUMN sleeve TEXT NOT NULL DEFAULT 'swing'",
+        "ALTER TABLE bot_config ADD COLUMN day_enabled INTEGER NOT NULL DEFAULT 0",
+    ):
+        try:
+            sqlite.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # duplicate column — already migrated
+    # Optimizer snapshots: the capital split between sleeves, one row per run
+    # (recompute replaces by minute). detail = JSON of the driving signals.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS optimizer_snapshots (
+            ts         TEXT PRIMARY KEY,
+            swing_pct  REAL NOT NULL,
+            day_pct    REAL NOT NULL,
+            regime     TEXT,
+            reason     TEXT,
+            detail     TEXT
+        );
+        """
+    )
+
     # Seed the default watchlist once (idempotent).
     sqlite.executemany(
         "INSERT OR IGNORE INTO watchlist (symbol, asset_class, display_name, sort_order) "

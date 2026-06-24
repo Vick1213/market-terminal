@@ -63,7 +63,10 @@ from app.scheduler.jobs import build_scheduler
 from app.sentiment import SentimentService
 from app.trading.bot import TradingBotService
 from app.trading.broker import AlpacaPaperBroker
+from app.trading.broker_cache import BrokerState
+from app.trading.daytrader import DayTraderService
 from app.trading.guardrails import GuardrailConfig
+from app.trading.optimizer import PortfolioOptimizer
 from app.ws.hub import hub
 
 logging.basicConfig(
@@ -201,15 +204,34 @@ async def lifespan(app: FastAPI):
         base_url=settings.alpaca_trading_base_url,
         allow_live=settings.bot_allow_live_trading,
     )
+    # One shared, TTL-cached broker view for every reader (status polls + both
+    # bots + optimizer) — collapses bursts to a single paper-api call.
+    broker_state = BrokerState(broker, ttl=settings.broker_cache_ttl_seconds)
+    # Phase 13: optimizer decides the swing/day capital split.
+    optimizer = PortfolioOptimizer(
+        duck, sqlite, hub,
+        day_min=settings.day_alloc_min_pct, day_max=settings.day_alloc_max_pct,
+    )
     trading_bot = TradingBotService(
-        duck, sqlite, hub, broker,
-        GuardrailConfig.from_settings(settings),
+        duck, sqlite, hub, broker_state,
+        GuardrailConfig.from_settings(settings), optimizer,
         stop_pct=settings.bot_stop_assumption_pct,
         default_mode=settings.bot_mode_default,
     )
+    # Phase 13: fast day-trade sleeve (small universe, auto-exec paper). Uses
+    # the DATA keys for intraday bars and the shared broker view for execution.
+    day_trader = DayTraderService(
+        duck, sqlite, hub, broker_state, optimizer,
+        http=http,
+        data_key_id=settings.alpaca_key_id,
+        data_secret=settings.alpaca_secret_key,
+        settings=settings,
+    )
     if settings.bot_enabled_default:
         await trading_bot.set_enabled(True)
-    log.info("paper trading bot: broker=%s paper=%s (kill switch off by default)",
+    if settings.day_enabled_default:
+        await day_trader.set_enabled(True)
+    log.info("paper bots: broker=%s paper=%s (both kill switches off by default)",
              "configured" if broker.enabled else "no-keys", broker.is_paper)
 
     scheduler = build_scheduler(
@@ -220,6 +242,7 @@ async def lifespan(app: FastAPI):
         intl_pipeline, strategist_service, insider_scan_pipeline,
         filings_diff_pipeline, fomc_diff_pipeline,
         short_interest_pipeline=short_interest_pipeline,
+        optimizer=optimizer, day_trader=day_trader,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -270,7 +293,10 @@ async def lifespan(app: FastAPI):
     app.state.intl_pipeline = intl_pipeline
     app.state.strategist_service = strategist_service
     app.state.broker = broker
+    app.state.broker_state = broker_state
+    app.state.optimizer = optimizer
     app.state.trading_bot = trading_bot
+    app.state.day_trader = day_trader
 
     try:
         yield

@@ -82,6 +82,8 @@ def build_scheduler(
     filings_diff_pipeline: FilingsDiffPipeline | None = None,
     fomc_diff_pipeline: FomcDiffPipeline | None = None,
     short_interest_pipeline: ShortInterestPipeline | None = None,
+    optimizer=None,
+    day_trader=None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -450,6 +452,31 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,
+        )
+
+    # --- Phase 13: portfolio optimizer + day trader ---
+    soon = datetime.now(timezone.utc)
+    if optimizer is not None:
+        # Cheap local read of stored conditions; refreshes the swing/day split.
+        scheduler.add_job(
+            optimizer.run,
+            trigger="interval",
+            minutes=30,
+            next_run_time=soon + timedelta(seconds=120),
+            id="trading_optimizer",
+            max_instances=1, coalesce=True, misfire_grace_time=300, jitter=15,
+        )
+    if day_trader is not None:
+        # Fast sleeve. run() is a no-op (no API calls) while the day kill switch
+        # is off; when armed it trades crypto 24/7 and equities only when the
+        # market is open. ~2 batched data calls per tick — IP-block safe.
+        scheduler.add_job(
+            day_trader.run,
+            trigger="interval",
+            minutes=settings.day_poll_minutes,
+            next_run_time=soon + timedelta(seconds=150),
+            id="trading_day",
+            max_instances=1, coalesce=True, misfire_grace_time=60, jitter=10,
         )
 
     return scheduler

@@ -31,7 +31,9 @@ from datetime import datetime, timezone
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.alpaca import alpaca_symbol
-from app.trading.broker import AlpacaPaperBroker, BrokerError
+from app.trading.broker import BrokerError
+from app.trading.broker_cache import BrokerState
+from app.trading.optimizer import PortfolioOptimizer
 from app.trading.guardrails import (
     GuardrailConfig,
     buys_halted,
@@ -112,6 +114,9 @@ def build_proposals(
     watchlist_alpaca: set[str],
     cfg: GuardrailConfig,
     stop_pct: dict[str, float],
+    open_orders: list[dict] | None = None,
+    sleeve_pct: float = 100.0,
+    exclude_qty: dict[str, float] | None = None,
 ) -> dict:
     """Pure planning step: snapshot + broker state -> proposal dicts.
 
@@ -135,6 +140,25 @@ def build_proposals(
             "qty": _to_float(p.get("qty")) or 0.0,
             "price": _to_float(p.get("current_price")),
         }
+
+    # In-flight orders already move toward the target — a pending BUY is
+    # acquiring it, a pending SELL is shedding it. Net them into an "effective"
+    # position so a re-run of propose() doesn't re-propose a trade still working
+    # (the core stale-info fix: you placed orders, refresh shouldn't repeat them).
+    pending: dict[str, float] = {}
+    for o in open_orders or []:
+        osym = o.get("symbol")
+        if not osym:
+            continue
+        n = norm_symbol(osym)
+        val = _to_float(o.get("notional"))
+        if val is None:
+            oqty = _to_float(o.get("qty"))
+            price = (pos_map.get(n) or {}).get("price")
+            val = oqty * price if (oqty and price) else None
+        if val is None:
+            continue
+        pending[n] = pending.get(n, 0.0) + (val if (o.get("side") or "").lower() == "buy" else -val)
 
     # strategist holdings -> targets, aggregated by Alpaca symbol.
     targets: dict[str, dict] = {}
@@ -162,13 +186,22 @@ def build_proposals(
     proposals: list[dict] = []
     for t in targets.values():
         asym = t["symbol"]
+        nrm = norm_symbol(asym)
         bucket = t["bucket"]
         target_pct = t["target_pct"]
-        target_value = equity * target_pct / 100.0
-        cur = pos_map.get(norm_symbol(asym), {})
-        current_value = float(cur.get("value") or 0.0)
+        # Scale the strategist target to THIS sleeve's slice of capital so the
+        # swing book leaves room for the day sleeve (sleeve_pct < 100).
+        target_value = equity * target_pct / 100.0 * sleeve_pct / 100.0
+        cur = pos_map.get(nrm, {})
+        price = cur.get("price")
+        # Carve out shares the OTHER sleeve owns so we never trade its position.
+        ex = (exclude_qty or {}).get(nrm, 0.0)
+        sleeve_qty = max(0.0, float(cur.get("qty") or 0.0) - ex)
+        current_value = sleeve_qty * float(price) if price else float(cur.get("value") or 0.0)
         current_pct = (current_value / equity * 100.0) if equity else 0.0
-        delta = target_value - current_value
+        # effective = what we'll hold once in-flight orders fill.
+        effective_value = current_value + pending.get(nrm, 0.0)
+        delta = target_value - effective_value
         drift_pp = abs(delta) / equity * 100.0 if equity else 0.0
         order_value = abs(delta)
 
@@ -198,13 +231,18 @@ def build_proposals(
             "blocks": [],
             "status": "proposed",
             "side": "buy" if delta >= 0 else "sell",
+            "sleeve": "swing",
+            "pending_value": round(pending.get(norm_symbol(asym), 0.0), 2),
         }
 
         # within the rebalance band, or below the dust floor -> skip (no trade).
         if drift_pp < cfg.rebalance_band_pp:
             proposal["status"] = "skipped"
+            in_flight = abs(pending.get(norm_symbol(asym), 0.0)) > 1e-6
             proposal["blocks"] = [
-                f"within rebalance band ({drift_pp:.1f}pp < {cfg.rebalance_band_pp:.1f}pp)"
+                (f"already working — ${abs(pending.get(norm_symbol(asym), 0.0)):,.0f} in-flight "
+                 f"toward target" if in_flight else
+                 f"within rebalance band ({drift_pp:.1f}pp < {cfg.rebalance_band_pp:.1f}pp)")
             ]
             proposals.append(proposal)
             continue
@@ -221,12 +259,11 @@ def build_proposals(
         if side == "buy":
             proposal["notional"] = round(order_value, 2)
         else:
-            price = cur.get("price")
-            held = float(cur.get("qty") or 0.0)
-            if not price or held <= 0:
+            # Only sell shares THIS sleeve owns (sleeve_qty already carved).
+            if not price or sleeve_qty <= 0:
                 extra_block.append("no current price/holding to size the sell")
             else:
-                qty = min(held, order_value / float(price))
+                qty = min(sleeve_qty, order_value / float(price))
                 proposal["qty"] = round(qty, 6)
 
         blocks = evaluate_order(
@@ -272,8 +309,9 @@ class TradingBotService:
         duck: DuckStore,
         sqlite: SqliteStore,
         hub: ConnectionManager,
-        broker: AlpacaPaperBroker,
+        broker: BrokerState,
         cfg: GuardrailConfig,
+        optimizer: PortfolioOptimizer,
         *,
         stop_pct: dict[str, float],
         default_mode: str = "proposal",
@@ -283,6 +321,7 @@ class TradingBotService:
         self._hub = hub
         self._broker = broker
         self._cfg = cfg
+        self._optimizer = optimizer
         self._stop_pct = dict(stop_pct)
         # bot_config row is seeded by schema.init_sqlite; default_mode only seeds
         # a fresh row if somehow missing.
@@ -362,21 +401,25 @@ class TradingBotService:
             return {"ok": False, "detail": "no strategist snapshot yet — run /api/strategist/run",
                     "config": self._config()}
 
-        account = await self._broker.get_account()
-        positions = await self._broker.get_positions()
+        account = await self._broker.account()
+        positions = await self._broker.positions()
+        open_orders = await self._broker.open_orders()
+        swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
         plan = build_proposals(
             snapshot, account, positions, self._watchlist_alpaca(),
-            self._cfg, self._stop_pct,
+            self._cfg, self._stop_pct, open_orders=open_orders,
+            sleeve_pct=swing_pct, exclude_qty=sleeve_holdings(self._sqlite, "day"),
         )
+        plan["sleeve_pct"] = swing_pct
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         strat_asof = snapshot.get("as_of")
 
-        # Supersede the previous open set so "current proposals" = latest run.
+        # Supersede the previous open swing set so "current proposals" = latest run.
         self._sqlite.execute(
             "UPDATE bot_proposals SET status = 'expired', updated_at = datetime('now') "
-            "WHERE status IN ('proposed', 'blocked', 'skipped')"
+            "WHERE status IN ('proposed', 'blocked', 'skipped') AND sleeve = 'swing'"
         )
         ids: list[int] = []
         for p in plan["proposals"]:
@@ -387,8 +430,8 @@ class TradingBotService:
                 "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, "
                 "bucket, side, order_type, qty, notional, target_pct, current_pct, "
                 "target_value, current_value, delta_value, conviction, max_loss_est, "
-                "rationale, status, blocks, strategist_asof) VALUES "
-                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "rationale, status, blocks, strategist_asof, sleeve) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'swing')",
                 [run_id, now, p["symbol"], p["strategist_sym"], p["bucket"], p["side"],
                  p["order_type"], p["qty"], p["notional"], p["target_pct"],
                  p["current_pct"], p["target_value"], p["current_value"],
@@ -437,53 +480,50 @@ class TradingBotService:
         notional = _to_float(row["notional"])
         qty = _to_float(row["qty"])
 
-        # Re-validate against fresh ground truth (state may have moved).
-        account = await self._broker.get_account()
-        positions = await self._broker.get_positions()
-        pos = next((p for p in positions if norm_symbol(p.get("symbol", "")) == norm_symbol(symbol)), None)
-        price = _to_float(pos.get("current_price")) if pos else None
-        current_value = (_to_float(pos.get("market_value")) if pos else 0.0) or 0.0
-        if side == "buy":
-            order_value = notional or 0.0
-        else:
-            # Re-clamp the sell to shares ACTUALLY held now (the proposal may be
-            # stale); refuse if the position is gone, so we never short by mistake.
-            held = (_to_float(pos.get("qty")) if pos else 0.0) or 0.0
-            qty = round(min(qty or 0.0, held), 6)
-            if qty <= 0:
-                self._sqlite.execute(
-                    "UPDATE bot_proposals SET status = 'blocked', blocks = ?, "
-                    "updated_at = datetime('now') WHERE id = ?",
-                    [json.dumps(["no shares held to sell (position closed since propose)"]),
-                     proposal_id],
-                )
-                await self._broadcast("execute")
-                return {"ok": False, "detail": "no shares held to sell"}
-            order_value = qty * (price or 0.0)
-
-        allowlist = self._allowlist()
-        blocks = evaluate_order(
-            symbol=symbol, side=side, order_value=order_value or 0.0,
-            current_position_value=current_value or 0.0,
-            equity=_to_float(account.get("equity")) or 0.0,
-            buying_power=_to_float(account.get("buying_power")) or 0.0,
-            allowlist=allowlist, cfg=self._cfg,
-            buys_halted_reason=buys_halted(account, self._cfg),
+        # Re-derive this symbol's action from FRESH state. If you already traded
+        # it (or it filled), the fresh plan no longer calls for it and we refuse
+        # — the stale-info guard. Sizing also comes from the FRESH plan, never
+        # the possibly-stale stored qty/notional.
+        account = await self._broker.account(fresh=True)
+        positions = await self._broker.positions(fresh=True)
+        open_orders = await self._broker.open_orders(fresh=True)
+        swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
+        snapshot = self._latest_snapshot() or {}
+        fresh = build_proposals(
+            snapshot, account, positions, self._watchlist_alpaca(),
+            self._cfg, self._stop_pct, open_orders=open_orders,
+            sleeve_pct=swing_pct, exclude_qty=sleeve_holdings(self._sqlite, "day"),
         )
-        if blocks:
+        fp = next((x for x in fresh["proposals"]
+                   if norm_symbol(x["symbol"]) == norm_symbol(symbol)), None)
+        if fp is None or fp["side"] != side or fp["status"] == "skipped":
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = 'stale', blocks = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                [json.dumps([f"stale — {symbol} already at/over target or thesis changed "
+                             "since this proposal; re-propose for a current plan"]), proposal_id],
+            )
+            await self._broadcast("execute")
+            return {"ok": False, "detail": "stale proposal — already satisfied; re-propose",
+                    "stale": True}
+        if fp["status"] == "blocked":
             self._sqlite.execute(
                 "UPDATE bot_proposals SET status = 'blocked', blocks = ?, "
                 "updated_at = datetime('now') WHERE id = ?",
-                [json.dumps(blocks), proposal_id],
+                [json.dumps(fp["blocks"]), proposal_id],
             )
             await self._broadcast("execute")
-            return {"ok": False, "detail": "blocked on re-validation", "blocks": blocks}
+            return {"ok": False, "detail": "blocked on re-validation", "blocks": fp["blocks"]}
+
+        # Adopt the fresh sizing.
+        notional = fp.get("notional")
+        qty = fp.get("qty")
 
         # Don't stack a second order on a symbol+side that already has a resting
         # bot order — propose() mints fresh proposal ids each run, so without
         # this a re-propose+execute could double up while the first is unfilled.
         try:
-            for o in await self._broker.list_orders("open", 200):
+            for o in await self._broker.open_orders(fresh=True):
                 cid = o.get("client_order_id") or ""
                 if (cid.startswith("bot-")
                         and norm_symbol(o.get("symbol", "")) == norm_symbol(symbol)
@@ -503,8 +543,8 @@ class TradingBotService:
         # the broker — no phantom, untracked order.
         self._sqlite.execute(
             "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
-            "order_type, qty, notional, status, submitted_at) "
-            "VALUES (?,?,?,?,?,?,?, 'submitting', datetime('now'))",
+            "order_type, qty, notional, status, submitted_at, sleeve) "
+            "VALUES (?,?,?,?,?,?,?, 'submitting', datetime('now'), 'swing')",
             [proposal_id, client_order_id, symbol, side, "market",
              qty if side == "sell" else None, notional if side == "buy" else None],
         )
@@ -586,7 +626,7 @@ class TradingBotService:
         by_cid = {o.get("client_order_id"): o for o in orders if o.get("client_order_id")}
         updated = 0
         rows = self._sqlite.fetchall(
-            "SELECT id, proposal_id, client_order_id FROM bot_orders"
+            "SELECT id, proposal_id, client_order_id FROM bot_orders WHERE sleeve = 'swing'"
         )
         for r in rows:
             o = by_cid.get(r["client_order_id"])
@@ -637,15 +677,20 @@ class TradingBotService:
                 "rebalance_band_pp": self._cfg.rebalance_band_pp,
                 "allow_live": self._cfg.allow_live,
             },
+            "sleeve": "swing",
+            "optimizer": self._optimizer.latest(),
             "proposals": self._open_proposals(),
             "recent_orders": self._recent_orders(),
             "disclaimer": DISCLAIMER,
         }
         if self._broker.enabled:
             try:
-                await self.reconcile()
-                account = await self._broker.get_account()
-                positions = await self._broker.get_positions()
+                # Only hit the broker's order list when something is actually in
+                # flight — keeps a wall of UI polls from spending API budget.
+                if self._has_inflight("swing"):
+                    await self.reconcile()
+                account = await self._broker.account()
+                positions = await self._broker.positions()
                 out["account"] = self._account_summary(account)
                 out["positions"] = [
                     {"symbol": p.get("symbol"),
@@ -656,9 +701,36 @@ class TradingBotService:
                      "unrealized_plpc": _to_float(p.get("unrealized_plpc"))}
                     for p in positions
                 ]
+                # Flag open proposals that fresh state no longer calls for, so
+                # the UI can grey out trades you've already effectively done.
+                try:
+                    open_orders = await self._broker.open_orders()
+                    snap = self._latest_snapshot() or {}
+                    swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
+                    fresh = build_proposals(
+                        snap, account, positions, self._watchlist_alpaca(), self._cfg,
+                        self._stop_pct, open_orders=open_orders, sleeve_pct=swing_pct,
+                        exclude_qty=sleeve_holdings(self._sqlite, "day"),
+                    )
+                    live = {(norm_symbol(x["symbol"]), x["side"])
+                            for x in fresh["proposals"] if x["status"] == "proposed"}
+                    for p in out["proposals"]:
+                        if p.get("status") == "proposed":
+                            p["stale"] = (norm_symbol(p["symbol"]), p["side"]) not in live
+                except Exception:
+                    log.debug("staleness flagging failed", exc_info=True)
             except BrokerError as exc:
                 out["account_error"] = exc.reason
         return out
+
+    def _has_inflight(self, sleeve: str) -> bool:
+        row = self._sqlite.fetchone(
+            "SELECT 1 FROM bot_orders WHERE sleeve = ? AND status IN "
+            "('submitting','new','accepted','pending_new','partially_filled',"
+            "'pending_replace','accepted_for_bidding') LIMIT 1",
+            [sleeve],
+        )
+        return row is not None
 
     # ---- helpers -----------------------------------------------------------
     def _allowlist(self) -> set[str]:
@@ -689,7 +761,8 @@ class TradingBotService:
 
     def _open_proposals(self) -> list[dict]:
         rows = self._sqlite.fetchall(
-            "SELECT * FROM bot_proposals WHERE status IN ('proposed','blocked','submitted','rejected') "
+            "SELECT * FROM bot_proposals WHERE sleeve = 'swing' AND "
+            "status IN ('proposed','blocked','submitted','rejected') "
             "ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'submitted' THEN 1 "
             "WHEN 'blocked' THEN 2 ELSE 3 END, abs(delta_value) DESC LIMIT 100"
         )
@@ -699,7 +772,7 @@ class TradingBotService:
         rows = self._sqlite.fetchall(
             "SELECT id, proposal_id, symbol, side, order_type, qty, notional, status, "
             "filled_qty, filled_avg_price, submitted_at, error FROM bot_orders "
-            "ORDER BY id DESC LIMIT 50"
+            "WHERE sleeve = 'swing' ORDER BY id DESC LIMIT 50"
         )
         return [dict(r) for r in rows]
 
@@ -727,3 +800,21 @@ def proposals_for_run(sqlite: SqliteStore, run_id: str) -> list[dict]:
         [run_id],
     )
     return [TradingBotService._proposal_row(r) for r in rows]
+
+
+def sleeve_holdings(sqlite: SqliteStore, sleeve: str) -> dict[str, float]:
+    """Net shares a sleeve owns, from its FILLED orders (buy +, sell -). The one
+    shared paper account is partitioned this way so each sleeve diffs against
+    only its own book and the two bots never trade each other's positions."""
+    out: dict[str, float] = {}
+    for r in sqlite.fetchall(
+        "SELECT symbol, side, filled_qty FROM bot_orders "
+        "WHERE sleeve = ? AND status = 'filled' AND filled_qty IS NOT NULL",
+        [sleeve],
+    ):
+        q = _to_float(r["filled_qty"]) or 0.0
+        if not q:
+            continue
+        n = norm_symbol(r["symbol"])
+        out[n] = out.get(n, 0.0) + (q if r["side"] == "buy" else -q)
+    return {k: v for k, v in out.items() if abs(v) > 1e-9}

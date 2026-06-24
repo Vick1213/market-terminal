@@ -121,6 +121,47 @@ async def fetch_snapshots(
     return out
 
 
+async def fetch_intraday_bars(
+    http, key_id: str, secret: str, items: list[tuple[str, str]], minutes: int = 30
+) -> dict[str, list[dict]]:
+    """Recent 1-minute bars for the day-trade universe, batched: ONE stocks
+    request + ONE crypto request regardless of how many symbols. This is the
+    day trader's whole equity/crypto data footprint per tick — deliberately
+    tiny so the fast loop can never get the IP rate-limited.
+
+    Returns {watchlist symbol: [ {ts,o,h,l,c,v,vw} ascending ]}. Stocks use the
+    live IEX feed (free tier); symbols Alpaca can't serve are simply absent.
+    """
+    stocks, crypto = _split(items)
+    headers = _headers(key_id, secret)
+    start = (datetime.now(timezone.utc) - timedelta(minutes=minutes)).isoformat()
+    out: dict[str, list[dict]] = {}
+
+    async def _pull(url: str, asyms: dict[str, str], extra: dict) -> None:
+        params = {"symbols": ",".join(sorted(asyms)), "timeframe": "1Min",
+                  "start": start, "limit": 10000, **extra}
+        data = await http.get_json(url, params=params, headers=headers, conditional=False)
+        for asym, bars in (data.get("bars") or {}).items():
+            rows = []
+            for b in bars or []:
+                if b.get("c") is None:
+                    continue
+                rows.append({
+                    "ts": b.get("t"),
+                    "o": float(b.get("o", b["c"])), "h": float(b.get("h", b["c"])),
+                    "l": float(b.get("l", b["c"])), "c": float(b["c"]),
+                    "v": float(b["v"]) if b.get("v") is not None else 0.0,
+                    "vw": float(b["vw"]) if b.get("vw") is not None else float(b["c"]),
+                })
+            out[asyms.get(asym, asym)] = rows
+
+    if stocks:
+        await _pull(f"{_STOCKS_BASE}/bars", stocks, {"feed": "iex"})
+    if crypto:
+        await _pull(f"{_CRYPTO_BASE}/bars", crypto, {})
+    return out
+
+
 async def fetch_daily_bars(
     http, key_id: str, secret: str, symbol: str, asset_class: str, start: date
 ) -> list[tuple[datetime, float, float, float, float, float | None]]:

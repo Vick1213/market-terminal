@@ -275,6 +275,36 @@ class Settings(BaseSettings):
     bot_stop_assumption_pct: dict[str, float] = {
         "equities": 8.0, "metals": 10.0, "crypto": 20.0, "cash": 1.0,
     }
+    # Shared broker-read cache TTL (seconds). status()/both bots/optimizer all
+    # read account+positions+orders through one cache so a burst of UI polls or
+    # bot ticks collapses to a single paper-api call — the main IP-block guard.
+    broker_cache_ttl_seconds: float = 4.0
+
+    # --- Phase 13: portfolio optimizer + two-sleeve bots ---
+    # The optimizer splits capital between a long-term SWING sleeve (the
+    # strategist allocator) and a short-term DAY sleeve (the fast trader),
+    # by market conditions. Day stays a small slice; swing gets the rest.
+    day_alloc_min_pct: float = 5.0    # day sleeve floor (% of equity)
+    day_alloc_max_pct: float = 10.0   # day sleeve ceiling (% of equity)
+    # Day trader. Small liquid universe keeps the data footprint to ~2 batched
+    # snapshot calls per tick. Crypto runs 24/7; equities are market-hours gated.
+    day_universe: list[str] = ["SPY", "QQQ", "NVDA", "TSLA", "BTC/USD", "ETH/USD"]
+    day_enabled_default: bool = False  # the day bot starts HALTED too
+    day_poll_minutes: int = 3          # cadence (equity legs gated to market hours)
+    day_intraday_lookback_min: int = 30  # 1-min bars window for the signal
+    # Day-trade signal thresholds.
+    day_breakout_buffer_pct: float = 0.05   # price within this % of the window high = breakout
+    day_momentum_min_pct: float = 0.30      # min intraday move to call it momentum
+    day_reversion_z: float = 2.0            # |z| vs intraday VWAP to call mean-reversion
+    day_min_signal: float = 1.0             # min combined signal strength to act
+    # Day guardrails (sized against the DAY SLEEVE budget, not whole equity).
+    day_max_position_pct: float = 40.0      # one name <= this % of the day sleeve
+    day_min_order_notional: float = 50.0
+    day_daily_loss_limit_pct: float = 2.0   # halt day BUYS if the day sleeve is down this % today
+    # Major-news override: only act on news this fresh / strong / corroborated.
+    day_news_max_age_min: int = 30
+    day_news_min_abs_score: float = 0.6
+    day_news_min_outlets: int = 2
 
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [

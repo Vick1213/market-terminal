@@ -29,6 +29,14 @@ def _bot(request: Request):
     return request.app.state.trading_bot
 
 
+def _day(request: Request):
+    return request.app.state.day_trader
+
+
+def _optimizer(request: Request):
+    return request.app.state.optimizer
+
+
 @router.get("/status")
 async def status(request: Request) -> dict:
     return await _bot(request).status()
@@ -107,6 +115,37 @@ async def proposals(request: Request, run_id: str | None = Query(None),
         "SELECT * FROM bot_proposals ORDER BY id DESC LIMIT ?", [limit]
     )
     return {"proposals": [TradingBotService._proposal_row(r) for r in rows]}
+
+
+# --- Phase 13: optimizer + day sleeve ---
+@router.get("/optimizer")
+async def optimizer(request: Request) -> dict:
+    return _optimizer(request).latest()
+
+
+@router.post("/optimizer/run")
+async def optimizer_run(request: Request) -> dict:
+    return await _optimizer(request).run()
+
+
+@router.get("/day/status")
+async def day_status(request: Request) -> dict:
+    return await _day(request).status()
+
+
+@router.post("/day/run")
+async def day_run(request: Request) -> dict:
+    return await _day(request).run()
+
+
+@router.post("/day/enable")
+async def day_enable(request: Request) -> dict:
+    return await _day(request).set_enabled(True)
+
+
+@router.post("/day/disable")
+async def day_disable(request: Request) -> dict:
+    return await _day(request).set_enabled(False)
 
 
 @router.get("/orders")

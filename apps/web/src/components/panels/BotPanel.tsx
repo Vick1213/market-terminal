@@ -6,10 +6,13 @@ import type { BotProposal } from "@market/shared";
 import {
   executeBotProposal,
   fetchBotStatus,
+  fetchDayStatus,
   reconcileBot,
   runBotPropose,
+  runDay,
   setBotEnabled,
   setBotMode,
+  setDayEnabled,
 } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -53,9 +56,9 @@ function ProposalRow({
   executing: boolean;
 }) {
   const size = p.side === "buy" ? usd(p.notional) : `${(p.qty ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} sh`;
-  const actionable = p.status === "proposed";
+  const actionable = p.status === "proposed" && !p.stale;
   return (
-    <div style={{ marginBottom: 3, borderBottom: "1px solid var(--border, #2a2a2a)", paddingBottom: 3 }}>
+    <div style={{ marginBottom: 3, borderBottom: "1px solid var(--border, #2a2a2a)", paddingBottom: 3, opacity: p.stale ? 0.5 : 1 }}>
       <div
         style={{ display: "flex", alignItems: "center", gap: 6, cursor: "pointer", fontSize: 12 }}
         onClick={onToggle}
@@ -76,15 +79,19 @@ function ProposalRow({
         >
           {(p.current_pct ?? 0).toFixed(1)}→{(p.target_pct ?? 0).toFixed(1)}%
         </span>
-        <span
-          style={{
-            marginLeft: "auto",
-            fontSize: 10,
-            textTransform: "uppercase",
-            color: STATUS_COLOR[p.status] ?? "var(--text-dim)",
-          }}
-        >
-          {p.status}
+        <span style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 4 }}>
+          {p.stale && (
+            <span
+              style={{ fontSize: 9, color: "var(--yellow)", border: "1px solid var(--yellow)",
+                borderRadius: 3, padding: "0 4px" }}
+              title="Fresh account state no longer calls for this — you've already done it. Re-propose (↻)."
+            >
+              STALE
+            </span>
+          )}
+          <span style={{ fontSize: 10, textTransform: "uppercase", color: STATUS_COLOR[p.status] ?? "var(--text-dim)" }}>
+            {p.status}
+          </span>
         </span>
         {canExecute && actionable && (
           <button
@@ -139,6 +146,81 @@ function ProposalRow({
             <div style={{ color: "var(--yellow)" }}>⛔ {p.blocks.join(" · ")}</div>
           )}
         </div>
+      )}
+    </div>
+  );
+}
+
+function DaySection() {
+  const qc = useQueryClient();
+  const q = useQuery({ queryKey: ["day"], queryFn: fetchDayStatus, refetchInterval: 60_000 });
+  const inv = () => {
+    qc.invalidateQueries({ queryKey: ["day"] });
+    qc.invalidateQueries({ queryKey: ["bot"] });
+  };
+  const toggle = useMutation({ mutationFn: setDayEnabled, onSuccess: inv });
+  const run = useMutation({ mutationFn: runDay, onSuccess: inv });
+  const d = q.data;
+  const enabled = !!d?.config.enabled;
+
+  return (
+    <div style={{ marginTop: 10, borderTop: "1px solid var(--border, #2a2a2a)", paddingTop: 6 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+        <span style={{ fontWeight: 600 }}>Day trader</span>
+        <span style={{ fontSize: 9, color: "var(--accent, #7aa2f7)" }}>fast · auto</span>
+        {d?.market_open !== undefined && (
+          <span style={{ fontSize: 10, color: d.market_open ? "var(--green)" : "var(--text-dim)" }}>
+            {d.market_open ? "market open" : "closed (crypto only)"}
+          </span>
+        )}
+        <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
+          <button className="expand-btn" disabled={run.isPending} title="Run a day-trade tick now"
+            onClick={() => run.mutate()}>{run.isPending ? "…" : "↻"}</button>
+          <button
+            onClick={() => toggle.mutate(!enabled)}
+            disabled={toggle.isPending}
+            title={enabled ? "Day bot ARMED — auto-trading the day sleeve (paper)" : "Day bot halted — click to arm"}
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3, cursor: "pointer",
+              background: "transparent",
+              border: `1px solid ${enabled ? "var(--green)" : "var(--red)"}`,
+              color: enabled ? "var(--green)" : "var(--red)",
+            }}
+          >
+            {enabled ? "● ARMED" : "○ HALTED"}
+          </button>
+        </span>
+      </div>
+      {d && (
+        <>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 4 }}>
+            {d.universe.join(", ")} · cap {d.guardrails?.max_position_pct}% of day sleeve · daily-loss
+            {" "}-{d.guardrails?.daily_loss_limit_pct}%
+          </div>
+          {d.recent_proposals?.length ? (
+            d.recent_proposals.slice(0, 8).map((p) => {
+              const r = (p.rationale ?? null) as { reason?: string; kind?: string } | null;
+              return (
+                <div key={p.id} style={{ display: "flex", gap: 6, fontSize: 11, alignItems: "baseline" }}>
+                  <span className="num" style={{ flex: "0 0 38px", fontWeight: 600,
+                    color: p.side === "buy" ? "var(--green)" : "var(--red)" }}>{p.side.toUpperCase()}</span>
+                  <span style={{ flex: "0 0 70px", fontWeight: 600 }}>{p.symbol}</span>
+                  <span style={{ flex: "0 0 60px", fontSize: 10, color: STATUS_COLOR[p.status] ?? "var(--text-dim)" }}>
+                    {p.status}
+                  </span>
+                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                    fontSize: 10, color: "var(--text-dim)" }}>
+                    {r?.reason ?? r?.kind ?? ""}
+                  </span>
+                </div>
+              );
+            })
+          ) : (
+            <div style={{ fontSize: 11, color: "var(--text-dim)" }}>
+              {enabled ? "armed — waiting for an intraday setup" : "halted — arm to trade the day sleeve (paper)"}
+            </div>
+          )}
+        </>
       )}
     </div>
   );
@@ -295,6 +377,22 @@ export function BotPanel() {
               )}
             </div>
 
+            {d.optimizer && (
+              <div style={{ marginBottom: 6 }} title={d.optimizer.reason}>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 10, color: "var(--text-dim)" }}>
+                  <span>capital split</span>
+                  <span style={{ color: "var(--text-dim)" }}>· {d.optimizer.regime ?? "—"}</span>
+                  <span style={{ marginLeft: "auto" }} className="num">
+                    swing {d.optimizer.swing_pct.toFixed(0)}% / day {d.optimizer.day_pct.toFixed(0)}%
+                  </span>
+                </div>
+                <div style={{ display: "flex", height: 6, borderRadius: 3, overflow: "hidden", marginTop: 2 }}>
+                  <div style={{ width: `${d.optimizer.swing_pct}%`, background: "var(--green)", opacity: 0.7 }} />
+                  <div style={{ width: `${d.optimizer.day_pct}%`, background: "var(--accent, #7aa2f7)" }} />
+                </div>
+              </div>
+            )}
+
             {halted && (
               <div style={{ color: "var(--red)", fontSize: 11, marginBottom: 4 }}>
                 daily-loss circuit breaker tripped ({pct(acct?.day_pnl_pct)} ≤ -{dailyLimit}%) — buys blocked
@@ -376,6 +474,8 @@ export function BotPanel() {
                 ))}
               </>
             )}
+
+            <DaySection />
 
             <div style={{ fontSize: 10, color: "var(--text-dim)", marginTop: 8 }}>{d.disclaimer}</div>
           </>

@@ -59,11 +59,11 @@ const layouts: Layouts = {
     { i: "cookbook", x: 6, y: 18, w: 6, h: 8 },
     { i: "whales", x: 0, y: 26, w: 6, h: 8 },
     { i: "strategist", x: 6, y: 26, w: 6, h: 8 },
-    // Phase 12: the paper trading bot — full-width, it carries proposals + orders.
-    { i: "bot", x: 0, y: 34, w: 12, h: 9 },
-    { i: "system", x: 0, y: 43, w: 4, h: 6 },
-    { i: "sources", x: 4, y: 43, w: 4, h: 6 },
-    { i: "help", x: 8, y: 43, w: 4, h: 6 },
+    // Phase 12/13: paper bots — full-width (optimizer split + swing proposals + day sleeve).
+    { i: "bot", x: 0, y: 34, w: 12, h: 12 },
+    { i: "system", x: 0, y: 46, w: 4, h: 6 },
+    { i: "sources", x: 4, y: 46, w: 4, h: 6 },
+    { i: "help", x: 8, y: 46, w: 4, h: 6 },
   ],
 };
 

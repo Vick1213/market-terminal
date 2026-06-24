@@ -30,6 +30,9 @@ import type {
   BotStatusResponse,
   BotProposeResponse,
   BotActionResponse,
+  BotOptimizer,
+  DayStatusResponse,
+  DayRunResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -289,6 +292,38 @@ export async function setBotMode(mode: string): Promise<BotActionResponse> {
     body: JSON.stringify({ mode }),
   });
   if (!res.ok) throw new Error(`bot mode failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchBotOptimizer(): Promise<BotOptimizer> {
+  const res = await fetch(`${API_URL}/api/bot/optimizer`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`optimizer fetch failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runBotOptimizer(): Promise<BotOptimizer> {
+  const res = await fetch(`${API_URL}/api/bot/optimizer/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`optimizer run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDayStatus(): Promise<DayStatusResponse> {
+  const res = await fetch(`${API_URL}/api/bot/day/status`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`day status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runDay(): Promise<DayRunResponse> {
+  const res = await fetch(`${API_URL}/api/bot/day/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`day run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setDayEnabled(enabled: boolean): Promise<{ enabled: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day ${enabled ? "enable" : "disable"} failed: ${res.status}`);
   return res.json();
 }
 
