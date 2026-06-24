@@ -1065,3 +1065,61 @@ export interface BotWsMessage {
   type: "bot";
   event: string;
 }
+
+// --- Phase 14: aggregated portfolio overview (big panel) ---
+export type PortfolioSleeve = "day" | "swing" | "manual";
+
+export interface PortfolioExitPlan {
+  stop_pct: number | null;
+  stop_price: number | null;
+  target_value: number | null;
+  target_pct: number | null;
+  invalidation: string | null;
+}
+
+export interface PortfolioPosition {
+  symbol: string;
+  qty: number;
+  market_value: number | null;
+  avg_entry_price: number | null;
+  unrealized_pl: number | null;
+  unrealized_plpc: number | null;
+  sleeve: PortfolioSleeve;
+  sleeve_label: string;
+  day_qty: number;
+  swing_qty: number;
+  manual_qty: number;
+  winning: boolean;
+  exit: PortfolioExitPlan | null;
+}
+
+export interface PortfolioSleeveRollup {
+  label: string;
+  value: number;
+  unrealized_pl: number;
+  n: number;
+}
+
+export interface PortfolioOverview {
+  ok: boolean;
+  detail?: string;
+  status?: number;
+  broker: BotBroker;
+  optimizer?: BotOptimizer;
+  total_value?: number;
+  equity?: number;
+  last_equity?: number | null;
+  cash?: number | null;
+  buying_power?: number | null;
+  day_pnl_pct?: number | null;
+  unrealized_pl?: number;
+  unrealized_pl_pct?: number | null;
+  n_positions?: number;
+  n_winners?: number;
+  n_losers?: number;
+  sleeves?: Record<PortfolioSleeve, PortfolioSleeveRollup>;
+  positions?: PortfolioPosition[];
+  winners?: PortfolioPosition[];
+  account?: BotAccount;
+  disclaimer: string;
+}

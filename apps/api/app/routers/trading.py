@@ -65,6 +65,13 @@ async def account(request: Request) -> dict:
     }
 
 
+@router.get("/portfolio")
+async def portfolio(request: Request) -> dict:
+    """Aggregated portfolio overview: total value + per-position bot attribution,
+    winners, and exit plans. Powers the big Portfolio panel."""
+    return await _bot(request).portfolio()
+
+
 @router.post("/propose")
 async def propose(request: Request) -> dict:
     return await _bot(request).propose()

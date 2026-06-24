@@ -303,6 +303,57 @@ def build_proposals(
     }
 
 
+# Day sleeve stops, mirrored from daytrader._DAY_STOP_PCT (kept here to avoid a
+# circular import — daytrader imports sleeve_holdings from this module). The day
+# sleeve has no fixed profit target: it exits on signal reversal / adverse news.
+_DAY_STOP_PCT = {"equity": 2.0, "crypto": 5.0}
+
+
+def _is_crypto(symbol: str) -> bool:
+    return "/" in (symbol or "")
+
+
+def _exit_plan(
+    symbol: str,
+    sleeve: str,
+    avg_entry: float | None,
+    swing_prop: dict | None,
+    stop_pct_by_bucket: dict[str, float],
+) -> dict | None:
+    """A concrete exit plan for a held position: the protective stop both sleeves
+    imply, plus (swing only) the strategist target and the written invalidation."""
+    if sleeve == "day":
+        stop_pct = _DAY_STOP_PCT["crypto" if _is_crypto(symbol) else "equity"]
+        plan = {
+            "stop_pct": stop_pct,
+            "stop_price": round(avg_entry * (1 - stop_pct / 100.0), 4) if avg_entry else None,
+            "target_value": None,
+            "target_pct": None,
+            "invalidation": "Momentum sleeve — exits on signal reversal or major "
+                            "adverse news; no fixed price target.",
+        }
+        return plan
+
+    bucket = (swing_prop or {}).get("bucket")
+    stop_pct = stop_pct_by_bucket.get(bucket or "", 10.0)
+    invalidation = None
+    rationale = (swing_prop or {}).get("rationale")
+    if isinstance(rationale, str):
+        try:
+            rationale = json.loads(rationale)
+        except (ValueError, TypeError):
+            rationale = None
+    if isinstance(rationale, dict):
+        invalidation = rationale.get("invalidation")
+    return {
+        "stop_pct": stop_pct,
+        "stop_price": round(avg_entry * (1 - stop_pct / 100.0), 4) if avg_entry else None,
+        "target_value": _to_float((swing_prop or {}).get("target_value")),
+        "target_pct": _to_float((swing_prop or {}).get("target_pct")),
+        "invalidation": invalidation,
+    }
+
+
 class TradingBotService:
     def __init__(
         self,
@@ -721,6 +772,135 @@ class TradingBotService:
                     log.debug("staleness flagging failed", exc_info=True)
             except BrokerError as exc:
                 out["account_error"] = exc.reason
+        return out
+
+    async def portfolio(self) -> dict:
+        """Aggregated, attribution-aware portfolio overview for the big panel.
+
+        Pulls the broker account + positions (GROUND TRUTH), splits each position
+        across the two sleeves (day vs swing, from each sleeve's filled book) plus
+        any 'manual' remainder, flags winners, and attaches an exit plan per name.
+        """
+        out: dict = {
+            "ok": False,
+            "broker": {
+                "enabled": self._broker.enabled,
+                "is_paper": self._broker.is_paper,
+                "base_url": self._broker.base_url,
+            },
+            "optimizer": self._optimizer.latest(),
+            "disclaimer": DISCLAIMER,
+        }
+        if not self._broker.enabled:
+            out["detail"] = "Alpaca paper keys not configured"
+            return out
+
+        try:
+            # In-flight orders on either sleeve -> sync first so attribution is fresh.
+            if self._has_inflight("swing") or self._has_inflight("day"):
+                await self.reconcile()
+            account = await self._broker.account()
+            positions = await self._broker.positions()
+        except BrokerError as exc:
+            out["detail"] = exc.reason
+            out["status"] = exc.status
+            return out
+
+        day_book = sleeve_holdings(self._sqlite, "day")
+        swing_book = sleeve_holdings(self._sqlite, "swing")
+        # Latest swing proposal per symbol -> bucket / target / invalidation.
+        swing_props: dict[str, dict] = {}
+        for r in self._sqlite.fetchall(
+            "SELECT symbol, bucket, target_value, target_pct, rationale "
+            "FROM bot_proposals WHERE sleeve = 'swing' ORDER BY id ASC"
+        ):
+            swing_props[norm_symbol(r["symbol"])] = dict(r)
+
+        SLEEVE_LABEL = {"day": "Day trader", "swing": "Swing bot", "manual": "Manual / other"}
+        sleeves = {k: {"label": v, "value": 0.0, "unrealized_pl": 0.0, "n": 0}
+                   for k, v in SLEEVE_LABEL.items()}
+        enriched: list[dict] = []
+        total_unrealized = 0.0
+
+        for p in positions:
+            sym = p.get("symbol") or ""
+            n = norm_symbol(sym)
+            qty = _to_float(p.get("qty")) or 0.0
+            mv = _to_float(p.get("market_value"))
+            upl = _to_float(p.get("unrealized_pl"))
+            avg_entry = _to_float(p.get("avg_entry_price"))
+            day_qty = max(0.0, day_book.get(n, 0.0))
+            swing_qty = max(0.0, swing_book.get(n, 0.0))
+            # Remainder beyond what either bot's filled book accounts for is manual.
+            manual_qty = max(0.0, qty - day_qty - swing_qty)
+            # Dominant sleeve = whoever owns the most shares; 'mixed' only labels
+            # the primary, the per-sleeve qty split is reported alongside.
+            owners = {"day": day_qty, "swing": swing_qty, "manual": manual_qty}
+            primary = max(owners, key=owners.get) if qty > 0 else "manual"
+
+            if upl is not None:
+                total_unrealized += upl
+            # Split market value / P&L across owners by share weight for the rollup.
+            if qty > 0:
+                for key, oqty in owners.items():
+                    if oqty <= 0:
+                        continue
+                    w = oqty / qty
+                    sleeves[key]["value"] += (mv or 0.0) * w
+                    sleeves[key]["unrealized_pl"] += (upl or 0.0) * w
+                sleeves[primary]["n"] += 1
+
+            exit_sleeve = primary if primary in ("day", "swing") else (
+                "day" if day_qty > 0 else "swing" if swing_qty > 0 else "manual")
+            exit_plan = (
+                _exit_plan(sym, exit_sleeve, avg_entry, swing_props.get(n), self._stop_pct)
+                if exit_sleeve in ("day", "swing") else None
+            )
+
+            enriched.append({
+                "symbol": sym,
+                "qty": qty,
+                "market_value": mv,
+                "avg_entry_price": avg_entry,
+                "unrealized_pl": upl,
+                "unrealized_plpc": _to_float(p.get("unrealized_plpc")),
+                "sleeve": primary,
+                "sleeve_label": SLEEVE_LABEL[primary],
+                "day_qty": round(day_qty, 6),
+                "swing_qty": round(swing_qty, 6),
+                "manual_qty": round(manual_qty, 6),
+                "winning": (upl or 0.0) > 0,
+                "exit": exit_plan,
+            })
+
+        enriched.sort(key=lambda x: (x["unrealized_pl"] or 0.0), reverse=True)
+        winners = [x for x in enriched if x["winning"]]
+        losers = [x for x in enriched if (x["unrealized_pl"] or 0.0) < 0]
+        for s in sleeves.values():
+            s["value"] = round(s["value"], 2)
+            s["unrealized_pl"] = round(s["unrealized_pl"], 2)
+
+        summary = self._account_summary(account)
+        equity = summary.get("equity") or 0.0
+        out.update({
+            "ok": True,
+            "total_value": equity,  # paper account equity = the big number
+            "equity": equity,
+            "last_equity": summary.get("last_equity"),
+            "cash": summary.get("cash"),
+            "buying_power": summary.get("buying_power"),
+            "day_pnl_pct": summary.get("day_pnl_pct"),
+            "unrealized_pl": round(total_unrealized, 2),
+            "unrealized_pl_pct": round(total_unrealized / (equity - total_unrealized) * 100.0, 2)
+            if (equity - total_unrealized) else None,
+            "n_positions": len(enriched),
+            "n_winners": len(winners),
+            "n_losers": len(losers),
+            "sleeves": sleeves,
+            "positions": enriched,
+            "winners": winners,
+            "account": summary,
+        })
         return out
 
     def _has_inflight(self, sleeve: str) -> bool:

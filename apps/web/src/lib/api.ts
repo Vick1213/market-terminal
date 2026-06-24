@@ -33,6 +33,7 @@ import type {
   BotOptimizer,
   DayStatusResponse,
   DayRunResponse,
+  PortfolioOverview,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -304,6 +305,12 @@ export async function fetchBotOptimizer(): Promise<BotOptimizer> {
 export async function runBotOptimizer(): Promise<BotOptimizer> {
   const res = await fetch(`${API_URL}/api/bot/optimizer/run`, { method: "POST" });
   if (!res.ok) throw new Error(`optimizer run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPortfolio(): Promise<PortfolioOverview> {
+  const res = await fetch(`${API_URL}/api/bot/portfolio`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`portfolio fetch failed: ${res.status}`);
   return res.json();
 }
 
