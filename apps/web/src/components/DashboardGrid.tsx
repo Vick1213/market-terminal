@@ -2,6 +2,7 @@
 
 import { Responsive, WidthProvider, type Layouts } from "react-grid-layout";
 import { AlertsPanel } from "./panels/AlertsPanel";
+import { BotPanel } from "./panels/BotPanel";
 import { BriefPanel } from "./panels/BriefPanel";
 import { CalendarPanel } from "./panels/CalendarPanel";
 import { CorrelationPanel } from "./panels/CorrelationPanel";
@@ -37,6 +38,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "positioning", el: <PositioningPanel /> },
   { i: "whales", el: <WhalesPanel /> },
   { i: "strategist", el: <StrategistPanel /> },
+  { i: "bot", el: <BotPanel /> },
   { i: "sources", el: <SourceHealthPanel /> },
   { i: "help", el: <HelpPanel /> },
 ];
@@ -57,9 +59,11 @@ const layouts: Layouts = {
     { i: "cookbook", x: 6, y: 18, w: 6, h: 8 },
     { i: "whales", x: 0, y: 26, w: 6, h: 8 },
     { i: "strategist", x: 6, y: 26, w: 6, h: 8 },
-    { i: "system", x: 0, y: 34, w: 4, h: 6 },
-    { i: "sources", x: 4, y: 34, w: 4, h: 6 },
-    { i: "help", x: 8, y: 34, w: 4, h: 6 },
+    // Phase 12: the paper trading bot — full-width, it carries proposals + orders.
+    { i: "bot", x: 0, y: 34, w: 12, h: 9 },
+    { i: "system", x: 0, y: 43, w: 4, h: 6 },
+    { i: "sources", x: 4, y: 43, w: 4, h: 6 },
+    { i: "help", x: 8, y: 43, w: 4, h: 6 },
   ],
 };
 

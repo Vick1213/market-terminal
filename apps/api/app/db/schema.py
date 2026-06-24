@@ -518,6 +518,28 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         );
         """
     )
+    # --- Phase 11 #3: portfolio / holdings layer ---
+    # Manually-entered (or CSV-imported) positions. Stays local+private in
+    # SQLite — the only table holding "what I actually own". One row per lot
+    # (id PK) so the same symbol can carry multiple cost bases; P&L, exposure
+    # and strategist-drift are all computed at read time from cached prices.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS positions (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            symbol       TEXT NOT NULL,
+            asset_class  TEXT NOT NULL DEFAULT 'equity',
+            quantity     REAL NOT NULL,
+            cost_basis   REAL,              -- per-share/unit entry cost (NULL = unknown)
+            display_name TEXT,
+            opened_at    TEXT,              -- optional entry date (YYYY-MM-DD)
+            note         TEXT,
+            added_at     TEXT DEFAULT (datetime('now')),
+            updated_at   TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+
     # Source-health watchdog: one row per outbound host, written by HttpClient
     # on every final request outcome (post-retries). The consecutive-failure
     # streak is the dead-source signal; counters are lifetime totals.
@@ -534,6 +556,84 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         );
         """
     )
+
+    # --- Phase 12: paper trading bot ---
+    # Single-row mutable config (kill switch + mode). id is always 1. Caps live
+    # in settings (env) so they can't be widened from the API; only the kill
+    # switch and proposal/auto mode are runtime-toggleable here.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_config (
+            id         INTEGER PRIMARY KEY CHECK (id = 1),
+            enabled    INTEGER NOT NULL DEFAULT 0,   -- kill switch (0 = halted)
+            mode       TEXT NOT NULL DEFAULT 'proposal',  -- proposal | auto
+            updated_at TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    # One row per proposed trade from a propose() run. status walks:
+    # proposed -> approved -> submitted -> filled (or blocked/skipped/rejected/
+    # canceled). blocks = JSON list of guardrail reasons (non-empty => blocked).
+    # rationale = JSON: the strategist evidence + bear_case + invalidation.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_proposals (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            run_id          TEXT NOT NULL,        -- groups one propose() sweep
+            created_at      TEXT NOT NULL,
+            symbol          TEXT NOT NULL,        -- Alpaca order symbol (BTC/USD ...)
+            strategist_sym  TEXT,                 -- the strategist's symbol form
+            bucket          TEXT,                 -- equities | metals | crypto | cash
+            side            TEXT NOT NULL,        -- buy | sell
+            order_type      TEXT NOT NULL DEFAULT 'market',
+            qty             REAL,                 -- set for sells (by shares)
+            notional        REAL,                 -- set for buys (by dollars)
+            target_pct      REAL,                 -- strategist target % of equity
+            current_pct     REAL,                 -- current % of equity (broker truth)
+            target_value    REAL,
+            current_value   REAL,
+            delta_value     REAL,                 -- target - current (signed $)
+            conviction      REAL,                 -- strategist score (picks only)
+            max_loss_est    REAL,                 -- illustrative downside $ estimate
+            rationale       TEXT,                 -- JSON: evidence/bear_case/invalidation
+            status          TEXT NOT NULL DEFAULT 'proposed',
+            blocks          TEXT,                 -- JSON list of guardrail reasons
+            strategist_asof TEXT,
+            updated_at      TEXT DEFAULT (datetime('now'))
+        );
+        """
+    )
+    sqlite.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bot_proposals_run ON bot_proposals (run_id);"
+    )
+    # One row per order the bot actually sent to Alpaca paper. broker_order_id /
+    # status / filled_* are reconciled FROM the broker (ground truth), never
+    # trusted from our own optimistic write. client_order_id is deterministic
+    # (bot-<proposal_id>) so a retry can never double-submit.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_orders (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            proposal_id      INTEGER,
+            client_order_id  TEXT UNIQUE,
+            broker_order_id  TEXT,
+            symbol           TEXT NOT NULL,
+            side             TEXT NOT NULL,
+            order_type       TEXT,
+            qty              REAL,
+            notional         REAL,
+            status           TEXT,               -- broker status (new/filled/...)
+            filled_qty       REAL,
+            filled_avg_price REAL,
+            submitted_at     TEXT,
+            reconciled_at    TEXT,
+            error            TEXT,               -- broker rejection reason, if any
+            raw              TEXT                -- JSON: last broker order payload
+        );
+        """
+    )
+    # Seed the singleton bot_config row (idempotent — never clobbers a toggle).
+    sqlite.execute("INSERT OR IGNORE INTO bot_config (id, enabled, mode) VALUES (1, 0, 'proposal');")
 
     # Seed the default watchlist once (idempotent).
     sqlite.executemany(

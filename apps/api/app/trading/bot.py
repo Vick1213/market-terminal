@@ -1,0 +1,729 @@
+"""TradingBotService — strategist allocation -> guarded Alpaca PAPER orders.
+
+Flow:
+  propose()        read the latest strategist snapshot + the broker's account &
+                   positions (GROUND TRUTH), diff current weights to the
+                   strategist targets, and emit one proposal per drift. Each
+                   proposal carries conviction, the strategist evidence, a
+                   forced bear-case, an explicit invalidation, and an
+                   illustrative max-loss. Guardrails run here; a blocked
+                   proposal is recorded but can never be executed. NO ORDERS
+                   ARE PLACED by propose().
+  execute(id)      the human gate: re-validate one 'proposed' row against a
+                   FRESH account snapshot, then submit it to the paper account
+                   with a deterministic client_order_id (no double-submits).
+  run()            propose, then — only if mode == 'auto' AND the kill switch is
+                   on — execute every non-blocked proposal. Paper only, always.
+  reconcile()      pull the broker's orders and overwrite local order/proposal
+                   state from them. The broker is truth; the ledger follows it.
+  set_enabled()    kill switch. Turning it OFF also cancels open broker orders.
+
+The bot is NOT on the scheduler — nothing runs autonomously unless you call
+run() with the kill switch on and mode 'auto'. Even then it is paper-only.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+from datetime import datetime, timezone
+
+from app.db.duck import DuckStore
+from app.db.sqlite import SqliteStore
+from app.ingest.alpaca import alpaca_symbol
+from app.trading.broker import AlpacaPaperBroker, BrokerError
+from app.trading.guardrails import (
+    GuardrailConfig,
+    buys_halted,
+    evaluate_order,
+    is_dust,
+    norm_symbol,
+)
+from app.ws.hub import ConnectionManager
+
+log = logging.getLogger("market.trading.bot")
+
+BOT_TOPIC = "bot"
+
+# strategist bucket -> asset_class understood by ingest.alpaca.alpaca_symbol.
+BUCKET_ASSET_CLASS = {
+    "equities": "equity",
+    "metals": "metal",
+    "crypto": "crypto",
+    "cash": "equity",  # SGOV / T-bill ETFs are ordinary equities to Alpaca
+}
+
+DISCLAIMER = (
+    "Paper trading only. Orders are sized from the strategist's mechanical "
+    "signal synthesis (NOT financial advice) and gated by hard code limits. "
+    "Proposals are not advice; the broker account is the source of truth."
+)
+
+
+def _to_float(v) -> float | None:
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _bear_case(kind: str, bucket: str) -> tuple[str, str]:
+    """(bear_case, invalidation) — a forced counter-thesis per holding type, so
+    every proposal ships with its own kill criteria (recon requirement)."""
+    if kind == "stock":
+        return (
+            "Signal-overlap pick built on lagging inputs (13F ≤45d, Senate PTR, "
+            "Form 4, week-old news). Crowding or a single headline can reverse it.",
+            "Exit if regime flips to risk-off/stress, price lags the benchmark "
+            ">5pp over 1m, or a Lazy-Prices risk-factor rewrite hits.",
+        )
+    if kind == "sector":
+        return (
+            "RRG leadership rotates; a momentum tilt decays as relative strength "
+            "mean-reverts.",
+            "Trim when the sector drops out of the leading/improving RRG quadrant.",
+        )
+    if bucket == "metals":
+        return (
+            "Rising real yields pressure gold; silver carries higher beta to a "
+            "risk-off air-pocket.",
+            "Cut on a decisive risk-on turn with real yields climbing.",
+        )
+    if bucket == "crypto":
+        return (
+            "High-beta and liquidity-sensitive; a net-liquidity drain or a "
+            "crowded-COT unwind hits crypto hardest.",
+            "Reduce when the net-liquidity 1m delta turns negative or COT prints "
+            "a 3y max-bullish extreme.",
+        )
+    if bucket == "cash":
+        return (
+            "Opportunity cost in a sustained rally; near-zero drawdown otherwise.",
+            "Redeploy when the regime turns decisively risk-on.",
+        )
+    return ("Mechanical allocation tilt; inputs lag and rules are blunt.",
+            "Re-evaluate on the next strategist snapshot or a regime flip.")
+
+
+def build_proposals(
+    snapshot: dict,
+    account: dict,
+    positions: list[dict],
+    watchlist_alpaca: set[str],
+    cfg: GuardrailConfig,
+    stop_pct: dict[str, float],
+) -> dict:
+    """Pure planning step: snapshot + broker state -> proposal dicts.
+
+    No I/O, no persistence — so the whole diff-and-gate logic is unit-testable
+    with plain dicts. Returns equity/buying_power context, the proposal list,
+    any halt reason, and positions the strategist doesn't track (surfaced, never
+    auto-sold).
+    """
+    equity = _to_float(account.get("equity")) or 0.0
+    buying_power = _to_float(account.get("buying_power")) or 0.0
+    halted = buys_halted(account, cfg)
+
+    # broker positions -> {norm symbol: {value, qty, price}}
+    pos_map: dict[str, dict] = {}
+    for p in positions:
+        sym = p.get("symbol")
+        if not sym:
+            continue
+        pos_map[norm_symbol(sym)] = {
+            "value": _to_float(p.get("market_value")) or 0.0,
+            "qty": _to_float(p.get("qty")) or 0.0,
+            "price": _to_float(p.get("current_price")),
+        }
+
+    # strategist holdings -> targets, aggregated by Alpaca symbol.
+    targets: dict[str, dict] = {}
+    for bucket in snapshot.get("buckets", []) or []:
+        bkey = bucket.get("key")
+        asset_class = BUCKET_ASSET_CLASS.get(bkey, "equity")
+        for h in bucket.get("holdings", []) or []:
+            strat_sym = h.get("symbol")
+            if not strat_sym:
+                continue
+            mapped = alpaca_symbol(strat_sym, asset_class)
+            if mapped is None:
+                continue  # Alpaca can't trade this (spot codes etc.)
+            asym = mapped[0]
+            tp = _to_float(h.get("weight_pct")) or 0.0
+            t = targets.setdefault(asym, {
+                "symbol": asym, "strategist_sym": strat_sym, "bucket": bkey,
+                "kind": h.get("kind"), "target_pct": 0.0, "score": h.get("score"),
+                "evidence": list(h.get("evidence") or []),
+            })
+            t["target_pct"] += tp
+
+    allowlist = {t["symbol"] for t in targets.values()} | set(watchlist_alpaca)
+
+    proposals: list[dict] = []
+    for t in targets.values():
+        asym = t["symbol"]
+        bucket = t["bucket"]
+        target_pct = t["target_pct"]
+        target_value = equity * target_pct / 100.0
+        cur = pos_map.get(norm_symbol(asym), {})
+        current_value = float(cur.get("value") or 0.0)
+        current_pct = (current_value / equity * 100.0) if equity else 0.0
+        delta = target_value - current_value
+        drift_pp = abs(delta) / equity * 100.0 if equity else 0.0
+        order_value = abs(delta)
+
+        bear, invalidation = _bear_case(t.get("kind") or "", bucket)
+        stop = stop_pct.get(bucket, 10.0)
+        proposal = {
+            "symbol": asym,
+            "strategist_sym": t["strategist_sym"],
+            "bucket": bucket,
+            "target_pct": round(target_pct, 2),
+            "current_pct": round(current_pct, 2),
+            "target_value": round(target_value, 2),
+            "current_value": round(current_value, 2),
+            "delta_value": round(delta, 2),
+            "conviction": t.get("score"),
+            "qty": None,
+            "notional": None,
+            "order_type": "market",
+            "max_loss_est": round(target_value * stop / 100.0, 2),
+            "rationale": {
+                "kind": t.get("kind"),
+                "score": t.get("score"),
+                "evidence": t["evidence"],
+                "bear_case": bear,
+                "invalidation": invalidation,
+            },
+            "blocks": [],
+            "status": "proposed",
+            "side": "buy" if delta >= 0 else "sell",
+        }
+
+        # within the rebalance band, or below the dust floor -> skip (no trade).
+        if drift_pp < cfg.rebalance_band_pp:
+            proposal["status"] = "skipped"
+            proposal["blocks"] = [
+                f"within rebalance band ({drift_pp:.1f}pp < {cfg.rebalance_band_pp:.1f}pp)"
+            ]
+            proposals.append(proposal)
+            continue
+        if is_dust(order_value, cfg):
+            proposal["status"] = "skipped"
+            proposal["blocks"] = [
+                f"order ${order_value:,.0f} below ${cfg.min_order_notional:,.0f} min"
+            ]
+            proposals.append(proposal)
+            continue
+
+        side = proposal["side"]
+        extra_block: list[str] = []
+        if side == "buy":
+            proposal["notional"] = round(order_value, 2)
+        else:
+            price = cur.get("price")
+            held = float(cur.get("qty") or 0.0)
+            if not price or held <= 0:
+                extra_block.append("no current price/holding to size the sell")
+            else:
+                qty = min(held, order_value / float(price))
+                proposal["qty"] = round(qty, 6)
+
+        blocks = evaluate_order(
+            symbol=asym,
+            side=side,
+            order_value=order_value,
+            current_position_value=current_value,
+            equity=equity,
+            buying_power=buying_power,
+            allowlist=allowlist,
+            cfg=cfg,
+            buys_halted_reason=halted,
+        ) + extra_block
+        proposal["blocks"] = blocks
+        proposal["status"] = "blocked" if blocks else "proposed"
+        proposals.append(proposal)
+
+    target_norms = {norm_symbol(s) for s in targets}
+    untracked = [
+        {"symbol": p.get("symbol"),
+         "value": _to_float(p.get("market_value")),
+         "qty": _to_float(p.get("qty"))}
+        for p in positions
+        if p.get("symbol") and norm_symbol(p["symbol"]) not in target_norms
+    ]
+
+    # actionable first, then blocked, then skipped — and by drift size.
+    order_rank = {"proposed": 0, "blocked": 1, "skipped": 2}
+    proposals.sort(key=lambda p: (order_rank.get(p["status"], 3),
+                                  -abs(p["delta_value"])))
+    return {
+        "equity": round(equity, 2),
+        "buying_power": round(buying_power, 2),
+        "halted": halted,
+        "proposals": proposals,
+        "untracked_positions": untracked,
+    }
+
+
+class TradingBotService:
+    def __init__(
+        self,
+        duck: DuckStore,
+        sqlite: SqliteStore,
+        hub: ConnectionManager,
+        broker: AlpacaPaperBroker,
+        cfg: GuardrailConfig,
+        *,
+        stop_pct: dict[str, float],
+        default_mode: str = "proposal",
+    ) -> None:
+        self._duck = duck
+        self._sqlite = sqlite
+        self._hub = hub
+        self._broker = broker
+        self._cfg = cfg
+        self._stop_pct = dict(stop_pct)
+        # bot_config row is seeded by schema.init_sqlite; default_mode only seeds
+        # a fresh row if somehow missing.
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_config (id, enabled, mode) VALUES (1, 0, ?)",
+            [default_mode],
+        )
+
+    # ---- config / kill switch ---------------------------------------------
+    def _config(self) -> dict:
+        row = self._sqlite.fetchone(
+            "SELECT enabled, mode, updated_at FROM bot_config WHERE id = 1"
+        )
+        if row is None:
+            return {"enabled": False, "mode": "proposal", "updated_at": None}
+        return {"enabled": bool(row["enabled"]), "mode": row["mode"],
+                "updated_at": row["updated_at"]}
+
+    async def set_enabled(self, enabled: bool) -> dict:
+        self._sqlite.execute(
+            "UPDATE bot_config SET enabled = ?, updated_at = datetime('now') WHERE id = 1",
+            [1 if enabled else 0],
+        )
+        canceled = None
+        if not enabled and self._broker.enabled:
+            # Kill switch: best-effort cancel of any resting orders.
+            try:
+                canceled = await self._broker.cancel_all()
+            except BrokerError as exc:
+                log.warning("kill switch: cancel_all failed (%s)", exc)
+        log.info("bot kill switch -> %s", "ENABLED" if enabled else "DISABLED")
+        await self._broadcast("config")
+        out = self._config()
+        if canceled is not None:
+            out["canceled_orders"] = canceled
+        return out
+
+    async def set_mode(self, mode: str) -> dict:
+        if mode not in ("proposal", "auto"):
+            raise ValueError("mode must be 'proposal' or 'auto'")
+        self._sqlite.execute(
+            "UPDATE bot_config SET mode = ?, updated_at = datetime('now') WHERE id = 1",
+            [mode],
+        )
+        await self._broadcast("config")
+        return self._config()
+
+    # ---- universe ----------------------------------------------------------
+    def _watchlist_alpaca(self) -> set[str]:
+        out: set[str] = set()
+        for r in self._sqlite.fetchall("SELECT symbol, asset_class FROM watchlist"):
+            mapped = alpaca_symbol(r["symbol"], r["asset_class"])
+            if mapped is not None:
+                out.add(mapped[0])
+        return out
+
+    def _latest_snapshot(self) -> dict | None:
+        row = self._duck.fetchone(
+            "SELECT detail FROM strategist_snapshots ORDER BY ts DESC LIMIT 1"
+        )
+        if not row or not row[0]:
+            return None
+        try:
+            return json.loads(row[0])
+        except ValueError:
+            return None
+
+    # ---- propose -----------------------------------------------------------
+    async def propose(self) -> dict:
+        """Generate proposals from the latest strategist snapshot vs the broker
+        account. Read-only on the broker; persists the proposals. No orders."""
+        if not self._broker.enabled:
+            return {"ok": False, "detail": "Alpaca paper keys not configured",
+                    "config": self._config()}
+        snapshot = self._latest_snapshot()
+        if snapshot is None:
+            return {"ok": False, "detail": "no strategist snapshot yet — run /api/strategist/run",
+                    "config": self._config()}
+
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
+        plan = build_proposals(
+            snapshot, account, positions, self._watchlist_alpaca(),
+            self._cfg, self._stop_pct,
+        )
+
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        strat_asof = snapshot.get("as_of")
+
+        # Supersede the previous open set so "current proposals" = latest run.
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = 'expired', updated_at = datetime('now') "
+            "WHERE status IN ('proposed', 'blocked', 'skipped')"
+        )
+        ids: list[int] = []
+        for p in plan["proposals"]:
+            # Atomic INSERT+rowid: a separate SELECT last_insert_rowid() could
+            # return another thread's rowid on the shared SQLite connection and
+            # poison the deterministic client_order_id.
+            pid = self._sqlite.execute_returning_id(
+                "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, "
+                "bucket, side, order_type, qty, notional, target_pct, current_pct, "
+                "target_value, current_value, delta_value, conviction, max_loss_est, "
+                "rationale, status, blocks, strategist_asof) VALUES "
+                "(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                [run_id, now, p["symbol"], p["strategist_sym"], p["bucket"], p["side"],
+                 p["order_type"], p["qty"], p["notional"], p["target_pct"],
+                 p["current_pct"], p["target_value"], p["current_value"],
+                 p["delta_value"], p["conviction"], p["max_loss_est"],
+                 json.dumps(p["rationale"]), p["status"], json.dumps(p["blocks"]),
+                 strat_asof],
+            )
+            p["id"] = pid
+            ids.append(pid)
+
+        await self._broadcast("propose")
+        n_actionable = sum(1 for p in plan["proposals"] if p["status"] == "proposed")
+        log.info("bot proposed run %s: %d proposals (%d actionable)",
+                 run_id, len(plan["proposals"]), n_actionable)
+        return {
+            "ok": True,
+            "run_id": run_id,
+            "config": self._config(),
+            "account": self._account_summary(account),
+            "strategist_as_of": strat_asof,
+            "n_actionable": n_actionable,
+            **plan,
+            "disclaimer": DISCLAIMER,
+        }
+
+    # ---- execute (the human gate) -----------------------------------------
+    async def execute(self, proposal_id: int) -> dict:
+        """Submit one proposed order to the paper account after re-validating it
+        against a FRESH account snapshot. Refused while the kill switch is off."""
+        cfg_state = self._config()
+        if not cfg_state["enabled"]:
+            return {"ok": False, "detail": "bot is disabled (kill switch off) — enable to trade"}
+        if not self._broker.enabled:
+            return {"ok": False, "detail": "Alpaca paper keys not configured"}
+
+        row = self._sqlite.fetchone(
+            "SELECT * FROM bot_proposals WHERE id = ?", [proposal_id]
+        )
+        if row is None:
+            return {"ok": False, "detail": f"proposal {proposal_id} not found"}
+        if row["status"] != "proposed":
+            return {"ok": False, "detail": f"proposal {proposal_id} is '{row['status']}', not actionable"}
+
+        symbol = row["symbol"]
+        side = row["side"]
+        notional = _to_float(row["notional"])
+        qty = _to_float(row["qty"])
+
+        # Re-validate against fresh ground truth (state may have moved).
+        account = await self._broker.get_account()
+        positions = await self._broker.get_positions()
+        pos = next((p for p in positions if norm_symbol(p.get("symbol", "")) == norm_symbol(symbol)), None)
+        price = _to_float(pos.get("current_price")) if pos else None
+        current_value = (_to_float(pos.get("market_value")) if pos else 0.0) or 0.0
+        if side == "buy":
+            order_value = notional or 0.0
+        else:
+            # Re-clamp the sell to shares ACTUALLY held now (the proposal may be
+            # stale); refuse if the position is gone, so we never short by mistake.
+            held = (_to_float(pos.get("qty")) if pos else 0.0) or 0.0
+            qty = round(min(qty or 0.0, held), 6)
+            if qty <= 0:
+                self._sqlite.execute(
+                    "UPDATE bot_proposals SET status = 'blocked', blocks = ?, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    [json.dumps(["no shares held to sell (position closed since propose)"]),
+                     proposal_id],
+                )
+                await self._broadcast("execute")
+                return {"ok": False, "detail": "no shares held to sell"}
+            order_value = qty * (price or 0.0)
+
+        allowlist = self._allowlist()
+        blocks = evaluate_order(
+            symbol=symbol, side=side, order_value=order_value or 0.0,
+            current_position_value=current_value or 0.0,
+            equity=_to_float(account.get("equity")) or 0.0,
+            buying_power=_to_float(account.get("buying_power")) or 0.0,
+            allowlist=allowlist, cfg=self._cfg,
+            buys_halted_reason=buys_halted(account, self._cfg),
+        )
+        if blocks:
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = 'blocked', blocks = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                [json.dumps(blocks), proposal_id],
+            )
+            await self._broadcast("execute")
+            return {"ok": False, "detail": "blocked on re-validation", "blocks": blocks}
+
+        # Don't stack a second order on a symbol+side that already has a resting
+        # bot order — propose() mints fresh proposal ids each run, so without
+        # this a re-propose+execute could double up while the first is unfilled.
+        try:
+            for o in await self._broker.list_orders("open", 200):
+                cid = o.get("client_order_id") or ""
+                if (cid.startswith("bot-")
+                        and norm_symbol(o.get("symbol", "")) == norm_symbol(symbol)
+                        and (o.get("side") or "").lower() == side):
+                    return {"ok": False,
+                            "detail": f"a resting bot {side} order for {symbol} already exists "
+                                      f"({cid}) — reconcile/cancel it first"}
+        except BrokerError as exc:
+            return {"ok": False, "detail": f"could not check open orders: {exc.reason}"}
+
+        client_order_id = f"bot-{proposal_id}"
+        is_crypto = "/" in symbol
+        tif = "gtc" if is_crypto else "day"
+
+        # Record the intent BEFORE submitting (deterministic client_order_id),
+        # so even a lost response leaves a row reconcile() can resolve against
+        # the broker — no phantom, untracked order.
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+            "order_type, qty, notional, status, submitted_at) "
+            "VALUES (?,?,?,?,?,?,?, 'submitting', datetime('now'))",
+            [proposal_id, client_order_id, symbol, side, "market",
+             qty if side == "sell" else None, notional if side == "buy" else None],
+        )
+        try:
+            order = await self._broker.submit_order(
+                symbol, side, qty=qty if side == "sell" else None,
+                notional=notional if side == "buy" else None,
+                order_type="market", time_in_force=tif,
+                client_order_id=client_order_id,
+            )
+        except BrokerError as exc:
+            # status is set for a definite broker reject (4xx); None means the
+            # request may have landed (transport error) — leave it reconcilable.
+            definite_reject = exc.status is not None and 400 <= exc.status < 500
+            self._sqlite.execute(
+                "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                ["rejected" if definite_reject else "unknown", exc.reason, client_order_id],
+            )
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = ?, blocks = ?, updated_at = datetime('now') "
+                "WHERE id = ?",
+                ["rejected" if definite_reject else "submitted",
+                 json.dumps([f"broker {'rejected' if definite_reject else 'submit ambiguous'}: {exc.reason}"]),
+                 proposal_id],
+            )
+            await self._broadcast("execute")
+            log.warning("bot order %s (%s %s): %s",
+                        "rejected" if definite_reject else "ambiguous", side, symbol, exc.reason)
+            if definite_reject:
+                return {"ok": False, "detail": f"broker rejected: {exc.reason}"}
+            return {"ok": False, "detail": f"submit status unknown ({exc.reason}) — run /api/bot/reconcile"}
+
+        self._sqlite.execute(
+            "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+            "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+            [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+             _to_float(order.get("filled_avg_price")), json.dumps(order), client_order_id],
+        )
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = 'submitted', updated_at = datetime('now') WHERE id = ?",
+            [proposal_id],
+        )
+        await self._broadcast("execute")
+        log.info("bot submitted %s %s (proposal %s, broker %s)",
+                 side, symbol, proposal_id, order.get("id"))
+        return {"ok": True, "proposal_id": proposal_id, "order": order}
+
+    # ---- run (auto, paper-only) -------------------------------------------
+    async def run(self) -> dict:
+        """Propose, then auto-execute every actionable proposal IFF mode='auto'
+        and the kill switch is on. Otherwise behaves exactly like propose()."""
+        result = await self.propose()
+        if not result.get("ok"):
+            return result
+        cfg_state = self._config()
+        if cfg_state["mode"] != "auto" or not cfg_state["enabled"]:
+            result["auto_executed"] = 0
+            result["note"] = ("proposals only — set mode=auto and enable the kill "
+                              "switch to auto-execute (paper)")
+            return result
+        executed = []
+        for p in result["proposals"]:
+            if p.get("status") == "proposed" and p.get("id") is not None:
+                res = await self.execute(int(p["id"]))
+                executed.append({"proposal_id": p["id"], "ok": res.get("ok"),
+                                 "detail": res.get("detail")})
+        await self.reconcile()
+        result["auto_executed"] = sum(1 for e in executed if e["ok"])
+        result["executions"] = executed
+        return result
+
+    # ---- reconcile (broker is truth) --------------------------------------
+    async def reconcile(self) -> dict:
+        """Overwrite local order + proposal state from the broker's orders.
+        Never trust our own optimistic write — the broker is the ledger."""
+        if not self._broker.enabled:
+            return {"ok": False, "detail": "Alpaca paper keys not configured"}
+        orders = await self._broker.list_orders("all", 200)
+        by_cid = {o.get("client_order_id"): o for o in orders if o.get("client_order_id")}
+        updated = 0
+        rows = self._sqlite.fetchall(
+            "SELECT id, proposal_id, client_order_id FROM bot_orders"
+        )
+        for r in rows:
+            o = by_cid.get(r["client_order_id"])
+            if not o:
+                continue
+            status = o.get("status")
+            self._sqlite.execute(
+                "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+                "filled_avg_price = ?, reconciled_at = datetime('now'), raw = ? WHERE id = ?",
+                [o.get("id"), status, _to_float(o.get("filled_qty")),
+                 _to_float(o.get("filled_avg_price")), json.dumps(o), r["id"]],
+            )
+            if r["proposal_id"] is not None:
+                filled = _to_float(o.get("filled_qty")) or 0.0
+                if status in ("canceled", "expired") and filled > 0:
+                    # Partially filled, then terminated: it DID trade — don't
+                    # mislabel it 'canceled' and hide the fill.
+                    pstatus = "filled"
+                else:
+                    pstatus = {
+                        "filled": "filled", "partially_filled": "submitted",
+                        "canceled": "canceled", "expired": "canceled",
+                        "rejected": "rejected",
+                    }.get(status, "submitted")
+                self._sqlite.execute(
+                    "UPDATE bot_proposals SET status = ?, updated_at = datetime('now') "
+                    "WHERE id = ? AND status IN ('submitted','rejected','canceled','filled')",
+                    [pstatus, r["proposal_id"]],
+                )
+            updated += 1
+        return {"ok": True, "reconciled": updated}
+
+    # ---- status ------------------------------------------------------------
+    async def status(self) -> dict:
+        cfg_state = self._config()
+        out: dict = {
+            "config": cfg_state,
+            "broker": {
+                "enabled": self._broker.enabled,
+                "is_paper": self._broker.is_paper,
+                "base_url": self._broker.base_url,
+            },
+            "guardrails": {
+                "max_position_pct": self._cfg.max_position_pct,
+                "max_position_notional": self._cfg.max_position_notional,
+                "min_order_notional": self._cfg.min_order_notional,
+                "daily_loss_limit_pct": self._cfg.daily_loss_limit_pct,
+                "rebalance_band_pp": self._cfg.rebalance_band_pp,
+                "allow_live": self._cfg.allow_live,
+            },
+            "proposals": self._open_proposals(),
+            "recent_orders": self._recent_orders(),
+            "disclaimer": DISCLAIMER,
+        }
+        if self._broker.enabled:
+            try:
+                await self.reconcile()
+                account = await self._broker.get_account()
+                positions = await self._broker.get_positions()
+                out["account"] = self._account_summary(account)
+                out["positions"] = [
+                    {"symbol": p.get("symbol"),
+                     "qty": _to_float(p.get("qty")),
+                     "market_value": _to_float(p.get("market_value")),
+                     "avg_entry_price": _to_float(p.get("avg_entry_price")),
+                     "unrealized_pl": _to_float(p.get("unrealized_pl")),
+                     "unrealized_plpc": _to_float(p.get("unrealized_plpc"))}
+                    for p in positions
+                ]
+            except BrokerError as exc:
+                out["account_error"] = exc.reason
+        return out
+
+    # ---- helpers -----------------------------------------------------------
+    def _allowlist(self) -> set[str]:
+        snap = self._latest_snapshot() or {}
+        out = set(self._watchlist_alpaca())
+        for bucket in snap.get("buckets", []) or []:
+            asset_class = BUCKET_ASSET_CLASS.get(bucket.get("key"), "equity")
+            for h in bucket.get("holdings", []) or []:
+                mapped = alpaca_symbol(h.get("symbol", ""), asset_class)
+                if mapped is not None:
+                    out.add(mapped[0])
+        return out
+
+    @staticmethod
+    def _account_summary(account: dict) -> dict:
+        from app.trading.guardrails import daily_pnl_pct
+        return {
+            "equity": _to_float(account.get("equity")),
+            "last_equity": _to_float(account.get("last_equity")),
+            "cash": _to_float(account.get("cash")),
+            "buying_power": _to_float(account.get("buying_power")),
+            "day_pnl_pct": daily_pnl_pct(account),
+            "daytrade_count": account.get("daytrade_count"),
+            "pattern_day_trader": account.get("pattern_day_trader"),
+            "status": account.get("status"),
+            "trading_blocked": account.get("trading_blocked"),
+        }
+
+    def _open_proposals(self) -> list[dict]:
+        rows = self._sqlite.fetchall(
+            "SELECT * FROM bot_proposals WHERE status IN ('proposed','blocked','submitted','rejected') "
+            "ORDER BY CASE status WHEN 'proposed' THEN 0 WHEN 'submitted' THEN 1 "
+            "WHEN 'blocked' THEN 2 ELSE 3 END, abs(delta_value) DESC LIMIT 100"
+        )
+        return [self._proposal_row(r) for r in rows]
+
+    def _recent_orders(self) -> list[dict]:
+        rows = self._sqlite.fetchall(
+            "SELECT id, proposal_id, symbol, side, order_type, qty, notional, status, "
+            "filled_qty, filled_avg_price, submitted_at, error FROM bot_orders "
+            "ORDER BY id DESC LIMIT 50"
+        )
+        return [dict(r) for r in rows]
+
+    @staticmethod
+    def _proposal_row(r) -> dict:
+        d = dict(r)
+        for k in ("rationale", "blocks"):
+            if d.get(k):
+                try:
+                    d[k] = json.loads(d[k])
+                except (ValueError, TypeError):
+                    pass
+        return d
+
+    async def _broadcast(self, event: str) -> None:
+        try:
+            await self._hub.broadcast(BOT_TOPIC, {"type": "bot", "event": event})
+        except Exception:  # broadcasting must never break a trade path
+            log.debug("bot broadcast failed", exc_info=True)
+
+
+def proposals_for_run(sqlite: SqliteStore, run_id: str) -> list[dict]:
+    rows = sqlite.fetchall(
+        "SELECT * FROM bot_proposals WHERE run_id = ? ORDER BY abs(delta_value) DESC",
+        [run_id],
+    )
+    return [TradingBotService._proposal_row(r) for r in rows]

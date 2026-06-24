@@ -27,6 +27,9 @@ import type {
   WatchlistQuote,
   WatchlistResponse,
   WhalesResponse,
+  BotStatusResponse,
+  BotProposeResponse,
+  BotActionResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -243,6 +246,49 @@ export async function runStrategist(): Promise<StrategistResponse> {
 export async function fetchStrategistReport(): Promise<ReportCardResponse> {
   const res = await fetch(`${API_URL}/api/strategist/report`, { cache: "no-store" });
   if (!res.ok) throw new Error(`strategist report failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 12: paper trading bot ---
+export async function fetchBotStatus(): Promise<BotStatusResponse> {
+  const res = await fetch(`${API_URL}/api/bot/status`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`bot status failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runBotPropose(): Promise<BotProposeResponse> {
+  const res = await fetch(`${API_URL}/api/bot/propose`, { method: "POST" });
+  if (!res.ok) throw new Error(`bot propose failed: ${res.status}`);
+  return res.json();
+}
+
+export async function executeBotProposal(id: number): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/execute/${id}`, { method: "POST" });
+  if (!res.ok) throw new Error(`bot execute failed: ${res.status}`);
+  return res.json();
+}
+
+export async function reconcileBot(): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/reconcile`, { method: "POST" });
+  if (!res.ok) throw new Error(`bot reconcile failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setBotEnabled(enabled: boolean): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`bot ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+export async function setBotMode(mode: string): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/mode`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ mode }),
+  });
+  if (!res.ok) throw new Error(`bot mode failed: ${res.status}`);
   return res.json();
 }
 

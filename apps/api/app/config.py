@@ -236,6 +236,46 @@ class Settings(BaseSettings):
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
 
+    # --- Phase 12: paper trading bot (strategist proposal surface) ---
+    # The bot turns the strategist's suggested allocation into Alpaca PAPER
+    # orders, behind hard code-level guardrails. Everything below is OFF or
+    # proposal-only by default — the bot never trades until explicitly enabled,
+    # and live trading is blocked outright (see bot_allow_live_trading).
+    #
+    # Trading uses a SEPARATE Alpaca endpoint + (usually) a SEPARATE key pair
+    # from market data: the data API (data.alpaca.markets) takes either key,
+    # but the paper trading API only accepts PAPER-account keys. If your
+    # MARKET_ALPACA_* keys are paper keys they are reused here; otherwise set
+    # MARKET_ALPACA_PAPER_* to your paper key pair from app.alpaca.markets.
+    alpaca_trading_base_url: str = "https://paper-api.alpaca.markets"
+    alpaca_paper_key_id: str = ""       # empty -> falls back to alpaca_key_id
+    alpaca_paper_secret_key: str = ""   # empty -> falls back to alpaca_secret_key
+    # HARD SAFETY GATE. The broker refuses to submit an order unless its base
+    # URL is the paper endpoint, UNLESS this is explicitly flipped to True. The
+    # research is unambiguous: never wire an autonomous LLM loop to a live key.
+    bot_allow_live_trading: bool = False
+
+    # Kill switch — the bot starts DISABLED. propose() (read-only) always works;
+    # execute()/auto-run refuse while disabled. Persisted in bot_config and
+    # toggled from the API; this is only the first-boot default.
+    bot_enabled_default: bool = False
+    # "proposal" — generate proposals, never submit (human approves each via the
+    #   /api/bot/execute endpoint). "auto" — submit non-blocked proposals to the
+    #   PAPER account automatically when /api/bot/run is called (still paper-only).
+    bot_mode_default: str = "proposal"
+
+    # Guardrails (enforced in code, not prompts — see trading/guardrails.py).
+    bot_max_position_pct: float = 15.0       # cap any one symbol at this % of equity
+    bot_max_position_notional: float = 5_000.0  # absolute $ cap per symbol
+    bot_min_order_notional: float = 100.0    # skip dust trades below this $
+    bot_daily_loss_limit_pct: float = 3.0    # halt NEW BUYS if account is down this % today
+    bot_rebalance_band_pp: float = 2.0       # ignore drifts smaller than this (pp of equity)
+    # Per-asset assumed adverse move used only to surface an illustrative
+    # max-loss estimate on each proposal (NOT a real stop order).
+    bot_stop_assumption_pct: dict[str, float] = {
+        "equities": 8.0, "metals": 10.0, "crypto": 20.0, "cash": 1.0,
+    }
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",
@@ -245,6 +285,15 @@ class Settings(BaseSettings):
     @property
     def user_agent(self) -> str:
         return f"MarketTerminal/{self.version} ({self.contact_email})"
+
+    @property
+    def paper_trading_key_id(self) -> str:
+        """Paper trading key — dedicated paper key if set, else the data key."""
+        return self.alpaca_paper_key_id or self.alpaca_key_id
+
+    @property
+    def paper_trading_secret_key(self) -> str:
+        return self.alpaca_paper_secret_key or self.alpaca_secret_key
 
     @property
     def duckdb_path(self) -> Path:

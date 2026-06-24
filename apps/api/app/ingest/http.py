@@ -84,6 +84,7 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "api.db.nomics.world": (2, 1.0),
     "www.federalreserve.gov": (1, 2.0),
     "data.alpaca.markets": (150, 60.0),  # free tier allows 200/min
+    "paper-api.alpaca.markets": (150, 60.0),  # paper trading API, 200/min
 }
 
 
@@ -224,11 +225,13 @@ class HttpClient:
         data: dict | None = None,
         json_body: dict | None = None,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
     ) -> HttpResponse:
         host = urlsplit(url).netloc
         try:
             resp = await self._post_with_retry(
-                url, data=data, json_body=json_body, headers=headers
+                url, data=data, json_body=json_body, headers=headers,
+                follow_redirects=follow_redirects,
             )
         except Exception as exc:
             self._record(host, None, exc)
@@ -249,15 +252,69 @@ class HttpClient:
         data: dict | None = None,
         json_body: dict | None = None,
         headers: dict[str, str] | None = None,
+        follow_redirects: bool | None = None,
     ) -> HttpResponse:
         """Rate-limited POST, form (``data``) or JSON (``json_body``) — no
         conditional caching, POSTs aren't cacheable. Session cookies set by
-        prior requests ride along on the shared client."""
+        prior requests ride along on the shared client. ``follow_redirects``
+        overrides the client default (the broker passes False so a cross-host
+        3xx can never silently re-send an order with its auth headers)."""
         host = urlsplit(url).netloc
+        kw: dict = {}
+        if follow_redirects is not None:
+            kw["follow_redirects"] = follow_redirects
         async with self._limiter(host):
             resp = await self._client.post(
-                url, data=data, json=json_body, headers=headers or {}
+                url, data=data, json=json_body, headers=headers or {}, **kw
             )
+        if resp.status_code == 429 or resp.status_code >= 500:
+            raise RetryableStatus(resp)
+        resp.raise_for_status()
+        return HttpResponse(
+            url=url, status=resp.status_code, body=resp.content, headers=dict(resp.headers)
+        )
+
+    async def delete(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict | None = None,
+        follow_redirects: bool | None = None,
+    ) -> HttpResponse:
+        """Rate-limited DELETE (used to cancel open broker orders on the kill
+        switch). No conditional caching; 429/5xx retried like GET/POST."""
+        host = urlsplit(url).netloc
+        try:
+            resp = await self._delete_with_retry(
+                url, headers=headers, params=params, follow_redirects=follow_redirects
+            )
+        except Exception as exc:
+            self._record(host, None, exc)
+            raise
+        self._record(host, resp, None)
+        return resp
+
+    @retry(
+        retry=retry_if_exception_type((RetryableStatus, httpx.TransportError)),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=20),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )
+    async def _delete_with_retry(
+        self,
+        url: str,
+        *,
+        headers: dict[str, str] | None = None,
+        params: dict | None = None,
+        follow_redirects: bool | None = None,
+    ) -> HttpResponse:
+        host = urlsplit(url).netloc
+        kw: dict = {}
+        if follow_redirects is not None:
+            kw["follow_redirects"] = follow_redirects
+        async with self._limiter(host):
+            resp = await self._client.delete(url, headers=headers or {}, params=params, **kw)
         if resp.status_code == 429 or resp.status_code >= 500:
             raise RetryableStatus(resp)
         resp.raise_for_status()

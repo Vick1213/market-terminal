@@ -827,3 +827,154 @@ export interface ReportCardResponse {
   signals: ReportCardSignal[];
   note: string;
 }
+
+// --- Phase 12: paper trading bot ---
+export interface BotConfig {
+  enabled: boolean; // kill switch
+  mode: string; // "proposal" | "auto"
+  updated_at: string | null;
+}
+
+export interface BotBroker {
+  enabled: boolean; // keys configured
+  is_paper: boolean;
+  base_url: string;
+}
+
+export interface BotGuardrails {
+  max_position_pct: number;
+  max_position_notional: number;
+  min_order_notional: number;
+  daily_loss_limit_pct: number;
+  rebalance_band_pp: number;
+  allow_live: boolean;
+}
+
+export interface BotAccount {
+  equity: number | null;
+  last_equity: number | null;
+  cash: number | null;
+  buying_power: number | null;
+  day_pnl_pct: number | null;
+  daytrade_count?: number | null;
+  pattern_day_trader?: boolean | null;
+  status?: string | null;
+  trading_blocked?: boolean | null;
+}
+
+export interface BotPosition {
+  symbol: string;
+  qty: number | null;
+  market_value: number | null;
+  avg_entry_price: number | null;
+  unrealized_pl: number | null;
+  unrealized_plpc?: number | null;
+}
+
+export interface BotRationale {
+  kind?: string | null;
+  score?: number | null;
+  evidence: string[];
+  bear_case?: string;
+  invalidation?: string;
+}
+
+// One proposed trade. status: proposed | blocked | skipped | submitted |
+// filled | rejected | canceled | expired | submitting | unknown.
+export interface BotProposal {
+  id: number;
+  run_id?: string;
+  created_at?: string;
+  symbol: string;
+  strategist_sym?: string | null;
+  bucket?: string | null;
+  side: string; // buy | sell
+  order_type?: string;
+  qty: number | null;
+  notional: number | null;
+  target_pct: number | null;
+  current_pct: number | null;
+  target_value: number | null;
+  current_value: number | null;
+  delta_value: number | null;
+  conviction: number | null;
+  max_loss_est: number | null;
+  rationale?: BotRationale | null;
+  status: string;
+  blocks?: string[] | null;
+  strategist_asof?: string | null;
+  updated_at?: string;
+}
+
+export interface BotOrder {
+  id: number;
+  proposal_id: number | null;
+  client_order_id: string | null;
+  broker_order_id: string | null;
+  symbol: string;
+  side: string;
+  order_type: string | null;
+  qty: number | null;
+  notional: number | null;
+  status: string | null;
+  filled_qty: number | null;
+  filled_avg_price: number | null;
+  submitted_at: string | null;
+  reconciled_at?: string | null;
+  error: string | null;
+}
+
+export interface BotUntrackedPosition {
+  symbol: string;
+  value: number | null;
+  qty: number | null;
+}
+
+export interface BotStatusResponse {
+  config: BotConfig;
+  broker: BotBroker;
+  guardrails: BotGuardrails;
+  proposals: BotProposal[];
+  recent_orders: BotOrder[];
+  account?: BotAccount;
+  positions?: BotPosition[];
+  account_error?: string;
+  disclaimer: string;
+}
+
+export interface BotProposeResponse {
+  ok: boolean;
+  detail?: string;
+  run_id?: string;
+  config: BotConfig;
+  account?: BotAccount;
+  strategist_as_of?: string | null;
+  n_actionable?: number;
+  equity?: number;
+  buying_power?: number;
+  halted?: string | null;
+  proposals?: BotProposal[];
+  untracked_positions?: BotUntrackedPosition[];
+  disclaimer?: string;
+  auto_executed?: number;
+  executions?: { proposal_id: number; ok?: boolean; detail?: string }[];
+  note?: string;
+}
+
+export interface BotActionResponse {
+  ok?: boolean;
+  detail?: string;
+  proposal_id?: number;
+  order?: Record<string, unknown>;
+  blocks?: string[];
+  enabled?: boolean;
+  mode?: string;
+  updated_at?: string | null;
+  canceled_orders?: number;
+  reconciled?: number;
+}
+
+export interface BotWsMessage {
+  type: "bot";
+  event: string;
+}

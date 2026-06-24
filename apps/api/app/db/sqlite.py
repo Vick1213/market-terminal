@@ -28,6 +28,17 @@ class SqliteStore:
             self._con.execute(sql, tuple(params) if params else ())
             self._con.commit()
 
+    def execute_returning_id(self, sql: str, params: Sequence[Any] | None = None) -> int:
+        """INSERT and return its rowid atomically. cursor.lastrowid is read
+        WHILE the lock is still held, so a concurrent INSERT on the shared
+        connection (from another thread) can never poison the id — unlike a
+        separate ``SELECT last_insert_rowid()`` which re-acquires the lock."""
+        with self._lock:
+            cur = self._con.execute(sql, tuple(params) if params else ())
+            rowid = cur.lastrowid
+            self._con.commit()
+            return int(rowid)
+
     def executemany(self, sql: str, rows: Sequence[Sequence[Any]]) -> None:
         if not rows:
             return

@@ -56,10 +56,14 @@ from app.routers import news as news_router
 from app.routers import retail as retail_router
 from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
+from app.routers import trading as trading_router
 from app.routers import watchlist as watchlist_router
 from app.routers import ws as ws_router
 from app.scheduler.jobs import build_scheduler
 from app.sentiment import SentimentService
+from app.trading.bot import TradingBotService
+from app.trading.broker import AlpacaPaperBroker
+from app.trading.guardrails import GuardrailConfig
 from app.ws.hub import hub
 
 logging.basicConfig(
@@ -187,6 +191,27 @@ async def lifespan(app: FastAPI):
         sectors=settings.sector_etfs, benchmark=settings.rrg_benchmark,
     )
 
+    # Phase 12: paper trading bot — a guarded execution surface for the
+    # strategist's suggestions. Paper-only by default; live trading is blocked
+    # in the broker; the kill switch starts OFF. Not on the scheduler.
+    broker = AlpacaPaperBroker(
+        http,
+        key_id=settings.paper_trading_key_id,
+        secret=settings.paper_trading_secret_key,
+        base_url=settings.alpaca_trading_base_url,
+        allow_live=settings.bot_allow_live_trading,
+    )
+    trading_bot = TradingBotService(
+        duck, sqlite, hub, broker,
+        GuardrailConfig.from_settings(settings),
+        stop_pct=settings.bot_stop_assumption_pct,
+        default_mode=settings.bot_mode_default,
+    )
+    if settings.bot_enabled_default:
+        await trading_bot.set_enabled(True)
+    log.info("paper trading bot: broker=%s paper=%s (kill switch off by default)",
+             "configured" if broker.enabled else "no-keys", broker.is_paper)
+
     scheduler = build_scheduler(
         settings, news_pipeline, macro_pipeline, multiasset_pipeline, retail_pipeline,
         corr_pipeline, alert_engine, insider_pipeline, rotation_pipeline,
@@ -244,6 +269,8 @@ async def lifespan(app: FastAPI):
     app.state.llm = llm
     app.state.intl_pipeline = intl_pipeline
     app.state.strategist_service = strategist_service
+    app.state.broker = broker
+    app.state.trading_bot = trading_bot
 
     try:
         yield
@@ -281,6 +308,7 @@ def create_app() -> FastAPI:
     app.include_router(corr_router.router)
     app.include_router(edge_router.router)
     app.include_router(watchlist_router.router)
+    app.include_router(trading_router.router)
     app.include_router(ws_router.router)
 
     @app.get("/", tags=["meta"])
