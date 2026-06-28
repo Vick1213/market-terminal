@@ -391,4 +391,138 @@ We are building a **local-first, fully private market-intelligence terminal**: a
 
 ---
 
+## 11. Phase 16 Gap Research (added 2026-06-28, from a 14-lane Sonnet research sweep)
+
+Five signal families are entirely absent from the terminal: **rates microstructure** (bond vol, term premium, repo/CP stress), **real-economy nowcasting** (GDPNow, WEI, CFNAI), **energy fundamentals** (EIA petroleum/nat-gas weeklies), **policy-risk surface** (geopolitical risk, trade uncertainty, FedSpeak), and **Treasury supply dynamics** (auction demand, bidder class). The two fastest wins are the FRED credit-ladder completion (BBB-OAS + CPFF — two series calls on an already-wired key) and the Kim-Wright term premium (keyless fredgraph.csv — explains *why* yields move without building a model). Kalshi's keyless FOMC rate distribution feeds directly into the phase 15 divergence engine for near-zero marginal cost. Options-regime completeness (VVIX, VIX9D, ^MOVE) adds three orthogonal vol dimensions via sources already in the ingestor pattern. The EIA and policy lanes require modest new ingestors but unlock the only genuine energy and geopolitical-risk signals on the list.
+
+### Phase 16 backlog (ranked by edge-per-effort)
+
+| Rank | Feature | Signal it adds | Free source (concrete endpoint) | Access | Plugs into | Effort |
+|---|---|---|---|---|---|---|
+| 1 | **FRED macro nowcast trio: GDPNow + WEI + CFNAI** | Real-time intra-quarter GDP tracker (GDPNOW — moves equity markets on large revisions); weekly 10-series economic composite scaled to GDP growth (WEI); 85-indicator monthly recession signal (CFNAIMA3 < −0.70 historically = recession onset) | FRED series `GDPNOW`, `WEI`, `CFNAI`, `CFNAIMA3` — existing free API key; all confirmed live through June 2026 | Free key (already wired) | Macro/Regime panel — real-activity nowcast cards alongside NFCI | **Low** — 4 series IDs added to existing FRED batch pull |
+| 2 | **FRED credit-stress additions: BBB-OAS + CPFF** | BBB OAS (`BAMLC0A4CBBB`) adds the missing tier to the existing IG→HY ladder; computed BBB-HY basis = fallen-angel spread (widens before IG downgrade waves, leads credit cycle turns); CPFF (3M AA commercial paper minus Fed funds) = primary-market CP stress gauge, spiked 450 bps in Oct 2008 | FRED `BAMLC0A4CBBB`, `CPFF`, `DCPN30`, `RIFSPPNA2P2D30NB` — existing key; all confirmed live | Free key (already wired) | Macro/Regime panel — extends existing HY-OAS + IG-OAS rows | **Low** — 3–4 new series in existing FRED batch |
+| 3 | **Kim-Wright term premium (THREEFYTP10) + TIPS 5y5y forward (T5YIFR)** | Decomposes nominal 10Y yield into real rate + term premium daily; rising term premium with flat breakeven = supply/fiscal panic not inflation → different regime implication; T5YIFR is the Fed's own long-run credibility anchor (rising = markets doubt the 2% target, a regime-change leading indicator) | `https://fred.stlouisfed.org/graph/fredgraph.csv?id=THREEFYTP10,T5YIFR,T5YIE` — keyless fredgraph.csv path (no API key required, distinct from the FRED REST API); data through June 2026 confirmed | Keyless | Regime classifier + new Rates & Inflation panel | **Low** — one CSV fetch; new ingestor function |
+| 4 | **^MOVE + VVIX + VIX9D** | ^MOVE = bond-market VIX (MOVE/VIX ratio identifies rate-led vs equity-led risk-off episodes); VVIX/VIX = vol-of-vol (VVIX spikes before spot VIX when sophisticated hedgers front-run a regime shift); VIX9D/VIX = front-end slope of the vol term structure, distinct signal from existing VIX3M/VIX | `^MOVE` via yfinance; `cdn.cboe.com/api/global/us_indices/daily_prices/VVIX_History.csv`; same CDN pattern for `VIX9D_History.csv` — all keyless; VVIX confirmed live | Keyless | Regime classifier (3 new orthogonal dimensions) | **Low** — two CDN CSV fetches + one yfinance ticker; identical pattern to existing VIX3M ingestor |
+| 5 | **ICI weekly fund flows + MMF assets (XLS)** | Real dollar equity/bond MF+ETF net flows by style and cap-size; $8T+ MMF asset split (prime/govt/Treasury); prime-to-govt rotation = textbook early stress signal; institutional MMF outflows precede equity reallocation by days to weeks — the canonical "cash on sidelines" gauge | `https://www.ici.org/combined_flows_data_2026.xls`; `https://www.ici.org/mm_summary_data_2026.xls` — keyless direct XLS, both confirmed live through May/June 2026 | Keyless | Positioning panel + Macro/Regime panel | **Low** — openpyxl parse, weekly cron; URL contains year — update each January or parameterize |
+| 6 | **CFTC TFF — Traders in Financial Futures** | Superior replacement for legacy COT commercial/non-commercial split: breaks ES, NQ, 10Y Treasury, VIX, and crypto futures into Asset Manager (pension/insurance/mutual funds) vs Leveraged Money (hedge funds) vs Dealer Intermediary; AM vs LM divergence is the actionable signal legacy COT hides | `https://www.cftc.gov/dea/newcot/FinFutWk.txt` (weekly fixed-width, confirmed live 2026-06-23); Socrata `https://publicreporting.cftc.gov/resource/gpe5-46if.json` for filtered JSON pulls | Keyless | Positioning panel — upgrade existing COT | **Med** — `cot_reports` lib supports TFF natively; Socrata path preferred over flat-file parsing |
+| 7 | **Treasury auction demand (FiscalData auctions_query)** | Per-auction bid-to-cover ratio + primary dealer / indirect / direct bidder accepted and tendered amounts + high yield; heavy primary-dealer takedown means real money stayed away = yield spike risk; 11,022 records back to 1979, 52 fields confirmed | `https://api.fiscaldata.treasury.gov/services/api/fiscal_service/v1/accounting/od/auctions_query?sort=-record_date&format=json` — keyless JSON, confirmed live | Keyless | Macro/Liquidity + new Treasury Supply Dashboard | **Low** — same FiscalData client already in stack for TGA; add new endpoint |
+| 8 | **Kalshi FOMC + CPI keyless REST (KXFED, KXCPI)** | Full per-strike probability distribution for FOMC rate outcomes and CPI MoM prints — not just binary next-cut; NBER-verified (2026010) to match or beat Bloomberg consensus; cross against FRED DFF/EFFR curve → bond-vs-prediction-market divergence signal feeding directly into the phase 15 engine | `https://external-api.kalshi.com/trade-api/v2/markets?series_ticker=KXFED&status=open`; same for `KXCPI`; enumerate series via `/trade-api/v2/series?category=Economics` — confirmed keyless, 200 read tokens/sec | Keyless | Divergence panel (phase 15 engine) + event-gate calendar | **Low** — simple REST poll; discover series on startup to catch new tickers |
+| 9 | **Cleveland Fed inflation nowcast (daily JSON)** | Daily CPI and PCE MoM + YoY nowcast updated ~10am ET via oil/gasoline/prior-print inputs — the only confirmed-live keyless daily inflation estimate ahead of BLS release; nowcast-vs-prior-estimate gap = surprise direction signal; flags pre-CPI regime shifts the terminal currently misses entirely | `https://www.clevelandfed.org/-/media/files/webcharts/inflationnowcasting/nowcast_month.json` + `nowcast_year.json` — keyless, same-day update confirmed 2026-06-26 | Keyless | Macro/Regime panel — pre-CPI alert flag | **Med** — FusionCharts JSON format requires custom parser; 4 series (CPI, Core CPI, PCE, Core PCE) per file |
+| 10 | **EIA WPSR crude + nat-gas storage (keyless weekly CSVs)** | Crude oil inventory build/draw vs 5-yr average + WTI/Brent/RBOB spot prices → in-process 3:2:1 crack spread (Wed 10:30 ET); nat-gas storage surplus/deficit vs 5-yr norm (Thu 10:30 ET) — both are the primary weekly price catalysts for energy names; currently zero energy fundamentals in the terminal | Crude: `http://ir.eia.gov/wpsr/table1.csv`, `table11.csv`; nat-gas: `http://ir.eia.gov/ngs/wngsr.csv` — all keyless, no JS, confirmed live through 2026-06-19 | Keyless | New Energy Fundamentals panel | **Low-Med** — 3 CSV fetches; crack spread = (2 × RBOB + heating oil − 3 × WTI) / 3, all inputs in table11 |
+| 11 | **GPR Index + TPU daily CSV + Fed speeches hawk/dove RSS** | Monthly geopolitical risk score (1900-present, Threats sub-index leads Acts by 1-3 months); daily trade-policy uncertainty by sub-category (monetary/fiscal/trade/healthcare — routes sector rotation signals); FedSpeak hawk/dove stream scored by existing local FinBERT/Qwen3 — three distinct policy-risk dimensions wholly absent today | GPR: `https://www.matteoiacoviello.com/gpr_files/data_gpr_export.xls` (keyless Excel, confirmed live). TPU: `https://policyuncertainty.com/media/All_Daily_TPU_Data.csv` (keyless, confirmed live). Fed RSS: `https://www.federalreserve.gov/feeds/speeches_and_testimony.xml` (keyless, confirmed live June 2026) | Keyless | New Policy-Risk Surface panel | **Med** — three separate ingestors; Excel + CSV + RSS parse; NLP on speech text using existing FinBERT/Qwen3 |
+| 12 | **8-K item-code EDGAR scanner** | Material cybersecurity incident (Item 1.05, mandatory since Dec 2023), surprise CEO/CFO departure (5.02), new buyback program (8.01 + 'repurchase'), asset impairment (2.06) — each a distinct tradeable catalyst detectable within ~60 s of EDGAR acceptance; supplements existing FinBERT news pipeline with structured item-code targeting | `https://efts.sec.gov/LATEST/search-index?q=%22item+1.05%22&forms=8-K` (swap item code per signal); Atom feed for real-time: `https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=8-K&output=atom` — keyless, 10 req/s, UA required | Keyless | Calendar + Strategist panel; extends existing EDGAR pipeline | **Med** — EDGAR EFTS already in stack; add item-text filter + CIK→ticker resolution via existing `company_tickers.json` |
+| 13 | **SC 13D/13G activist stake (EDGAR EFTS)** | Machine-readable XML since Dec 2024 (holder name, share count, % owned, stated purpose); 13D = intent to influence, historically moves target 5-10% within hours of filing; orthogonal to existing 13F (quarterly, large institutions) and Form 4 (existing insiders) | `https://efts.sec.gov/LATEST/search-index?q=&forms=SC+13D,SC+13G,SC+13D%2FA,SC+13G%2FA&dateRange=custom&startdt=TODAY` — keyless, same EDGAR rate limit | Keyless | Insider/Whales panel | **Med** — EDGAR EFTS already in stack; XML parse new; CIK→ticker via existing mapping |
+| 14 | **BIS CBTA global CB balance sheet** | Single keyless CSV for Fed + ECB + BoJ + PBoC + 30 other CBs in USD-converted and GDP-ratio variants — the only free source assembling a true global QE/QT score; pairs with FRED WALCL to construct global-vs-Fed divergence; DBnomics intl cards give individual CB slices but not the aggregate | `https://stats.bis.org/api/v1/data/WS_CBTA/A.JP+US+XM+CN..?startPeriod=2020&format=csv` — keyless, confirmed live with 2023-2025 data; quarterly cadence, ~1 quarter lag | Keyless | Macro/Liquidity panel (extends WALCL + existing DBnomics intl cards into global sum) | **Low** — one CSV fetch, quarterly cron |
+| 15 | **CBOE SKEW + implied correlation COR3M** | SKEW = 30-day S&P 500 tail-risk premium (SKEW high + VIX low = quiet tail hedging = early warning before VIX reacts); COR3M = average pairwise SPX component correlation (high = macro panic tape; low = stock-picker's market) — both orthogonal to VIX level, zero overlap with existing GEX | `^SKEW`, `^COR3M` via yfinance; CDN backfill at `cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv`, `COR3M_History.csv` — keyless | Keyless | Regime classifier (two new dimensions) | **Low** — two yfinance tickers; same pattern as existing VIX/yfinance ingestors |
+
+### Net-new panels worth standing up
+
+**Rates & Inflation Expectations** — term premium + TIPS 5y5y forward (rank 3), Cleveland daily CPI/PCE nowcast (rank 9), MOVE bond vol (rank 4); all FRED/keyless with existing ingestor patterns; deserves a standalone panel rather than crowding the Macro card further.
+
+**Energy Fundamentals** — EIA WPSR crude inventories + crack spread + nat-gas storage (rank 10); fully keyless weekly CSVs; Wednesday crude and Thursday gas storage releases routinely move energy names; currently zero energy fundamentals exist in the terminal.
+
+**Treasury Supply Dashboard** — auction demand bid-to-cover (rank 7) + upcoming auction calendar (`api.fiscaldata.treasury.gov/...upcoming_auctions` + TreasuryDirect `PendingAuctions.xml`, both confirmed keyless); extends existing FiscalData TGA integration into a complete bond-supply early-warning surface.
+
+**Policy-Risk Surface** — GPR + TPU + Fed speeches hawk/dove + Federal Register executive orders (`https://www.federalregister.gov/api/v1/documents.json`, keyless, confirmed live, filters by agency and significance flag); geopolitical and policy uncertainty are wholly absent in every current panel.
+
+### Verify-at-build-time / fragile
+
+- **CBOE VIX9D_History.csv** — CDN file loads but tail row confirmed only to 2018 in testing; verify the last-date field is current before treating it as live; CBOE actively maintains the index but the CDN path is unofficial.
+- **ICI XLS URLs** — year-embedded (`*_data_2026.xls`); parameterize or update each January; URL convention changed once before.
+- **Kalshi series tickers (KXFED, KXCPI, etc.)** — not fully documented; enumerate live via `/trade-api/v2/series?category=Economics` before hardcoding; seasonal/quarterly contracts expire between runs.
+- **CFTC TFF fixed-width format** — `FinFutWk.txt` column spec is unversioned; pin against a known-good row hash; the Socrata JSON endpoint (`gpe5-46if`) is more stable and preferred.
+- **SC 13D/13G XML fields** — Dec 2024 mandate applies to new filings only; confirm `<beneficialOwnerName>` and `<sharesOwnedFollowingTransaction>` are present before relying on structured parsing; pre-2025 filings remain HTML-only.
+
+**Suggested order:** 1 (GDPNow/WEI/CFNAI, ~1 hr) → 2 (BBB-OAS + CPFF, ~1 hr) → 3 (term premium + 5y5y, ~1 hr) → 4 (VVIX/VIX9D/^MOVE, ~1 hr) → 7 (auction demand, ~2 hr) → 8 (Kalshi, ~2 hr) → 5 (ICI flows, ~3 hr) → 14 (BIS CBTA, ~2 hr) → 15 (SKEW/COR3M, ~1 hr) → 10 (EIA energy, half-day) → 6 (TFF, half-day) → 9 (Cleveland nowcast, half-day) → 11 (policy-risk trio, ~1 day) → 12–13 (EDGAR corporate events, ~1 day).
+
+---
+
+## 12. ML Meta-Signal — predictive indicator from all stored signals (planned 2026-06-28, NOT built)
+
+> The terminal already produces ~dozens of orthogonal daily/weekly signals (regime, positioning, sentiment, flows, breadth, divergence, prediction-market odds). This phase trains a **leakage-safe model zoo** on a point-in-time snapshot of all of them to emit ONE calibrated daily indicator — `P(SPY/QQQ up over h days)` (and a vol-scaled expected-return twin) — that feeds the Strategist and is scored forward by `report_card`. **Honest prior: this is the most overfit-prone thing in the whole plan.** With daily data you have ~2–4k rows and hundreds of candidate features — the curse-of-dimensionality zone where fancy nets reliably *lose* to a well-regularized gradient-boosted tree. The deliverable's value is 80% in the validation harness (§12.3) and 20% in the models. Build the harness first; treat every model as guilty of overfitting until walk-forward proves otherwise.
+
+### 12.1 Target (the dependent variable)
+
+- **Predict log returns, never price levels.** `r = ln(P_{t+h}/P_t)`. Price levels have a unit root → a model trained on levels memorizes "tomorrow ≈ today," scores a fake-great R², and has zero edge (the price-prediction trap). Log returns are ~stationary, time-additive, scale-free across assets/eras.
+- **Volatility-scale it:** the primary target is `r / σ_t` (σ = EWMA / rolling realized vol) so high-vol regimes don't dominate the loss. This is the single highest-leverage modeling choice.
+- **Also model direction:** parallel classification target = `sign(r)` with **triple-barrier labels** (López de Prado: profit-take / stop / time barriers in vol units) + optional **meta-labeling** (a second model sizes the bet given the primary's direction). Classification calibrates to a clean "indicator" probability better than regressing noisy returns.
+- **Horizons:** `h ∈ {1, 5, 21}` trading days (matches signal cadence). Train per-horizon; the 5-day is the headline indicator.
+- **Targets per asset:** start SPY + QQQ (deepest history, cleanest), then per-watchlist-name once the harness is trusted.
+
+### 12.2 Feature matrix (point-in-time)
+
+- One row per (date, asset); columns = a PIT snapshot of every stored signal, **lagged to the moment it was actually knowable** (see §12.3 leakage).
+- Families: macro/regime (NFCI, OAS ladder, term premium, nowcasts), positioning (COT/TFF, true SI, GEX, put/call, VIX term structure, VVIX), sentiment (FinBERT news/social aggregates), flows (ICI, ETF shares-out), breadth, divergence score, Polymarket/Kalshi odds, seasonality, and price-derived momentum/vol/RSI (kept on a short leash — they tend to swamp the slower fundamental signals).
+- Engineering: regime-relative **z-scores / percentile ranks** (not raw levels), deltas/velocities, and a few regime×signal interactions. Optional **fractional differentiation** to make series stationary while keeping memory (López de Prado) instead of naive first-differencing.
+- All transforms (scaling, ranking, feature selection, imputation) fit **inside each CV fold**, never on the full panel.
+
+### 12.3 Leakage control — the part that actually matters
+
+- **As-of / point-in-time joins, on release timestamp not reference date.** COT prints Friday for Tuesday's positions; 13F lags ~45d; GDP/CPI get revised. Use vintages (FRED→ALFRED) and the source's *publish* time. A model that sees Tuesday's COT on Tuesday is cheating.
+- **Purged K-fold + embargo:** overlapping multi-day labels leak train↔test; purge train samples whose label window overlaps the test fold and embargo a gap after it.
+- **Walk-forward / expanding-window** as the headline evaluation; **Combinatorial Purged CV (CPCV)** to get a *distribution* of OOS performance, not one lucky split.
+- No survivorship in the asset universe; no peeking via global standardization.
+
+### 12.4 Model zoo (run all; let walk-forward pick)
+
+| Model | Role | Library (local, $0) |
+|---|---|---|
+| ElasticNet / Logistic | Linear baseline — **the bar every fancy model must clear** | scikit-learn |
+| **LightGBM / XGBoost** | Tabular workhorse — expected champion on daily data | lightgbm / xgboost (CPU) |
+| Random Forest | Bagged baseline + honest feature importance | scikit-learn |
+| 1D-CNN | Local cross-feature / short-window patterns | PyTorch (MPS) |
+| LSTM / GRU | Sequence memory over the feature panel | PyTorch (MPS) |
+| CNN-LSTM hybrid | Conv feature extraction → recurrent head (your suggestion) | PyTorch (MPS) |
+| TCN (dilated causal conv) | Often beats LSTM, parallel, stable gradients | PyTorch (MPS) |
+| PatchTST / small Transformer | Optional — data-hungry, likely overfits here; include for completeness | PyTorch (MPS) |
+| **Stacking meta-learner** | Combines the OOS predictions of the above — this, not any single net, is the real "best model" | scikit-learn |
+
+> **On GANs:** a GAN is **not a predictor** — TimeGAN / quant-GANs *generate synthetic price paths* for data augmentation and stress-testing, not directional forecasts. Slotting one in as the indicator would be a category error. Carry it as an **optional §12.7 augmentation** step (synthesize extra training paths to regularize the sequence nets), evaluated only by whether it improves OOS metrics — never as the output signal.
+
+### 12.5 Selection — there is no "perfect" model
+
+Rank candidates by **walk-forward OOS**, not in-sample fit:
+- Regression target: **rank-IC** (Spearman of prediction vs realized vol-scaled return) with t-stat; OOS Sharpe of a simple long/short driven by the signal, **after costs**.
+- Classification target: AUC + **calibrated Brier** (Platt/isotonic calibration so the probability means something).
+- Discount for multiple testing: **Probability of Backtest Overfitting (PBO)** and **Deflated Sharpe Ratio** — running 9 model types across 3 horizons is a multiple-comparisons minefield; DSR/PBO are how you avoid crowning noise.
+- Tie-break on **stability** across CPCV folds and across time, not peak fold score.
+
+### 12.6 Output & wiring
+
+- Emit a daily row to a new `ml_predictions` duck table: `{date, asset, horizon, p_up, exp_ret_volscaled, conf_band, champion_model, feature_version}`.
+- New **"ML Signal" panel**: the calibrated probability + a **live OOS hit-rate vs naive baselines** badge (so it's honest about whether it's currently working) + top contributing features (SHAP) + an auto **decay flag** when rolling OOS IC goes negative.
+- Feed the score into the **Strategist as one input among many (never the oracle)** and let **`report_card`** score it forward like any other pick. Badge it MODEL-OUTPUT, delayed-as-of.
+
+### 12.7 Script architecture (`apps/api/app/ml/`)
+
+- `dataset.py` — PIT feature matrix builder from DuckDB (release-time joins, ALFRED vintages).
+- `labels.py` — log-return, vol-scaled, triple-barrier + meta-labels.
+- `cv.py` — purged K-fold, embargo, walk-forward, CPCV splitters.
+- `zoo/` — one file per model behind a common `fit(X,y)/predict(X)` interface.
+- `train.py` — CLI: trains the whole zoo × horizons, logs every OOS metric to a run table (reproducible: fixed seeds, frozen feature spec).
+- `select.py` — applies §12.5 gates, writes the champion + its metrics to a versioned `models/` registry.
+- `predict.py` — daily inference job (APScheduler, **default-off**, like the bots); writes `ml_predictions`.
+- Retrain cadence: quarterly walk-forward refit (per §8 decay discipline). All PyTorch on MPS, LightGBM CPU, fully local, $0 tokens.
+
+### 12.8 Phased build (harness-first)
+
+1. **Dataset + labels + leakage-safe CV** (the hard, load-bearing 80%). Ship nothing else until a known-leaky feature is provably caught by the harness.
+2. **Baselines** (ElasticNet, LightGBM) + the full metric/PBO/DSR report — establishes the bar and a first honest read on whether *any* edge exists.
+3. **Sequence nets** (TCN, LSTM, CNN-LSTM) head-to-head vs the tree baseline.
+4. **Stacking ensemble + calibration** → champion selection.
+5. **Daily inference job + ML panel + Strategist/report_card wiring.**
+6. **Optional:** TimeGAN augmentation, Transformer, regime-conditional sub-models — only if §2–4 show real OOS edge.
+
+### 12.9 Risks
+
+- **Overfitting / curse of dimensionality** — few independent daily samples vs many features. Mitigate: aggressive regularization, feature budget, PBO/DSR gating, prefer trees over nets. *Expect LightGBM to win; run the nets to prove it, not to deploy them by default.*
+- **Leakage from revisions / release timing** — the silent killer; §12.3 is non-negotiable.
+- **Non-stationarity / regime change / edge decay** — quarterly refit, live OOS decay flag, never trust a frozen model.
+- **Multiple-testing bias** — running the whole zoo inflates the best score; DSR/PBO mandatory before belief.
+- **Garbage-in** — a flaky upstream source (see §5/§8) silently poisons features; gate training on source-health freshness.
+
+**Net honest take:** worth building for the *harness and the calibrated ensemble probability* as one more Strategist input — **not** as a standalone "predict the market" oracle. If baselines (step 2) show no OOS edge after costs, that is itself the valuable, money-saving result — stop there.
+
+---
+
 **Sources for the two time-sensitive 2026 pivots I re-verified:** [Bluesky firehose free / no paid tier (Blotato 2026)](https://www.blotato.com/blog/bluesky-api-pricing) · [Bluesky cashtags Jan 2026 (TechCrunch)](https://techcrunch.com/2026/01/16/bluesky-rolls-out-cashtags-and-live-badges-amid-a-boost-in-app-installs/) · [CCXT Pro WebSockets merged into free CCXT (GitHub #15171)](https://github.com/ccxt/ccxt/issues/15171). All other source URLs are inline in the research dimensions above and the master table.
