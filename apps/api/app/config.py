@@ -170,6 +170,9 @@ class Settings(BaseSettings):
     # First-run history start. 2022-05 is when the DTS "TGA Closing Balance"
     # account label stabilised; earlier history comes from weekly WTREGEN.
     liquidity_start: str = "2022-05-01"
+    # Treasury auction demand (FiscalData auctions_query, keyless; Phase 16
+    # §11 rank 7). A handful of auctions settle weekly — 12h cadence is plenty.
+    treasury_poll_minutes: int = 720
     # Senate eFD PTR scraper (electronic filings only; House PTRs are
     # PDF-only and skipped). Filings trickle in — 12h cadence is plenty.
     congress_poll_minutes: int = 720
@@ -327,6 +330,50 @@ class Settings(BaseSettings):
     # A single Polymarket market that jumped at least this (abs Δ implied prob)
     # over the lookback fires a front-running watch alert.
     polymarket_jump_alert: float = 0.12
+    # Kalshi FOMC/CPI prediction-market distribution (Phase 16 §11 rank 8,
+    # keyless). Odds drift over hours — a few-hour cadence stays a polite
+    # client well under the 200 read-tokens/sec ceiling.
+    kalshi_enabled: bool = True
+    kalshi_poll_minutes: int = 180
+    # ICI weekly fund flows + money-market fund assets (Phase 16 §11 rank 5,
+    # keyless .xls). Data refreshes once weekly (~Wed/Thu) — a 12h cadence with
+    # conditional caching is plenty and keeps the boundary-year fallback cheap.
+    ici_poll_minutes: int = 720
+    # BIS CBTA global central-bank balance sheets (Phase 16 §11 rank 14,
+    # keyless CSV). Quarterly data with ~1 quarter lag — a daily poll with
+    # conditional caching is more than enough.
+    bis_poll_minutes: int = 1440
+    # EIA weekly energy fundamentals — WPSR (crude/products, Wed 10:30 ET) +
+    # nat-gas storage (Thu 10:30 ET) (Phase 16 §11 rank 10, keyless CSV). Both
+    # weekly; a 12h cadence with conditional caching catches each release.
+    eia_poll_minutes: int = 720
+    # CFTC TFF — Traders in Financial Futures positioning (Phase 16 §11 rank 6,
+    # keyless Socrata). The report publishes Fri ~3:30 ET for Tue data; a 12h
+    # cadence with conditional caching catches the weekly print cheaply.
+    cftc_tff_poll_minutes: int = 720
+    # Cleveland Fed inflation nowcast (Phase 16 §11 rank 9, keyless JSON).
+    # Updates daily ~10am ET; a 6h cadence with conditional caching catches the
+    # daily revision and the nowcast drift the surprise signal reads from.
+    cleveland_poll_minutes: int = 360
+    # Policy-risk trio (Phase 16 §11 rank 11, all keyless). GPR is monthly + TPU
+    # daily (one combined .xls/.csv pipeline); a 12h cadence with conditional
+    # caching catches both cheaply.
+    policyrisk_poll_minutes: int = 720
+    # Fed speeches hawk/dove (RSS + the existing FinBERT scorer). New speeches
+    # trickle in a few times a week; a 12h cadence is plenty, and each speech is
+    # fetched + scored exactly once (URL-keyed in fed_speeches).
+    fed_speeches_poll_minutes: int = 720
+    fed_speeches_max: int = 20       # RSS items considered per run
+    fed_speeches_index_window: int = 12  # speeches in the rolling hawk/dove index
+    # EDGAR corporate-event scanners (Phase 16 §11 ranks 12-13, keyless EFTS).
+    # 8-K item-code catalysts and SC 13D/13G stakes are sparse; a few-hour
+    # cadence with a short lookback (conditional-cached) catches new filings
+    # cheaply, and accession PKs make every sweep idempotent.
+    edgar_8k_poll_minutes: int = 180
+    edgar_8k_lookback_days: int = 3
+    edgar_13d_poll_minutes: int = 240
+    edgar_13d_lookback_days: int = 3
+    edgar_13d_max_xml_fetches: int = 250  # primary_doc.xml fetches per sweep
 
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [

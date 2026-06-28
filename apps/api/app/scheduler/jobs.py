@@ -34,6 +34,16 @@ from app.edge.strategist import StrategistService
 from app.edge.whales import WhalesPipeline
 from app.ingest.intl import IntlPipeline
 from app.ingest.liquidity import LiquidityPipeline
+from app.ingest.treasury import TreasuryAuctionPipeline
+from app.ingest.kalshi import KalshiPipeline
+from app.ingest.ici import ICIPipeline
+from app.ingest.bis import BISPipeline
+from app.ingest.cftc_tff import CftcTffPipeline
+from app.ingest.cleveland import ClevelandPipeline
+from app.ingest.policyrisk import PolicyRiskPipeline
+from app.ingest.fed_speeches import FedSpeechPipeline
+from app.ingest.edgar_events import Edgar8KPipeline, Edgar13DPipeline
+from app.ingest.eia import EIAPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -86,6 +96,17 @@ def build_scheduler(
     day_trader=None,
     polymarket_pipeline=None,
     divergence_pipeline=None,
+    treasury_pipeline: TreasuryAuctionPipeline | None = None,
+    kalshi_pipeline: KalshiPipeline | None = None,
+    ici_pipeline: ICIPipeline | None = None,
+    bis_pipeline: BISPipeline | None = None,
+    eia_pipeline: EIAPipeline | None = None,
+    cftc_tff_pipeline: CftcTffPipeline | None = None,
+    cleveland_pipeline: ClevelandPipeline | None = None,
+    policyrisk_pipeline: PolicyRiskPipeline | None = None,
+    fed_speeches_pipeline: FedSpeechPipeline | None = None,
+    edgar_8k_pipeline: Edgar8KPipeline | None = None,
+    edgar_13d_pipeline: Edgar13DPipeline | None = None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -204,6 +225,15 @@ def build_scheduler(
             minutes=settings.aaii_poll_minutes,
             next_run_time=soon + timedelta(seconds=260),
             id="macro_aaii",
+            **common,
+        )
+        # ^MOVE (bond VIX) via yfinance — daily vol index, CBOE cadence.
+        scheduler.add_job(
+            macro_pipeline.run_move,
+            trigger="interval",
+            minutes=settings.cboe_poll_minutes,
+            next_run_time=soon + timedelta(seconds=290),
+            id="macro_move",
             **common,
         )
         # Safety-net recompute (each ingest already recomputes on success).
@@ -402,6 +432,107 @@ def build_scheduler(
             minutes=settings.liquidity_poll_minutes,
             next_run_time=soon + timedelta(seconds=590),
             id="liquidity",
+            **common,
+        )
+    if treasury_pipeline is not None:
+        scheduler.add_job(
+            treasury_pipeline.run,
+            trigger="interval",
+            minutes=settings.treasury_poll_minutes,
+            next_run_time=soon + timedelta(seconds=605),
+            id="treasury_auctions",
+            **common,
+        )
+    if kalshi_pipeline is not None:
+        scheduler.add_job(
+            kalshi_pipeline.run,
+            trigger="interval",
+            minutes=settings.kalshi_poll_minutes,
+            next_run_time=soon + timedelta(seconds=635),
+            id="kalshi",
+            **common,
+        )
+    if ici_pipeline is not None:
+        scheduler.add_job(
+            ici_pipeline.run,
+            trigger="interval",
+            minutes=settings.ici_poll_minutes,
+            next_run_time=soon + timedelta(seconds=665),
+            id="ici",
+            **common,
+        )
+    if bis_pipeline is not None:
+        scheduler.add_job(
+            bis_pipeline.run,
+            trigger="interval",
+            minutes=settings.bis_poll_minutes,
+            next_run_time=soon + timedelta(seconds=695),
+            id="bis",
+            **common,
+        )
+    if eia_pipeline is not None:
+        scheduler.add_job(
+            eia_pipeline.run,
+            trigger="interval",
+            minutes=settings.eia_poll_minutes,
+            next_run_time=soon + timedelta(seconds=725),
+            id="eia",
+            **common,
+        )
+    if cftc_tff_pipeline is not None:
+        scheduler.add_job(
+            cftc_tff_pipeline.run,
+            trigger="interval",
+            minutes=settings.cftc_tff_poll_minutes,
+            next_run_time=soon + timedelta(seconds=755),
+            id="cftc_tff",
+            **common,
+        )
+    if cleveland_pipeline is not None:
+        scheduler.add_job(
+            cleveland_pipeline.run,
+            trigger="interval",
+            minutes=settings.cleveland_poll_minutes,
+            next_run_time=soon + timedelta(seconds=785),
+            id="cleveland",
+            **common,
+        )
+    if policyrisk_pipeline is not None:
+        scheduler.add_job(
+            policyrisk_pipeline.run,
+            trigger="interval",
+            minutes=settings.policyrisk_poll_minutes,
+            next_run_time=soon + timedelta(seconds=815),
+            id="policyrisk",
+            **common,
+        )
+    if fed_speeches_pipeline is not None:
+        # Staggered last: fetches + FinBERT-scores each new speech, so it leans
+        # on the sentiment service the news jobs have already warmed.
+        scheduler.add_job(
+            fed_speeches_pipeline.run,
+            trigger="interval",
+            minutes=settings.fed_speeches_poll_minutes,
+            next_run_time=soon + timedelta(seconds=845),
+            id="fed_speeches",
+            **common,
+        )
+    if edgar_8k_pipeline is not None:
+        scheduler.add_job(
+            edgar_8k_pipeline.run,
+            trigger="interval",
+            minutes=settings.edgar_8k_poll_minutes,
+            next_run_time=soon + timedelta(seconds=875),
+            id="edgar_8k",
+            **common,
+        )
+    if edgar_13d_pipeline is not None:
+        scheduler.add_job(
+            edgar_13d_pipeline.run,
+            trigger="interval",
+            minutes=settings.edgar_13d_poll_minutes,
+            next_run_time=soon + timedelta(seconds=905),
+            id="edgar_13d",
             **common,
         )
     if congress_pipeline is not None:

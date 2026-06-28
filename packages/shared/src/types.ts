@@ -1197,3 +1197,180 @@ export interface DivergenceResponse {
   history: DivergenceHistoryPoint[];
   weekend_gaps: WeekendGap[];
 }
+
+// --- Phase 16 §11 rank 12: 8-K item-code corporate-event catalysts ---
+export interface Edgar8KEvent {
+  accession: string;
+  ticker: string | null;
+  company: string | null;
+  item_code: string; // the matched catalyst item (1.05/2.06/5.02/8.01)
+  catalyst: string; // human label for item_code
+  items: string[]; // all item codes reported on the filing
+  filed_at: string;
+  url: string | null;
+}
+
+export interface Edgar8KResponse {
+  events: Edgar8KEvent[];
+}
+
+// --- Phase 16 §11 rank 13: SC 13D/13G activist/passive stake filings ---
+export interface Edgar13DFiling {
+  accession: string;
+  subject_ticker: string | null;
+  subject_name: string | null;
+  filer_name: string | null;
+  filing_type: string; // precise EDGAR form, e.g. "SC 13D", "SC 13D/A", "SC 13G"
+  is_activist: boolean; // true for 13D (intent to influence), false for 13G (passive)
+  pct_owned: number | null; // % of class beneficially owned; null for pre-2025 HTML-only filings
+  shares: number | null; // aggregate shares owned; null when XML absent
+  purpose: string | null; // 13D transaction purpose; null for 13G (passive) / HTML-only
+  filed_at: string;
+  url: string | null;
+}
+
+export interface Edgar13DResponse {
+  filings: Edgar13DFiling[];
+}
+
+// --- Phase 16 §11 rank 7: Treasury auction demand ---
+export interface TreasuryAuction {
+  auction_date: string;
+  security_type: string; // "Bill" | "Note" | "Bond" | "TIPS" | "FRN"
+  security_term: string; // e.g. "10-Year", "4-Week"
+  bid_to_cover: number | null;
+  high_yield: number | null; // null for bills (quoted as discount rate)
+  offering_amt: number | null;
+  total_accepted: number | null;
+  dealer_pct: number | null; // primary-dealer takedown % (high = weak real-money demand)
+  indirect_pct: number | null; // indirect bidders (foreign / real money)
+  direct_pct: number | null;
+}
+
+export interface TreasuryAuctionsResponse {
+  auctions: TreasuryAuction[];
+}
+
+// --- Phase 16 §11 rank 8: Kalshi FOMC/CPI implied distributions ---
+export interface KalshiBucket {
+  floor_strike: number | null;
+  label: string;
+  cum_prob: number | null; // cumulative "Above X" probability
+  bucket_prob: number; // differenced per-bucket implied probability
+}
+
+export interface KalshiEvent {
+  series_ticker: string; // e.g. "KXFED", "KXCPI"
+  event_ticker: string;
+  close_time: string | null;
+  strikes: KalshiBucket[];
+  modal: KalshiBucket | null; // highest-mass bucket
+}
+
+export interface KalshiResponse {
+  events: KalshiEvent[];
+  fomc_expected_rate: { ts: string; expected_rate: number } | null;
+}
+
+// --- Phase 16 §11 rank 10: EIA weekly energy fundamentals ---
+export interface EiaStockRow {
+  date: string;
+  crude_commercial?: number;
+  crude_commercial_chg?: number; // weekly build (+) / draw (−)
+  crude_spr?: number;
+  gasoline?: number;
+  distillate?: number;
+}
+
+export interface EiaSpotRow {
+  date: string;
+  wti?: number;
+  brent?: number;
+  rbob?: number;
+  heating_oil?: number;
+  crack_321?: number; // 3:2:1 crack spread ($/bbl)
+}
+
+export interface EiaNatgasRow {
+  date: string;
+  storage?: number; // working gas (Bcf)
+  change?: number; // weekly net change (Bcf)
+  vs_5yr_pct?: number; // surplus/deficit vs 5-yr average
+  vs_yrago_pct?: number;
+}
+
+export interface EiaEnergyResponse {
+  stocks: EiaStockRow[];
+  spot: EiaSpotRow[];
+  natgas: EiaNatgasRow[];
+}
+
+// --- Phase 16 §11 rank 6: CFTC Traders-in-Financial-Futures positioning ---
+export interface TffMarket {
+  ticker: string; // ES / NQ / UST10Y / VIX / DXY / BTC ...
+  report_date: string;
+  am_net: number; // Asset-Manager (real money) net position
+  lm_net: number; // Leveraged-Money (hedge funds) net position
+  dealer_net: number | null;
+  am_lm_div: number; // AM_NET − LM_NET (the signal)
+  div_index: number | null; // 3-year percentile of the divergence (0–100, 50 = neutral)
+  div_13w_ago: number | null;
+  weeks: number;
+}
+
+export interface CftcTffResponse {
+  markets: TffMarket[];
+}
+
+// --- Phase 16 §11 rank 9: Cleveland Fed daily inflation nowcast ---
+export interface ClevelandRow {
+  date: string;
+  cpi?: number;
+  cpi_actual?: number;
+  core_cpi?: number;
+  core_cpi_actual?: number;
+  pce?: number;
+  pce_actual?: number;
+  core_pce?: number;
+  core_pce_actual?: number;
+}
+
+export interface ClevelandNowcastResponse {
+  mom: ClevelandRow[];
+  yoy: ClevelandRow[];
+}
+
+// --- Phase 16 §11 rank 11: policy-risk surface (GPR + TPU) ---
+export interface GprRow {
+  date: string;
+  gpr?: number; // headline geopolitical-risk index
+  threats?: number; // GPR Threats sub-index (leads Acts 1–3 months)
+  acts?: number;
+}
+
+export interface TpuRow {
+  date: string;
+  tpu?: number; // daily trade-policy-uncertainty index
+}
+
+export interface PolicyRiskResponse {
+  gpr: GprRow[];
+  tpu: TpuRow[];
+}
+
+// --- Phase 16 §11 rank 11: Fed speeches scored hawk/dove ---
+export interface FedSpeech {
+  url: string;
+  date: string;
+  speaker: string;
+  title: string;
+  score: number; // FinBERT sentiment (−1..+1)
+  hawk_dove: number; // proxy: >0 hawkish, <0 dovish
+  confidence: number;
+  chunks: number;
+}
+
+export interface FedSpeechesResponse {
+  speeches: FedSpeech[];
+  index: { date: string; value: number } | null; // rolling FED_HAWK_DOVE
+}

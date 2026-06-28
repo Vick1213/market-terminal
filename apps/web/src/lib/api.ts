@@ -37,6 +37,15 @@ import type {
   DivergenceResponse,
   DivergenceSnapshot,
   PolymarketResponse,
+  Edgar8KResponse,
+  Edgar13DResponse,
+  TreasuryAuctionsResponse,
+  KalshiResponse,
+  EiaEnergyResponse,
+  CftcTffResponse,
+  ClevelandNowcastResponse,
+  PolicyRiskResponse,
+  FedSpeechesResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -359,6 +368,123 @@ export async function fetchPolymarket(): Promise<PolymarketResponse> {
 export async function runPolymarket(): Promise<{ tracked: number }> {
   const res = await fetch(`${API_URL}/api/polymarket/run`, { method: "POST" });
   if (!res.ok) throw new Error(`polymarket run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 12: 8-K item-code corporate-event catalysts ---
+export async function fetchEdgar8K(limit = 60): Promise<Edgar8KResponse> {
+  const res = await fetch(`${API_URL}/api/edgar/8k?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`edgar 8-K request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runEdgar8K(): Promise<{ ok: boolean; stored: number }> {
+  const res = await fetch(`${API_URL}/api/edgar/8k/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`edgar 8-K run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 13: SC 13D/13G activist/passive stakes ---
+export async function fetchEdgar13D(limit = 60): Promise<Edgar13DResponse> {
+  const res = await fetch(`${API_URL}/api/edgar/13d?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`edgar 13D request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runEdgar13D(): Promise<{ ok: boolean; stored: number }> {
+  const res = await fetch(`${API_URL}/api/edgar/13d/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`edgar 13D run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 7: Treasury auction demand ---
+export async function fetchTreasuryAuctions(limit = 40): Promise<TreasuryAuctionsResponse> {
+  const res = await fetch(`${API_URL}/api/treasury/auctions?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`treasury auctions request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runTreasuryAuctions(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/treasury/auctions/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`treasury auctions run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 8: Kalshi FOMC/CPI distributions ---
+export async function fetchKalshi(): Promise<KalshiResponse> {
+  const res = await fetch(`${API_URL}/api/kalshi`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`kalshi request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runKalshi(): Promise<{ ok: boolean; reason?: string }> {
+  const res = await fetch(`${API_URL}/api/kalshi/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`kalshi run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 10: EIA weekly energy fundamentals ---
+export async function fetchEiaEnergy(limit = 52): Promise<EiaEnergyResponse> {
+  const res = await fetch(`${API_URL}/api/eia/energy?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`eia energy request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runEiaEnergy(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/eia/energy/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`eia energy run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 6: CFTC TFF positioning ---
+export async function fetchCftcTff(): Promise<CftcTffResponse> {
+  const res = await fetch(`${API_URL}/api/cftc/tff`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`cftc tff request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runCftcTff(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/cftc/tff/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`cftc tff run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 9: Cleveland Fed inflation nowcast ---
+export async function fetchClevelandNowcast(limit = 120): Promise<ClevelandNowcastResponse> {
+  const res = await fetch(`${API_URL}/api/cleveland/nowcast?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`cleveland nowcast request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runClevelandNowcast(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/cleveland/nowcast/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`cleveland nowcast run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 11: policy-risk surface (GPR + TPU) ---
+export async function fetchPolicyRisk(limit = 120): Promise<PolicyRiskResponse> {
+  const res = await fetch(`${API_URL}/api/policy-risk?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`policy-risk request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runPolicyRisk(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/policy-risk/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`policy-risk run failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 16 §11 rank 11: Fed speeches hawk/dove ---
+export async function fetchFedSpeeches(limit = 30): Promise<FedSpeechesResponse> {
+  const res = await fetch(`${API_URL}/api/fed/speeches?limit=${limit}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`fed speeches request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runFedSpeeches(): Promise<{ ok: boolean }> {
+  const res = await fetch(`${API_URL}/api/fed/speeches/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`fed speeches run failed: ${res.status}`);
   return res.json();
 }
 

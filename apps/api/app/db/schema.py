@@ -255,6 +255,46 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # Phase 16 §11 rank 12 — 8-K item-code catalysts (cyber 1.05, impairment
+    # 2.06, exec departure 5.02, buyback 8.01) from EDGAR full-text search. One
+    # row per filing, stored under its highest-priority matching catalyst.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS edgar_8k_events (
+            accession   VARCHAR PRIMARY KEY,
+            cik         VARCHAR,
+            ticker      VARCHAR,
+            company     VARCHAR,
+            item_code   VARCHAR,        -- the catalyst item (1.05/2.06/5.02/8.01)
+            catalyst    VARCHAR,        -- human label for item_code
+            items       VARCHAR,        -- all item codes on the filing, comma-joined
+            filed_at    TIMESTAMP,
+            url         VARCHAR
+        );
+        """
+    )
+    # Phase 16 §11 rank 13 — SC 13D (activist, intent to influence) and SC 13G
+    # (passive) beneficial-ownership stakes. Structured fields (pct/shares/
+    # purpose) populated from the Dec-2024 primary_doc.xml when present; NULL for
+    # older HTML-only filings (the filing-level row is still kept).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS edgar_13d_filings (
+            accession      VARCHAR PRIMARY KEY,
+            subject_cik    VARCHAR,
+            subject_ticker VARCHAR,
+            subject_name   VARCHAR,
+            filer_name     VARCHAR,     -- the reporting person(s) / activist
+            filing_type    VARCHAR,     -- SCHEDULE 13D, SCHEDULE 13D/A, 13G, 13G/A
+            is_activist    BOOLEAN,     -- 13D = true (intent), 13G = false (passive)
+            pct_owned      DOUBLE,      -- % of class (nullable)
+            shares         DOUBLE,      -- aggregate amount owned (nullable)
+            purpose        VARCHAR,     -- stated transaction purpose (nullable)
+            filed_at       TIMESTAMP,
+            url            VARCHAR
+        );
+        """
+    )
     # Weekly CFTC legacy COT prints for the tracked futures markets. The COT
     # Index (3y percentile of net non-commercial) is computed at read time.
     duck.execute(
@@ -472,6 +512,82 @@ def init_duckdb(duck: DuckStore) -> None:
             detail       VARCHAR
         );
         """
+    )
+    # Treasury auction demand (Phase 16 §11 rank 7, FiscalData auctions_query).
+    # One row per auctioned CUSIP. Bidder-class takedown shares are the signal:
+    # high dealer_pct (real money stayed away) = yield-spike risk; low
+    # bid_to_cover / tail (high_yield above when-issued) = weak demand.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS treasury_auctions (
+            cusip          VARCHAR PRIMARY KEY,
+            auction_date   TIMESTAMP NOT NULL,
+            security_type  VARCHAR,   -- Bill | Note | Bond | TIPS | FRN | CMB
+            security_term  VARCHAR,
+            bid_to_cover   DOUBLE,
+            high_yield     DOUBLE,
+            offering_amt   DOUBLE,    -- $
+            total_accepted DOUBLE,    -- $
+            dealer_pct     DOUBLE,    -- primary_dealer_accepted / total_accepted
+            indirect_pct   DOUBLE,    -- indirect_bidder_accepted / total_accepted
+            direct_pct     DOUBLE,    -- direct_bidder_accepted / total_accepted
+            updated_at     TIMESTAMP NOT NULL
+        );
+        """
+    )
+    duck.execute(
+        "CREATE INDEX IF NOT EXISTS idx_treasury_auctions_date "
+        "ON treasury_auctions (auction_date);"
+    )
+    # Kalshi prediction-market strikes (Phase 16 §11 rank 8). One row per
+    # market (a single "Above X%" / range strike), replaced each poll. Grouped
+    # by event_ticker = one FOMC meeting / CPI print; yes_prob is the implied
+    # probability of that strike. The endpoint differences the cumulative
+    # ladder into a per-bucket distribution; the ingestor also writes a
+    # probability-weighted expected-rate scalar to ts_macro (KALSHI_FOMC_RATE)
+    # so it charts and the divergence engine can contrast it vs FRED EFFR.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS kalshi_markets (
+            market_ticker VARCHAR PRIMARY KEY,
+            series_ticker VARCHAR NOT NULL,
+            event_ticker  VARCHAR NOT NULL,
+            yes_sub_title VARCHAR,
+            floor_strike  DOUBLE,
+            yes_prob      DOUBLE,        -- implied probability 0..1
+            volume        DOUBLE,
+            close_time    TIMESTAMP,
+            updated_at    TIMESTAMP NOT NULL
+        );
+        """
+    )
+    duck.execute(
+        "CREATE INDEX IF NOT EXISTS idx_kalshi_event "
+        "ON kalshi_markets (series_ticker, event_ticker);"
+    )
+    # Fed speeches hawk/dove (Phase 16 §11 rank 11, leg 3). One row per speech
+    # (URL primary key = the fetch+score cache, so each speech is scored once),
+    # carrying the FinBERT sentiment, the hawk/dove proxy (= -sentiment; >0
+    # hawkish, <0 dovish), and how many text chunks were averaged. The pipeline
+    # also writes a rolling FED_HAWK_DOVE index scalar to ts_macro.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS fed_speeches (
+            url         VARCHAR PRIMARY KEY,
+            speech_date TIMESTAMP NOT NULL,
+            speaker     VARCHAR,
+            title       VARCHAR,
+            score       DOUBLE,     -- FinBERT sentiment, p_pos - p_neg, -1..+1
+            hawk_dove   DOUBLE,     -- -score: >0 hawkish, <0 dovish
+            confidence  DOUBLE,
+            chunks      INTEGER,    -- # text chunks averaged for the score
+            scored_at   TIMESTAMP NOT NULL
+        );
+        """
+    )
+    duck.execute(
+        "CREATE INDEX IF NOT EXISTS idx_fed_speeches_date "
+        "ON fed_speeches (speech_date);"
     )
 
 

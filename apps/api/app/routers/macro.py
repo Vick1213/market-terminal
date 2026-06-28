@@ -24,6 +24,10 @@ DIAL_SERIES: list[tuple[str, str]] = [
     ("NAAIM_EXPOSURE", "NAAIM"),
     ("PC_TOTAL", "Put/Call"),
     ("FINRA_SHORT_RATIO", "Short vol %"),
+    # Phase 16 (§11) additions — bond vol, rates decomposition, recession signal.
+    ("MOVE", "MOVE"),
+    ("THREEFYTP10", "Term prem"),
+    ("CFNAIMA3", "CFNAI 3mo"),
 ]
 
 

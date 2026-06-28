@@ -42,6 +42,16 @@ from app.ingest.crypto import CryptoStreamer
 from app.ingest.http import HttpClient
 from app.ingest.intl import IntlPipeline
 from app.ingest.liquidity import LiquidityPipeline
+from app.ingest.treasury import TreasuryAuctionPipeline
+from app.ingest.kalshi import KalshiPipeline
+from app.ingest.ici import ICIPipeline
+from app.ingest.bis import BISPipeline
+from app.ingest.cftc_tff import CftcTffPipeline
+from app.ingest.cleveland import ClevelandPipeline
+from app.ingest.policyrisk import PolicyRiskPipeline
+from app.ingest.fed_speeches import FedSpeechPipeline
+from app.ingest.edgar_events import Edgar8KPipeline, Edgar13DPipeline
+from app.ingest.eia import EIAPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
@@ -192,6 +202,38 @@ async def lifespan(app: FastAPI):
         duck, http, settings.whale_funds, top_holdings=settings.whale_top_holdings
     )
 
+    # Phase 16 §11 rank 7: Treasury auction demand (bid-to-cover + takedown).
+    treasury_pipeline = TreasuryAuctionPipeline(duck, http)
+    # Phase 16 §11 rank 8: Kalshi FOMC/CPI prediction-market distribution.
+    kalshi_pipeline = KalshiPipeline(duck, http) if settings.kalshi_enabled else None
+    # Phase 16 §11 rank 5: ICI weekly fund flows + money-market fund assets.
+    ici_pipeline = ICIPipeline(duck, http)
+    # Phase 16 §11 rank 14: BIS global central-bank balance sheets.
+    bis_pipeline = BISPipeline(duck, http)
+    # Phase 16 §11 rank 10: EIA weekly energy fundamentals (WPSR + nat-gas).
+    eia_pipeline = EIAPipeline(duck, http)
+    # Phase 16 §11 rank 6: CFTC TFF asset-manager vs leveraged-money positioning.
+    cftc_tff_pipeline = CftcTffPipeline(duck, http)
+    # Phase 16 §11 rank 9: Cleveland Fed daily inflation nowcast (CPI/PCE).
+    cleveland_pipeline = ClevelandPipeline(duck, http)
+    # Phase 16 §11 rank 11: policy-risk trio — GPR + TPU (scalars) and Fed
+    # speeches scored hawk/dove by the existing FinBERT service.
+    policyrisk_pipeline = PolicyRiskPipeline(duck, http)
+    fed_speeches_pipeline = FedSpeechPipeline(
+        duck, http, sentiment,
+        max_items=settings.fed_speeches_max,
+        index_window=settings.fed_speeches_index_window,
+    )
+    # Phase 16 §11 ranks 12-13: EDGAR corporate-event scanners (EFTS full-text).
+    edgar_8k_pipeline = Edgar8KPipeline(
+        duck, http, lookback_days=settings.edgar_8k_lookback_days
+    )
+    edgar_13d_pipeline = Edgar13DPipeline(
+        duck, http,
+        lookback_days=settings.edgar_13d_lookback_days,
+        max_xml_fetches=settings.edgar_13d_max_xml_fetches,
+    )
+
     # Phase 15: narrative-vs-money divergence + Polymarket front-running.
     polymarket_pipeline = (
         PolymarketPipeline(
@@ -269,6 +311,17 @@ async def lifespan(app: FastAPI):
         optimizer=optimizer, day_trader=day_trader,
         polymarket_pipeline=polymarket_pipeline,
         divergence_pipeline=divergence_pipeline,
+        treasury_pipeline=treasury_pipeline,
+        kalshi_pipeline=kalshi_pipeline,
+        ici_pipeline=ici_pipeline,
+        bis_pipeline=bis_pipeline,
+        eia_pipeline=eia_pipeline,
+        cftc_tff_pipeline=cftc_tff_pipeline,
+        cleveland_pipeline=cleveland_pipeline,
+        policyrisk_pipeline=policyrisk_pipeline,
+        fed_speeches_pipeline=fed_speeches_pipeline,
+        edgar_8k_pipeline=edgar_8k_pipeline,
+        edgar_13d_pipeline=edgar_13d_pipeline,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -313,6 +366,17 @@ async def lifespan(app: FastAPI):
     app.state.calendar_pipeline = calendar_pipeline
     app.state.brief_service = brief_service
     app.state.liquidity_pipeline = liquidity_pipeline
+    app.state.treasury_pipeline = treasury_pipeline
+    app.state.kalshi_pipeline = kalshi_pipeline
+    app.state.ici_pipeline = ici_pipeline
+    app.state.bis_pipeline = bis_pipeline
+    app.state.eia_pipeline = eia_pipeline
+    app.state.cftc_tff_pipeline = cftc_tff_pipeline
+    app.state.cleveland_pipeline = cleveland_pipeline
+    app.state.policyrisk_pipeline = policyrisk_pipeline
+    app.state.fed_speeches_pipeline = fed_speeches_pipeline
+    app.state.edgar_8k_pipeline = edgar_8k_pipeline
+    app.state.edgar_13d_pipeline = edgar_13d_pipeline
     app.state.congress_pipeline = congress_pipeline
     app.state.whales_pipeline = whales_pipeline
     app.state.llm = llm

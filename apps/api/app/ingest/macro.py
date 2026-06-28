@@ -26,7 +26,11 @@ log = logging.getLogger("market.ingest.macro")
 MACRO_TOPIC = "macro"
 
 # FRED series per PLAN §3c (yield curve, real/breakeven, conditions, credit,
-# Fed plumbing, money/rates, VIX backup, broad USD, oil).
+# Fed plumbing, money/rates, VIX backup, broad USD, oil) plus the Phase 16
+# additions (§11 ranks 1–3): real-economy nowcast trio, the missing BBB tier
+# of the credit ladder + commercial-paper stress, and the rates-decomposition
+# trio (term premium + 5y5y inflation forward). All are keyed-API series; the
+# keyless fredgraph.csv path is connection-blocked for non-browser clients.
 FRED_SERIES = [
     "T10Y2Y", "T10Y3M", "DGS10", "DGS2",
     "DFII10", "T10YIE",
@@ -35,13 +39,39 @@ FRED_SERIES = [
     "WALCL", "RRPONTSYD", "WTREGEN", "WRESBAL",
     "M2SL", "DFF", "SOFR", "VIXCLS",
     "DTWEXBGS", "DCOILWTICO",
+    # §11 rank 1 — real-activity nowcast: GDPNow, Weekly Econ Index,
+    # Chicago Fed NAI + its 3-mo MA (CFNAIMA3 < −0.70 ≈ recession onset).
+    "GDPNOW", "WEI", "CFNAI", "CFNAIMA3",
+    # §11 rank 2 — credit ladder completion: BBB OAS (fallen-angel tier) +
+    # commercial-paper stress (CPFF spread, 30d AA/A2P2 CP rates).
+    "BAMLC0A4CBBB", "CPFF", "DCPN30", "RIFSPPNA2P2D30NB",
+    # §11 rank 3 — rates decomposition: Kim-Wright 10y term premium,
+    # TIPS 5y5y forward inflation, 5y breakeven inflation expectation.
+    "THREEFYTP10", "T5YIFR", "T5YIE",
 ]
 FRED_DEFAULT_START = "2015-01-01"
 
 CBOE_HISTORY = {
     "VIX": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX_History.csv",
     "VIX3M": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX3M_History.csv",
+    # §11 rank 4 — orthogonal vol dimensions. VVIX (vol-of-vol) ships a 2-col
+    # DATE,VVIX file; VIX9D (front-end vol slope) ships the 5-col OHLC shape.
+    # fetch_cboe_history takes the last column so both parse correctly.
+    "VVIX": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VVIX_History.csv",
+    "VIX9D": "https://cdn.cboe.com/api/global/us_indices/daily_prices/VIX9D_History.csv",
+    # §11 rank 15 — two more orthogonal-to-VIX regime dimensions. SKEW = 30-day
+    # S&P 500 tail-risk premium (SKEW high + VIX low = quiet tail hedging, an
+    # early warning before VIX reacts; ships a 2-col DATE,SKEW file). COR3M =
+    # average pairwise SPX implied correlation (high = macro panic tape, low =
+    # stock-picker's market; ships the 5-col OHLC shape). Both CDN files verified
+    # current through 2026-06-26; fetch_cboe_history takes the last column so the
+    # 2-col and 5-col shapes both parse.
+    "SKEW": "https://cdn.cboe.com/api/global/us_indices/daily_prices/SKEW_History.csv",
+    "COR3M": "https://cdn.cboe.com/api/global/us_indices/daily_prices/COR3M_History.csv",
 }
+# §11 rank 4 — ^MOVE (ICE BofA MOVE index, "bond VIX") has no keyless CBOE CDN
+# file; yfinance is the only free daily source. Stored in ts_macro as "MOVE".
+MOVE_YF_SYMBOL = "^MOVE"
 # Daily market-statistics page embeds TOTAL/INDEX/EQUITY put/call ratios as
 # escaped JSON. The cdn.cboe.com volume_and_call_put_ratios CSVs are the
 # 2006–2019 FROZEN files (verified 2026-06-09) — do not use them for current
@@ -130,7 +160,9 @@ async def fetch_fred(
 
 
 async def fetch_cboe_history(http: HttpClient, series_id: str, url: str) -> list[MacroRow]:
-    """VIX / VIX3M daily history CSV (DATE,OPEN,HIGH,LOW,CLOSE) -> close."""
+    """CBOE daily history CSV -> last column. Handles both the 5-col OHLC shape
+    (VIX/VIX3M/VIX9D: DATE,OPEN,HIGH,LOW,CLOSE -> close) and the 2-col shape
+    (VVIX: DATE,VVIX -> value); the value is always the last column."""
     try:
         text = await http.get_text(url)
     except Exception as exc:
@@ -139,13 +171,13 @@ async def fetch_cboe_history(http: HttpClient, series_id: str, url: str) -> list
     rows: list[MacroRow] = []
     for line in text.splitlines():
         parts = line.split(",")
-        if len(parts) < 5:
+        if len(parts) < 2:
             continue
         day = _parse_date(parts[0])
         if day is None:
             continue  # title/header lines
         try:
-            rows.append(MacroRow(series_id, _d(day), float(parts[4]), "cboe"))
+            rows.append(MacroRow(series_id, _d(day), float(parts[-1]), "cboe"))
         except ValueError:
             continue
     return rows
@@ -174,6 +206,32 @@ async def fetch_cboe_putcall_day(http: HttpClient, day: date) -> list[MacroRow]:
             continue
         if value > 0:  # holidays render as 0.00
             rows.append(MacroRow(series_id, _d(day), value, "cboe"))
+    return rows
+
+
+# --- MOVE (yfinance) ----------------------------------------------------
+
+
+def _fetch_move_blocking(start: str) -> list[MacroRow]:
+    """ICE BofA MOVE index daily history via yfinance (^MOVE). Blocking — run
+    in the executor. Returns ts_macro rows under series_id 'MOVE'."""
+    import yfinance as yf  # heavy import kept off module load
+
+    try:
+        hist = yf.Ticker(MOVE_YF_SYMBOL).history(start=start, interval="1d")
+    except Exception as exc:
+        log.warning("yfinance MOVE failed: %s", exc)
+        return []
+    if hist is None or hist.empty:
+        log.warning("yfinance MOVE: no rows")
+        return []
+    rows: list[MacroRow] = []
+    for ts, r in hist.iterrows():
+        close = r.get("Close")
+        if close is None or close != close:  # NaN guard
+            continue
+        day = ts.to_pydatetime().date()
+        rows.append(MacroRow("MOVE", _d(day), float(close), "yahoo"))
     return rows
 
 
@@ -389,6 +447,15 @@ class MacroPipeline:
             total += await self._store(await fetch_cboe_putcall_day(self._http, day))
         log.info("cboe ingest: %s points (%s put/call days)", total, len(pc_days))
         await self.recompute_composite()
+
+    async def run_move(self) -> None:
+        loop = asyncio.get_running_loop()
+        start = await loop.run_in_executor(None, self._series_start, "MOVE")
+        rows = await loop.run_in_executor(None, _fetch_move_blocking, start)
+        n = await self._store(rows)
+        log.info("move ingest: %s points", n)
+        if n:
+            await self.recompute_composite()
 
     async def run_finra(self) -> None:
         loop = asyncio.get_running_loop()
