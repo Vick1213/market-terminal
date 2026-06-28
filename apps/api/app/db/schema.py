@@ -405,6 +405,74 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # --- Phase 15: narrative-vs-money divergence + Polymarket front-running ---
+    # Tracked Polymarket geopolitical/news markets (keyword-matched from Gamma).
+    # escalation_sign: +1 when a "Yes" resolution means MORE conflict/danger
+    # (war/strike/attack), -1 when "Yes" means de-escalation (ceasefire/deal),
+    # 0 when undirected — used to turn an odds move into risk pressure.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS polymarket_markets (
+            id              VARCHAR PRIMARY KEY,   -- conditionId
+            slug            VARCHAR,
+            question        VARCHAR NOT NULL,
+            category        VARCHAR,               -- geopolitics | politics | macro
+            escalation_sign INTEGER DEFAULT 0,
+            yes_token       VARCHAR,
+            end_date        TIMESTAMP,
+            closed          BOOLEAN DEFAULT FALSE,
+            volume          DOUBLE,
+            liquidity       DOUBLE,
+            updated_at      TIMESTAMP NOT NULL
+        );
+        """
+    )
+    # Odds snapshots over time — the jump-detection series. One row per
+    # (market, ts); yes_prob is the implied probability of the "Yes" outcome.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS polymarket_odds (
+            market_id  VARCHAR NOT NULL,
+            ts         TIMESTAMP NOT NULL,
+            yes_prob   DOUBLE,
+            volume     DOUBLE,
+            PRIMARY KEY (market_id, ts)
+        );
+        """
+    )
+    # Best-effort holder concentration (Data API). top_share = largest single
+    # holder as a fraction of the tracked side; high concentration on a sharp
+    # move is the smart/insider-wallet fingerprint. detail = JSON top holders.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS polymarket_holders (
+            market_id  VARCHAR NOT NULL,
+            ts         TIMESTAMP NOT NULL,
+            n_holders  INTEGER,
+            top_share  DOUBLE,
+            top_holder VARCHAR,
+            detail     VARCHAR,
+            PRIMARY KEY (market_id, ts)
+        );
+        """
+    )
+    # Narrative-vs-money divergence snapshots: one row per engine run (replace
+    # by minute). score 0..100 = "officials/news project calm while money
+    # hedges". detail = JSON breakdown (per-proxy legs, matched markets, news).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS divergence_snapshots (
+            ts           TIMESTAMP PRIMARY KEY,
+            score        DOUBLE,
+            narrative    DOUBLE,   -- news/official tone -1..1 (+ = calm)
+            riskoff_z    DOUBLE,   -- equity/bond/vol risk-off basket z
+            pm_pressure  DOUBLE,   -- polymarket escalation pressure -1..1
+            regime       VARCHAR,
+            headline     VARCHAR,
+            detail       VARCHAR
+        );
+        """
+    )
 
 
 def init_sqlite(sqlite: SqliteStore) -> None:

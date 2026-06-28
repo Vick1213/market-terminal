@@ -69,6 +69,9 @@ class AlertEngine:
         netliq_drain_bn: float = -150.0,
         filing_similarity_alert: float = 0.70,
         squeeze_days_to_cover: float = 5.0,
+        divergence_warn: float = 55.0,
+        divergence_critical: float = 75.0,
+        polymarket_jump: float = 0.12,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -81,6 +84,9 @@ class AlertEngine:
         self._netliq_drain = netliq_drain_bn
         self._filing_similarity = filing_similarity_alert
         self._squeeze_dtc = squeeze_days_to_cover
+        self._divergence_warn = divergence_warn
+        self._divergence_critical = divergence_critical
+        self._pm_jump = polymarket_jump
 
     # ------------------------------------------------------------------ state
 
@@ -727,6 +733,81 @@ class AlertEngine:
             ))
         return out
 
+    # --------------------------------------------------- Phase 15 rules
+
+    def _rule_divergence(self, now: datetime, regime: str) -> list[Alert]:
+        """Narrative-vs-money divergence score crossed the warn/critical line —
+        money/markets are bracing while the official narrative reads calm. The
+        cross-venue case (equity hedging AND Polymarket escalation AND calm
+        news) is the strongest 'someone knows something' tell."""
+        from app.edge.divergence import latest_divergence
+
+        snap = latest_divergence(self._duck)
+        if snap is None or snap.get("score") is None:
+            return []
+        score = float(snap["score"])
+        key = "divergence"
+        _, prev, _ = self._state(key)
+        self._save_state(key, value=score)
+        if score < self._divergence_warn:
+            return []
+        newly_critical = (
+            prev is not None and prev < self._divergence_critical <= score
+        )
+        if prev is not None and prev >= self._divergence_warn and not newly_critical:
+            return []  # already elevated last sweep (and not a fresh critical)
+        if not self._cooled(key, now) and not newly_critical:
+            return []
+        sig = snap.get("detail", {}).get("signals", {})
+        cross = (sig.get("money", 0) >= 0.5 and sig.get("pm", 0) >= 0.4
+                 and sig.get("calm", 0) >= 0.3)
+        sev = "critical" if (score >= self._divergence_critical or cross) else "warn"
+        lead = "Cross-venue confirmation — " if cross else ""
+        body = snap.get("headline") or ""
+        if cross:
+            body += (" Equity/bond hedging, Polymarket escalation, and calm "
+                     "geopolitical news tone all agree — informed money may be "
+                     "positioning against the public narrative.")
+        return [Alert(
+            rule="divergence", key=key, severity=sev,
+            title=f"{lead}Narrative–money divergence {score:.0f}/100",
+            body=body,
+            value=round(score, 1),
+            detail={"narrative": snap.get("narrative"), "pm": snap.get("pm_pressure")},
+        )]
+
+    def _rule_polymarket_jump(self, now: datetime, regime: str) -> list[Alert]:
+        """A tracked Polymarket geopolitical market moved sharply over the
+        lookback — the on-chain front-running tell. Concentrated holders on the
+        move escalate it to warn. One alert per (market, day)."""
+        from app.ingest.polymarket import polymarket_summary
+
+        out: list[Alert] = []
+        for m in polymarket_summary(self._duck):
+            move = m.get("move")
+            if move is None or abs(move) < self._pm_jump or not m.get("escalation_sign"):
+                continue
+            day = now.strftime("%Y-%m-%d")
+            key = f"pm_jump:{m['id']}:{day}"
+            if self._fired_ever(key):
+                continue
+            toward = "escalation" if move * m["escalation_sign"] > 0 else "de-escalation"
+            conc = m.get("top_share")
+            concentrated = conc is not None and conc >= 0.25
+            sev = "warn" if concentrated else "info"
+            conc_s = (f" Top holder controls {conc:.0%} of the tracked side — "
+                      "a concentrated wallet on the move." if concentrated else "")
+            out.append(Alert(
+                rule="polymarket_jump", key=key, severity=sev,
+                title=f"Polymarket move: {toward} {move:+.0%}",
+                body=f'"{m["question"]}" implied prob moved {move:+.0%} (now '
+                     f'{(m.get("yes_prob") or 0):.0%}) over the lookback — pricing in '
+                     f"{toward} before mainstream confirmation.{conc_s}",
+                value=round(float(move), 4),
+                detail={"url": m.get("url")},
+            ))
+        return out
+
     # ------------------------------------------------------------------ sweep
 
     _RULES = (
@@ -736,6 +817,7 @@ class AlertEngine:
         _rule_netliq_drain, _rule_congress_watchlist, _rule_whale_new_position,
         _rule_strategist_shift, _rule_filing_rewrite, _rule_fomc_statement,
         _rule_source_death, _rule_squeeze_watch,
+        _rule_divergence, _rule_polymarket_jump,
     )
 
     def _evaluate(self) -> list[Alert]:

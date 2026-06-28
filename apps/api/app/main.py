@@ -26,6 +26,7 @@ from app.edge.brief import BriefService
 from app.edge.calendar import CalendarPipeline
 from app.edge.congress import CongressPipeline
 from app.edge.cot import CotPipeline
+from app.edge.divergence import DivergencePipeline
 from app.edge.short_interest import ShortInterestPipeline
 from app.edge.gex import GexAdapter
 from app.edge.filings_diff import FilingsDiffPipeline
@@ -44,6 +45,7 @@ from app.ingest.liquidity import LiquidityPipeline
 from app.ingest.macro import MacroPipeline
 from app.ingest.multiasset import MultiAssetPipeline
 from app.ingest.news import NewsPipeline
+from app.ingest.polymarket import PolymarketPipeline
 from app.ingest.retail import RetailPipeline
 from app.ingest.source_health import SourceHealthRegistry
 from app.routers import corr as corr_router
@@ -137,6 +139,9 @@ async def lifespan(app: FastAPI):
         netliq_drain_bn=settings.netliq_drain_alert_bn,
         filing_similarity_alert=settings.filings_diff_alert_similarity,
         squeeze_days_to_cover=settings.squeeze_days_to_cover,
+        divergence_warn=settings.divergence_warn_score,
+        divergence_critical=settings.divergence_critical_score,
+        polymarket_jump=settings.polymarket_jump_alert,
     )
     insider_pipeline = InsiderPipeline(
         duck, sqlite, http,
@@ -185,6 +190,25 @@ async def lifespan(app: FastAPI):
     )
     whales_pipeline = WhalesPipeline(
         duck, http, settings.whale_funds, top_holdings=settings.whale_top_holdings
+    )
+
+    # Phase 15: narrative-vs-money divergence + Polymarket front-running.
+    polymarket_pipeline = (
+        PolymarketPipeline(
+            duck, sqlite, http,
+            max_markets=settings.polymarket_max_markets,
+            fetch_limit=settings.polymarket_fetch_limit,
+            holders=settings.polymarket_holders,
+        )
+        if settings.polymarket_enabled else None
+    )
+    divergence_pipeline = (
+        DivergencePipeline(
+            duck, sqlite, http, hub,
+            news_lookback_hours=settings.divergence_news_lookback_hours,
+            pm_lookback_hours=settings.divergence_pm_lookback_hours,
+        )
+        if settings.divergence_enabled else None
     )
 
     # Phase 9: international macro + strategist synthesis.
@@ -243,6 +267,8 @@ async def lifespan(app: FastAPI):
         filings_diff_pipeline, fomc_diff_pipeline,
         short_interest_pipeline=short_interest_pipeline,
         optimizer=optimizer, day_trader=day_trader,
+        polymarket_pipeline=polymarket_pipeline,
+        divergence_pipeline=divergence_pipeline,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])
@@ -291,6 +317,8 @@ async def lifespan(app: FastAPI):
     app.state.whales_pipeline = whales_pipeline
     app.state.llm = llm
     app.state.intl_pipeline = intl_pipeline
+    app.state.polymarket_pipeline = polymarket_pipeline
+    app.state.divergence_pipeline = divergence_pipeline
     app.state.strategist_service = strategist_service
     app.state.broker = broker
     app.state.broker_state = broker_state

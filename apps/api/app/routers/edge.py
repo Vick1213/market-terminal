@@ -303,3 +303,57 @@ async def brief(request: Request) -> dict:
 async def brief_run(request: Request) -> dict:
     result = await request.app.state.brief_service.run(push=False)
     return {k: v for k, v in result.items() if k != "digest"}
+
+
+# --- Phase 15: narrative-vs-money divergence + Polymarket front-running ---
+
+
+@router.get("/divergence")
+async def divergence(request: Request, history_days: int = Query(60, le=180)) -> dict:
+    """Latest divergence snapshot + score history + the realised SPY weekend
+    gaps the score is meant to anticipate (the forward-outcome track record)."""
+    from app.edge.divergence import divergence_history, latest_divergence, weekend_gaps
+
+    duck = request.app.state.duck
+    loop = asyncio.get_running_loop()
+
+    def _q():
+        return (
+            latest_divergence(duck),
+            divergence_history(duck, history_days),
+            weekend_gaps(duck, 10),
+        )
+
+    latest, history, gaps = await loop.run_in_executor(None, _q)
+    if latest is None:
+        return {"status": "warming-up", "history": [], "weekend_gaps": gaps}
+    return {"latest": latest, "history": history, "weekend_gaps": gaps}
+
+
+@router.post("/divergence/run")
+async def divergence_run(request: Request) -> dict:
+    pipeline = request.app.state.divergence_pipeline
+    if pipeline is None:
+        return {"status": "disabled"}
+    return await pipeline.run()
+
+
+@router.get("/polymarket")
+async def polymarket(request: Request) -> dict:
+    """Tracked Polymarket geopolitical markets: latest odds, the move vs ~24h
+    ago, escalation sign and holder concentration — biggest tells first."""
+    from app.ingest.polymarket import polymarket_summary
+
+    loop = asyncio.get_running_loop()
+    markets = await loop.run_in_executor(
+        None, polymarket_summary, request.app.state.duck
+    )
+    return {"markets": markets}
+
+
+@router.post("/polymarket/run")
+async def polymarket_run(request: Request) -> dict:
+    pipeline = request.app.state.polymarket_pipeline
+    if pipeline is None:
+        return {"status": "disabled"}
+    return {"tracked": await pipeline.run()}

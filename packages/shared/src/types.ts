@@ -1123,3 +1123,77 @@ export interface PortfolioOverview {
   account?: BotAccount;
   disclaimer: string;
 }
+
+// --- Phase 15: narrative-vs-money divergence + Polymarket front-running ---
+export interface PolymarketMarket {
+  id: string;
+  question: string;
+  slug: string | null;
+  url: string | null;
+  escalation_sign: number; // +1 Yes=escalation, -1 Yes=de-escalation, 0 undirected
+  end_date: string | null;
+  volume: number | null;
+  yes_prob: number | null;
+  prev_prob: number | null;
+  move: number | null; // Δ implied prob vs ~24h ago
+  top_share: number | null; // largest holder share of the tracked side
+  n_holders: number | null;
+  ts: string;
+}
+
+export interface PolymarketResponse {
+  markets: PolymarketMarket[];
+}
+
+export interface DivergenceLeg {
+  symbol: string;
+  ret_2d: number;
+  z: number;
+  signed: number;
+}
+
+export interface DivergenceSignals {
+  money: number;
+  pm: number;
+  calm: number;
+  brace: number;
+}
+
+export interface DivergenceSnapshot {
+  ts: string;
+  score: number | null;
+  narrative: number | null;
+  riskoff_z: number | null;
+  pm_pressure: number | null;
+  regime: string | null;
+  headline: string | null;
+  detail: {
+    riskoff_legs?: DivergenceLeg[];
+    narrative?: { tone: number | null; n_headlines: number; samples: string[] };
+    polymarket?: { pressure: number | null; markets: PolymarketMarket[] };
+    signals?: DivergenceSignals;
+  };
+}
+
+export interface DivergenceHistoryPoint {
+  ts: string;
+  score: number | null;
+  narrative: number | null;
+  riskoff_z: number | null;
+  pm_pressure: number | null;
+}
+
+export interface WeekendGap {
+  from: string;
+  to: string;
+  prev_close: number;
+  next_open: number;
+  gap_pct: number;
+}
+
+export interface DivergenceResponse {
+  status?: string;
+  latest?: DivergenceSnapshot;
+  history: DivergenceHistoryPoint[];
+  weekend_gaps: WeekendGap[];
+}

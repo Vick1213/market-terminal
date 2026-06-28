@@ -6,6 +6,7 @@ import { BotPanel } from "./panels/BotPanel";
 import { BriefPanel } from "./panels/BriefPanel";
 import { CalendarPanel } from "./panels/CalendarPanel";
 import { CorrelationPanel } from "./panels/CorrelationPanel";
+import { DivergencePanel } from "./panels/DivergencePanel";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
 import { HelpPanel } from "./panels/HelpPanel";
 import { MacroPanel } from "./panels/MacroPanel";
@@ -39,6 +40,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "rotation", el: <RotationPanel /> },
   { i: "positioning", el: <PositioningPanel /> },
   { i: "whales", el: <WhalesPanel /> },
+  { i: "divergence", el: <DivergencePanel /> },
   { i: "strategist", el: <StrategistPanel /> },
   { i: "bot", el: <BotPanel /> },
   { i: "sources", el: <SourceHealthPanel /> },
@@ -63,11 +65,13 @@ const layouts: Layouts = {
     { i: "cookbook", x: 6, y: 27, w: 6, h: 8 },
     { i: "whales", x: 0, y: 35, w: 6, h: 8 },
     { i: "strategist", x: 6, y: 35, w: 6, h: 8 },
+    // Phase 15: narrative-vs-money divergence + Polymarket front-running.
+    { i: "divergence", x: 0, y: 43, w: 6, h: 10 },
     // Phase 12/13: paper bots — full-width (optimizer split + swing proposals + day sleeve).
-    { i: "bot", x: 0, y: 43, w: 12, h: 12 },
-    { i: "system", x: 0, y: 55, w: 4, h: 6 },
-    { i: "sources", x: 4, y: 55, w: 4, h: 6 },
-    { i: "help", x: 8, y: 55, w: 4, h: 6 },
+    { i: "bot", x: 0, y: 53, w: 12, h: 12 },
+    { i: "system", x: 0, y: 65, w: 4, h: 6 },
+    { i: "sources", x: 4, y: 65, w: 4, h: 6 },
+    { i: "help", x: 8, y: 65, w: 4, h: 6 },
   ],
 };
 

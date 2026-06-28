@@ -306,6 +306,28 @@ class Settings(BaseSettings):
     day_news_min_abs_score: float = 0.6
     day_news_min_outlets: int = 2
 
+    # --- Phase 15: narrative-vs-money divergence + Polymarket front-running ---
+    # Polymarket is keyless/public. The ingest snapshots active geopolitical/news
+    # markets' odds so the engine can diff them for pre-news jumps. Slow cadence
+    # — odds drift over hours/days, not seconds, and we stay a polite client.
+    polymarket_enabled: bool = True
+    polymarket_poll_minutes: int = 30
+    polymarket_max_markets: int = 30      # cap tracked markets per sweep
+    polymarket_fetch_limit: int = 250     # Gamma page size (highest-volume first)
+    polymarket_holders: bool = True       # best-effort Data API concentration
+    # Divergence engine cadence + windows. Reads cached price/news/PM data; the
+    # only network it does is ensuring the risk-off proxy bars are fresh.
+    divergence_enabled: bool = True
+    divergence_poll_minutes: int = 60
+    divergence_news_lookback_hours: int = 48
+    divergence_pm_lookback_hours: int = 24
+    # Alert thresholds (0-100 score). warn at the first, critical at the second.
+    divergence_warn_score: float = 55.0
+    divergence_critical_score: float = 75.0
+    # A single Polymarket market that jumped at least this (abs Δ implied prob)
+    # over the lookback fires a front-running watch alert.
+    polymarket_jump_alert: float = 0.12
+
     # CORS origins allowed to call the API (the Next.js dev server).
     cors_origins: list[str] = [
         "http://localhost:3000",

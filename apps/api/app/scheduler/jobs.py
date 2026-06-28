@@ -84,6 +84,8 @@ def build_scheduler(
     short_interest_pipeline: ShortInterestPipeline | None = None,
     optimizer=None,
     day_trader=None,
+    polymarket_pipeline=None,
+    divergence_pipeline=None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -452,6 +454,28 @@ def build_scheduler(
             max_instances=1,
             coalesce=True,
             misfire_grace_time=3600,
+        )
+
+    # --- Phase 15: Polymarket ingest + narrative-vs-money divergence ---
+    if polymarket_pipeline is not None:
+        scheduler.add_job(
+            polymarket_pipeline.run,
+            trigger="interval",
+            minutes=settings.polymarket_poll_minutes,
+            next_run_time=soon + timedelta(seconds=200),
+            id="ingest_polymarket",
+            **common,
+        )
+    if divergence_pipeline is not None:
+        # Runs after the polymarket snapshot + first price/news round so all
+        # three legs have data; reads cached data, only ensures proxy bars.
+        scheduler.add_job(
+            divergence_pipeline.run,
+            trigger="interval",
+            minutes=settings.divergence_poll_minutes,
+            next_run_time=soon + timedelta(seconds=740),
+            id="edge_divergence",
+            **common,
         )
 
     # --- Phase 13: portfolio optimizer + day trader ---

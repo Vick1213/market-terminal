@@ -34,6 +34,9 @@ import type {
   DayStatusResponse,
   DayRunResponse,
   PortfolioOverview,
+  DivergenceResponse,
+  DivergenceSnapshot,
+  PolymarketResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -331,6 +334,31 @@ export async function setDayEnabled(enabled: boolean): Promise<{ enabled: boolea
     method: "POST",
   });
   if (!res.ok) throw new Error(`day ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Phase 15: narrative-vs-money divergence + Polymarket ---
+export async function fetchDivergence(): Promise<DivergenceResponse> {
+  const res = await fetch(`${API_URL}/api/divergence`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`divergence request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runDivergence(): Promise<DivergenceSnapshot> {
+  const res = await fetch(`${API_URL}/api/divergence/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`divergence run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchPolymarket(): Promise<PolymarketResponse> {
+  const res = await fetch(`${API_URL}/api/polymarket`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`polymarket request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runPolymarket(): Promise<{ tracked: number }> {
+  const res = await fetch(`${API_URL}/api/polymarket/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`polymarket run failed: ${res.status}`);
   return res.json();
 }
 
