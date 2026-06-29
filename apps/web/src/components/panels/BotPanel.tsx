@@ -197,6 +197,31 @@ function DaySection() {
             {d.universe.join(", ")} · cap {d.guardrails?.max_position_pct}% of day sleeve · daily-loss
             {" "}-{d.guardrails?.daily_loss_limit_pct}%
           </div>
+          {d.intraday_plan && (
+            <div
+              style={{ fontSize: 10, marginBottom: 5, display: "flex", flexWrap: "wrap",
+                gap: 10, alignItems: "baseline" }}
+              title={d.intraday_plan.note}
+            >
+              <span style={{ fontSize: 9, color: "var(--text-dim)" }}>plan</span>
+              <span style={{ fontWeight: 700,
+                color: d.intraday_plan.bias === "risk-on" ? "var(--green)"
+                  : d.intraday_plan.bias === "risk-off" ? "var(--red)" : "var(--yellow)" }}>
+                {d.intraday_plan.bias.toUpperCase()}
+              </span>
+              <span className="num">stop −{d.intraday_plan.stop_pct}% / tp +{d.intraday_plan.tp_pct}%</span>
+              <span className="num">size ×{d.intraday_plan.risk_scale}</span>
+              <span style={{ color: d.intraday_plan.require_hedge
+                ? "var(--accent, #7aa2f7)" : "var(--text-dim)" }}>
+                {d.intraday_plan.require_hedge ? "hedge required" : "hedge optional"}
+              </span>
+              {d.intraday_plan.vol_percentile != null && (
+                <span style={{ color: "var(--text-dim)" }}>
+                  vol {Math.round(d.intraday_plan.vol_percentile * 100)}%-ile
+                </span>
+              )}
+            </div>
+          )}
           {d.recent_proposals?.length ? (
             d.recent_proposals.slice(0, 8).map((p) => {
               const r = (p.rationale ?? null) as { reason?: string; kind?: string } | null;

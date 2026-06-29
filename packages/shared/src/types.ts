@@ -999,9 +999,25 @@ export interface DayProposal {
   created_at?: string;
 }
 
+export interface IntradayPlan {
+  bias: string;
+  regime: string | null;
+  vol_regime: string | null;
+  vol_percentile: number | null;
+  risk_scale: number;
+  stop_pct: number;
+  tp_pct: number;
+  hedge_ratio: number;
+  require_hedge: boolean;
+  note: string;
+  hedged_enabled?: boolean;
+  vol_signal?: VolOverlaySignal | null;
+}
+
 export interface DayStatusResponse {
   config: { enabled: boolean };
   universe: string[];
+  intraday_plan?: IntradayPlan | null;
   optimizer?: BotOptimizer;
   guardrails?: {
     max_position_pct: number;
