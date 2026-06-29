@@ -14,6 +14,7 @@ tiny so the fast loop can never get IP rate-limited.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from app.trading.bot import sleeve_holdings
 from app.trading.broker import BrokerError
 from app.trading.broker_cache import BrokerState
 from app.trading.guardrails import GuardrailConfig, buys_halted, norm_symbol
+from app.trading.intraday import UNHEDGEABLE_INDEX, build_plan, hedge_for
 from app.trading.optimizer import PortfolioOptimizer
 from app.trading.signals import intraday_signal, major_news, portfolio_conflict
 from app.ws.hub import ConnectionManager
@@ -47,6 +49,11 @@ def _to_float(v) -> float | None:
         return float(v)
     except (TypeError, ValueError):
         return None
+
+
+def _last_close(bars: dict, sym: str) -> float | None:
+    b = bars.get(sym) or bars.get(sym.replace("/", "")) or []
+    return _to_float(b[-1].get("c")) if b else None
 
 
 class DayTraderService:
@@ -123,15 +130,36 @@ class DayTraderService:
             return {"ok": True, "config": cfg, "market_open": market_open,
                     "note": "market closed and no crypto in universe", "actions": []}
 
+        # Pull the hedge instruments' bars too (price only — not iterated for
+        # signals) so hedged-bracket sizing knows their last price.
+        active_syms = {s for s, _ in active}
+        hedge_syms: set[str] = set()
+        if market_open and self._s.day_hedged_enabled:
+            for s, _a in equities:
+                h = hedge_for(s)
+                if h:
+                    hedge_syms.add(h[0])
+            hedge_syms -= active_syms
+        fetch_list = active + [(h, "equity") for h in sorted(hedge_syms)]
+
         try:
             bars = await fetch_intraday_bars(
-                self._http, self._data_key, self._data_secret, active,
+                self._http, self._data_key, self._data_secret, fetch_list,
                 minutes=self._s.day_intraday_lookback_min,
             )
             account = await self._broker.account()
             positions = await self._broker.positions()
         except BrokerError as exc:
             return {"ok": False, "detail": exc.reason, "config": cfg}
+
+        # Deterministic intraday plan from regime + the vol-overlay forecast —
+        # sets stop/take-profit %, size scale, and whether a hedge is required.
+        # NO LLM in the fast loop (the user's ask).
+        regime = self._latest_regime()
+        vol_signal = await self._vol_signal()
+        plan = build_plan(regime, vol_signal, base_stop_pct=self._s.day_stop_pct,
+                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio)
+        hedge_price = {h: _last_close(bars, h) for h in hedge_syms}
 
         equity = _to_float(account.get("equity")) or 0.0
         split = self._optimizer.latest()
@@ -171,6 +199,13 @@ class DayTraderService:
                 held_qty=held_qty, day_budget=day_budget, deployed=deployed,
                 swing_val=swing_val, equity=equity, halted=halted, news=news,
             )
+            # Transform an actionable LONG into a hedged-bracket trade (long the
+            # name + buy a beta-sized inverse-ETF hedge, each equity leg bracketed
+            # stop-loss/take-profit). Falls back to the plain decision if it can't
+            # size whole shares / a hedge.
+            if (decision.get("act") and decision.get("side") == "buy"
+                    and self._s.day_hedged_enabled):
+                decision = self._build_hedged(decision, plan, price, hedge_price, asset_class)
             actions.append(decision)
             if decision.get("act") and cfg["enabled"]:
                 submitted = await self._submit(decision, asset_class)
@@ -236,6 +271,8 @@ class DayTraderService:
     async def _submit(self, decision: dict, asset_class: str) -> bool:
         """Persist a day proposal + auto-submit the order (paper). Returns True
         on a submitted order. Mirrors the swing insert-before-submit pattern."""
+        if decision.get("mode") == "hedged":
+            return await self._submit_hedged(decision)
         asym = decision["symbol"]
         side = decision["side"]
         notional = decision.get("notional")
@@ -294,6 +331,137 @@ class DayTraderService:
         await self._broadcast("day")
         return True
 
+    # ---- hedged-bracket execution ------------------------------------------
+    def _build_hedged(self, decision: dict, plan: dict, price, hedge_price: dict,
+                      asset_class: str) -> dict:
+        """Turn a plain LONG into a hedged trade: the signal leg + a BUY of a
+        beta-sized inverse ETF, each equity leg carrying a bracket (stop-loss +
+        take-profit). Crypto's long leg can't be bracketed on Alpaca (synthetic
+        stop via the signal/news exit) but its BITI hedge — an equity — is. Falls
+        back to the plain decision when it can't size whole shares or a hedge."""
+        sym = decision["strategist_sym"]
+        notional = (decision.get("notional") or 0.0) * plan["risk_scale"]
+        if not price or price <= 0 or notional <= 0:
+            return decision
+        is_equity = asset_class == "equity"
+        stop_pct, tp_pct = plan["stop_pct"], plan["tp_pct"]
+        legs: list[dict] = []
+        if is_equity:
+            qty = int(notional // price)
+            if qty < 1:
+                return decision  # too small for a whole-share bracket
+            legs.append({"symbol": decision["symbol"], "side": "buy", "qty": qty,
+                         "asset_class": "equity", "bracket": True, "role": "primary",
+                         "entry": round(price, 2),
+                         "tp_price": round(price * (1 + tp_pct / 100), 2),
+                         "sl_price": round(price * (1 - stop_pct / 100), 2)})
+            primary_notional = qty * price
+        else:  # crypto: plain notional buy (no bracket possible)
+            legs.append({"symbol": decision["symbol"], "side": "buy",
+                         "notional": round(notional, 2), "asset_class": "crypto",
+                         "bracket": False, "role": "primary", "entry": round(price, 2)})
+            primary_notional = notional
+
+        hedge = None
+        h = hedge_for(sym)
+        if h:
+            hsym, beta, lev = h
+            hprice = hedge_price.get(hsym)
+            if hprice and hprice > 0:
+                hnotional = primary_notional * plan["hedge_ratio"] * beta / lev
+                hqty = int(hnotional // hprice)
+                if hqty >= 1 and hqty * hprice >= self._s.day_min_hedge_notional:
+                    hedge = {"symbol": hsym, "side": "buy", "qty": hqty,
+                             "asset_class": "equity", "bracket": True, "role": "hedge",
+                             "beta": beta, "lev": lev, "entry": round(hprice, 2),
+                             "tp_price": round(hprice * (1 + tp_pct / 100), 2),
+                             "sl_price": round(hprice * (1 - stop_pct / 100), 2)}
+                    legs.append(hedge)
+        if hedge is None and plan["require_hedge"] and sym not in UNHEDGEABLE_INDEX:
+            reason = "market closed" if not hedge_price else "no sizable hedge"
+            return {**decision, "act": False,
+                    "reason": f"{plan['bias']} tape requires a hedge for {sym} but {reason} — skip"}
+
+        max_loss = primary_notional * stop_pct / 100.0
+        if hedge:
+            max_loss += hedge["qty"] * hedge["entry"] * stop_pct / 100.0
+        why = decision["reason"]
+        if hedge:
+            why += (f" | hedge BUY {hedge['qty']}×{hedge['symbol']} "
+                    f"(β{hedge['beta']}/{int(hedge['lev'])}x inv)")
+        why += (f", bracket -{stop_pct:.2f}/+{tp_pct:.2f}%" if is_equity
+                else f", synthetic stop {stop_pct:.2f}%")
+        return {**decision, "mode": "hedged", "legs": legs, "plan_bias": plan["bias"],
+                "notional": round(primary_notional, 2),
+                "max_loss_est": round(max_loss, 2), "reason": why}
+
+    async def _submit_hedged(self, decision: dict) -> bool:
+        """Persist one hedged proposal + submit each leg (bracket where the asset
+        allows). Returns True if the PRIMARY leg submitted."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        legs = decision.get("legs") or []
+        rationale = {"kind": decision["signal"].get("kind"), "signal": decision["signal"],
+                     "plan_bias": decision.get("plan_bias"), "legs": legs,
+                     "news": decision.get("news"), "reason": decision["reason"]}
+        pid = self._sqlite.execute_returning_id(
+            "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, bucket, "
+            "side, order_type, qty, notional, conviction, max_loss_est, rationale, status, "
+            "blocks, sleeve) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'day')",
+            [now[:10].replace("-", ""), now, decision["symbol"], decision.get("strategist_sym"),
+             "day", "buy", "bracket", None, decision.get("notional"),
+             decision["signal"].get("strength"), decision.get("max_loss_est"),
+             json.dumps(rationale), "proposed", json.dumps([])],
+        )
+        ok_primary = False
+        for i, leg in enumerate(legs):
+            cid = f"day-{pid}-{leg['role'][0]}{i}"
+            is_crypto = leg.get("asset_class") == "crypto"
+            is_bracket = bool(leg.get("bracket"))
+            otype = "bracket" if is_bracket else "market"
+            self._sqlite.execute(
+                "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+                "order_type, qty, notional, status, submitted_at, sleeve) "
+                "VALUES (?,?,?,?,?,?,?, 'submitting', datetime('now'), 'day')",
+                [pid, cid, leg["symbol"], leg["side"], otype, leg.get("qty"), leg.get("notional")],
+            )
+            kwargs: dict = {"order_type": "market",
+                            "time_in_force": "gtc" if is_crypto else "day",
+                            "client_order_id": cid}
+            if leg.get("qty") is not None:
+                kwargs["qty"] = leg["qty"]
+            else:
+                kwargs["notional"] = leg["notional"]
+            if is_bracket:
+                kwargs["order_class"] = "bracket"
+                kwargs["take_profit_price"] = leg["tp_price"]
+                kwargs["stop_loss_price"] = leg["sl_price"]
+            try:
+                order = await self._broker.submit_order(leg["symbol"], leg["side"], **kwargs)
+            except BrokerError as exc:
+                definite = exc.status is not None and 400 <= exc.status < 500
+                self._sqlite.execute(
+                    "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                    ["rejected" if definite else "unknown", exc.reason, cid],
+                )
+                log.warning("day hedged leg %s %s rejected: %s", leg["side"], leg["symbol"], exc.reason)
+                continue
+            self._sqlite.execute(
+                "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+                "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+                [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+                 _to_float(order.get("filled_avg_price")), json.dumps(order), cid],
+            )
+            if leg["role"] == "primary":
+                ok_primary = True
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = ?, updated_at = datetime('now') WHERE id = ?",
+            ["submitted" if ok_primary else "rejected", pid],
+        )
+        log.info("day hedged %s submitted (proposal %s, %d legs)",
+                 decision["symbol"], pid, len(legs))
+        await self._broadcast("day")
+        return ok_primary
+
     # ---- reconcile / status ------------------------------------------------
     async def reconcile(self) -> dict:
         if not self._broker.enabled:
@@ -342,6 +510,10 @@ class DayTraderService:
             "recent_proposals": self._recent_proposals(),
             "disclaimer": DISCLAIMER,
         }
+        try:
+            out["intraday_plan"] = await self.intraday_plan()
+        except Exception:
+            out["intraday_plan"] = None
         if self._broker.enabled:
             try:
                 if self._has_inflight():
@@ -382,6 +554,37 @@ class DayTraderService:
                     pass
             out.append(d)
         return out
+
+    def _latest_regime(self) -> str | None:
+        row = self._duck.fetchone("SELECT regime FROM macro_composite ORDER BY ts DESC LIMIT 1")
+        return row[0] if row else None
+
+    async def _vol_signal(self) -> dict | None:
+        """The vol-overlay forecast, cached 15min (it barely moves intraday and
+        loads SPY history — don't recompute it every 1-min tick)."""
+        import time as _t
+        cache = getattr(self, "_vol_cache", None)
+        if cache and (_t.monotonic() - cache[1]) < 900:
+            return cache[0]
+        sig = None
+        try:
+            from app.ml.vol_overlay import current_signal as _vol_sig
+            loop = asyncio.get_running_loop()
+            sig = await loop.run_in_executor(None, lambda: _vol_sig(duck=self._duck))
+        except Exception:
+            sig = None
+        self._vol_cache = (sig, _t.monotonic())
+        return sig
+
+    async def intraday_plan(self) -> dict:
+        """The deterministic intraday plan (regime + vol-overlay → risk envelope +
+        hedge requirement). No LLM, no broker call — safe to poll for the UI."""
+        vol_signal = await self._vol_signal()
+        plan = build_plan(self._latest_regime(), vol_signal, base_stop_pct=self._s.day_stop_pct,
+                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio)
+        plan["hedged_enabled"] = self._s.day_hedged_enabled
+        plan["vol_signal"] = vol_signal
+        return plan
 
     async def _broadcast(self, event: str) -> None:
         try:

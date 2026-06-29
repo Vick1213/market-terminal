@@ -140,6 +140,13 @@ async def day_status(request: Request) -> dict:
     return await _day(request).status()
 
 
+@router.get("/day/plan")
+async def day_plan(request: Request) -> dict:
+    """The deterministic intraday plan the fast loop trades off (regime + vol →
+    stop/take-profit %, size scale, hedge requirement). No LLM."""
+    return await _day(request).intraday_plan()
+
+
 @router.post("/day/run")
 async def day_run(request: Request) -> dict:
     return await _day(request).run()

@@ -128,8 +128,21 @@ class AlpacaPaperBroker:
         order_type: str = "market",
         time_in_force: str = "day",
         client_order_id: str | None = None,
+        limit_price: float | None = None,
+        order_class: str | None = None,
+        take_profit_price: float | None = None,
+        stop_loss_price: float | None = None,
+        stop_loss_limit_price: float | None = None,
     ) -> dict:
         """Submit one order to the PAPER account. Exactly one of qty/notional.
+
+        Bracket / OCO / OTO exits: pass ``order_class='bracket'`` (or 'oto') with
+        ``take_profit_price`` and/or ``stop_loss_price`` — Alpaca attaches the
+        protective legs (OCO) so the position auto-exits at the stop or target,
+        the user's "fast exit with a stop loss + take profit". Advanced order
+        classes require a WHOLE-SHARE ``qty`` (no fractional / notional) and only
+        work on EQUITIES — crypto is market/limit/long-only on Alpaca, so the
+        caller must not pass a bracket for a crypto symbol.
 
         Raises BrokerError on any rejection (insufficient buying power, wash
         trade, PDT, bad symbol) carrying Alpaca's reason — callers record it,
@@ -138,6 +151,8 @@ class AlpacaPaperBroker:
         self._assert_can_trade()
         if (qty is None) == (notional is None):
             raise BrokerError("submit_order needs exactly one of qty / notional", None)
+        if order_class in ("bracket", "oco", "oto") and qty is None:
+            raise BrokerError("bracket/oco/oto orders require a whole-share qty (no notional)", None)
         body: dict = {
             "symbol": symbol,
             "side": side,
@@ -148,8 +163,19 @@ class AlpacaPaperBroker:
             body["qty"] = str(qty)
         else:
             body["notional"] = str(round(float(notional), 2))
+        if limit_price is not None:
+            body["limit_price"] = str(round(float(limit_price), 2))
         if client_order_id:
             body["client_order_id"] = client_order_id
+        if order_class:
+            body["order_class"] = order_class
+        if take_profit_price is not None:
+            body["take_profit"] = {"limit_price": str(round(float(take_profit_price), 2))}
+        if stop_loss_price is not None:
+            sl: dict = {"stop_price": str(round(float(stop_loss_price), 2))}
+            if stop_loss_limit_price is not None:
+                sl["limit_price"] = str(round(float(stop_loss_limit_price), 2))
+            body["stop_loss"] = sl
         try:
             resp = await self._http.post(
                 f"{self._base}/v2/orders", json_body=body, headers=self._headers(),

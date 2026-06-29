@@ -303,10 +303,35 @@ class Settings(BaseSettings):
     day_alloc_max_pct: float = 10.0   # day sleeve ceiling (% of equity)
     # Day trader. Small liquid universe keeps the data footprint to ~2 batched
     # snapshot calls per tick. Crypto runs 24/7; equities are market-hours gated.
-    day_universe: list[str] = ["SPY", "QQQ", "NVDA", "TSLA", "BTC/USD", "ETH/USD"]
+    day_universe: list[str] = [
+        # index legs (the market factor — traded unhedged)
+        "SPY", "QQQ", "IWM",
+        # megacap tech — hedged with QQQ
+        "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NFLX", "CRM", "ADBE",
+        # semis — hedged with SMH
+        "NVDA", "AMD", "AVGO", "MU", "QCOM", "SMCI", "TSM",
+        # crypto-proxy equities (high beta) — hedged with QQQ
+        "COIN", "MSTR",
+        # financials — hedged with XLF
+        "JPM", "BAC", "GS",
+        # energy — hedged with XLE
+        "XOM", "CVX",
+        # crypto spot (Alpaca: long-only, no hedge/bracket possible)
+        "BTC/USD", "ETH/USD",
+    ]
     day_enabled_default: bool = False  # the day bot starts HALTED too
-    day_poll_minutes: int = 3          # cadence (equity legs gated to market hours)
+    day_poll_minutes: int = 1          # cadence — fast (equity legs gated to market hours)
     day_intraday_lookback_min: int = 30  # 1-min bars window for the signal
+    # Hedged-bracket execution (the user's "hedged fast-exit, minimal risk both
+    # sides"). EQUITIES ONLY — Alpaca crypto can't short or bracket. A single-name
+    # long is paired with a beta-sized SHORT of its sector/index hedge, and each
+    # leg gets a bracket (stop-loss + take-profit) so both sides are risk-capped
+    # and exits are automatic + fast. Crypto falls back to plain entries.
+    day_hedged_enabled: bool = True
+    day_stop_pct: float = 0.8          # bracket stop-loss % from entry (tight)
+    day_tp_pct: float = 1.6            # bracket take-profit % (~2:1 reward:risk)
+    day_hedge_ratio: float = 1.0       # fraction of the beta-neutral hedge to short
+    day_min_hedge_notional: float = 50.0
     # Day-trade signal thresholds.
     day_breakout_buffer_pct: float = 0.05   # price within this % of the window high = breakout
     day_momentum_min_pct: float = 0.30      # min intraday move to call it momentum
