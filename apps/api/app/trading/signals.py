@@ -33,7 +33,8 @@ def intraday_signal(
     """Single setup from recent 1-min bars. direction in {buy, sell, none};
     strength ~1-3. 'sell' means fade/exit, not go short."""
     none = {"kind": "none", "direction": "none", "strength": 0.0,
-            "last": None, "vwap": None, "z": 0.0, "detail": "insufficient bars"}
+            "last": None, "vwap": None, "z": 0.0, "sigma": None,
+            "win_high": None, "win_low": None, "detail": "insufficient bars"}
     if len(bars) < 5:
         return none
     closes = [b["c"] for b in bars]
@@ -47,28 +48,34 @@ def intraday_signal(
     std = (sum((c - mean) ** 2 for c in closes) / len(closes)) ** 0.5
     z = (last - vwap) / std if std else 0.0
 
+    # Structure levels the bracket needs (σ = intraday close stdev), exposed so
+    # the day trader can size vol-normalized, structure-aware stops/targets.
+    struct = {"sigma": round(std, 4), "win_high": round(win_high, 4),
+              "win_low": round(win_low, 4)}
+
     # momentum / breakout: near the window high with a real intraday move.
     near_high = last >= win_high * (1 - breakout_buffer_pct / 100.0)
     if near_high and intraday_ret >= momentum_min_pct and last >= vwap:
         return {"kind": "momentum", "direction": "buy",
                 "strength": round(min(3.0, intraday_ret / max(momentum_min_pct, 1e-6)), 2),
-                "last": last, "vwap": round(vwap, 4), "z": round(z, 2),
+                "last": last, "vwap": round(vwap, 4), "z": round(z, 2), **struct,
                 "detail": f"breakout +{intraday_ret:.2f}% intraday, pressing {win_high:.2f} high"}
 
     # mean reversion: stretched from VWAP.
     if z <= -reversion_z:
         return {"kind": "reversion", "direction": "buy",
                 "strength": round(min(3.0, abs(z) / reversion_z), 2),
-                "last": last, "vwap": round(vwap, 4), "z": round(z, 2),
+                "last": last, "vwap": round(vwap, 4), "z": round(z, 2), **struct,
                 "detail": f"oversold {z:.1f}σ below VWAP ({win_low:.2f} low) — fade up"}
     if z >= reversion_z:
         return {"kind": "reversion", "direction": "sell",
                 "strength": round(min(3.0, abs(z) / reversion_z), 2),
-                "last": last, "vwap": round(vwap, 4), "z": round(z, 2),
+                "last": last, "vwap": round(vwap, 4), "z": round(z, 2), **struct,
                 "detail": f"overbought {z:.1f}σ above VWAP — take profit / fade"}
 
     return {"kind": "none", "direction": "none", "strength": 0.0,
-            "last": last, "vwap": round(vwap, 4), "z": round(z, 2), "detail": "no setup"}
+            "last": last, "vwap": round(vwap, 4), "z": round(z, 2), **struct,
+            "detail": "no setup"}
 
 
 def major_news(duck, symbol: str, *, max_age_min: int, min_abs_score: float,

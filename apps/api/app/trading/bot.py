@@ -508,6 +508,19 @@ class TradingBotService:
             "disclaimer": DISCLAIMER,
         }
 
+    def _latest_price(self, symbol: str) -> float | None:
+        """Latest known close for whole-share sizing of non-fractionable buys.
+        Reads the cached daily history (any source) — None if we have no price."""
+        try:
+            row = self._duck.fetchone(
+                "SELECT close FROM ts_price WHERE symbol = ? AND close IS NOT NULL "
+                "ORDER BY ts DESC LIMIT 1",
+                [symbol],
+            )
+            return float(row[0]) if row and row[0] is not None else None
+        except Exception:
+            return None
+
     # ---- execute (the human gate) -----------------------------------------
     async def execute(self, proposal_id: int) -> dict:
         """Submit one proposed order to the paper account after re-validating it
@@ -570,6 +583,26 @@ class TradingBotService:
         notional = fp.get("notional")
         qty = fp.get("qty")
 
+        # Non-fractionable assets (some bond / income ETFs like XFIV) REJECT
+        # notional / fractional orders. Size them in WHOLE shares instead of
+        # re-proposing and re-rejecting every cycle.
+        if side == "buy" and notional and not await self._broker.fractionable(symbol):
+            price = self._latest_price(symbol)
+            whole = int(notional // price) if price and price > 0 else 0
+            if whole >= 1:
+                qty, notional = float(whole), None
+            else:
+                reason = (f"{symbol} is not fractionable; ${notional:,.0f} is below one share "
+                          f"(${price:,.2f})" if price else
+                          f"{symbol} is not fractionable and no price is available to size whole shares")
+                self._sqlite.execute(
+                    "UPDATE bot_proposals SET status = 'blocked', blocks = ?, "
+                    "updated_at = datetime('now') WHERE id = ?",
+                    [json.dumps([reason]), proposal_id],
+                )
+                await self._broadcast("execute")
+                return {"ok": False, "detail": reason, "blocks": [reason]}
+
         # Don't stack a second order on a symbol+side that already has a resting
         # bot order — propose() mints fresh proposal ids each run, so without
         # this a re-propose+execute could double up while the first is unfilled.
@@ -592,17 +625,20 @@ class TradingBotService:
         # Record the intent BEFORE submitting (deterministic client_order_id),
         # so even a lost response leaves a row reconcile() can resolve against
         # the broker — no phantom, untracked order.
+        # Exactly one of qty / notional is set: sells and non-fractionable buys
+        # carry a whole-share qty; ordinary (fractionable) buys carry a dollar
+        # notional. Keying off "is qty set?" — not the side — is what lets a
+        # non-fractionable BUY (e.g. XFIV, sized to whole shares above) go through.
+        use_notional = notional if qty is None else None
         self._sqlite.execute(
             "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
             "order_type, qty, notional, status, submitted_at, sleeve) "
             "VALUES (?,?,?,?,?,?,?, 'submitting', datetime('now'), 'swing')",
-            [proposal_id, client_order_id, symbol, side, "market",
-             qty if side == "sell" else None, notional if side == "buy" else None],
+            [proposal_id, client_order_id, symbol, side, "market", qty, use_notional],
         )
         try:
             order = await self._broker.submit_order(
-                symbol, side, qty=qty if side == "sell" else None,
-                notional=notional if side == "buy" else None,
+                symbol, side, qty=qty, notional=use_notional,
                 order_type="market", time_in_force=tif,
                 client_order_id=client_order_id,
             )

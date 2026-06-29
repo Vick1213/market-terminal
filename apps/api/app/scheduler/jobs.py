@@ -646,6 +646,43 @@ def build_scheduler(
             max_instances=1, coalesce=True, misfire_grace_time=60, jitter=10,
         )
 
+        # Phase 3 learning loop: end-of-day review ~15 min after the US close.
+        # Mines the day_signal_journal for systematic mistakes + parameter
+        # suggestions. Builds a fresh SqliteStore in the closure (SQLite/WAL is
+        # multi-connection safe) and reuses the live `duck` reader so we never
+        # open a second DuckDB read-write connection. The LLM client is built
+        # from settings (deterministic template fallback is always on).
+        async def _day_review() -> None:
+            import asyncio as _asyncio
+
+            from app.db.sqlite import SqliteStore
+            from app.edge.llm import LlmClient
+            from app.trading.day_review import review_day
+
+            sq = SqliteStore(settings.sqlite_path)
+            llm = LlmClient(
+                provider=settings.llm_provider, model=settings.llm_model,
+                api_key=settings.llm_api_key, base_url=settings.llm_base_url,
+                ollama_url=settings.ollama_url, ollama_model=settings.ollama_model,
+                timeout=settings.llm_timeout_seconds,
+            )
+            try:
+                loop = _asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, lambda: review_day(sq, duck, settings, llm=llm)
+                )
+            finally:
+                sq.close()
+
+        scheduler.add_job(
+            _day_review,
+            trigger="cron",
+            hour=16, minute=15,
+            timezone="America/New_York",
+            id="trading_day_review",
+            max_instances=1, coalesce=True, misfire_grace_time=3600,
+        )
+
     # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.
     # Logs every signal as-knowable-today into a separate snapshots DB so the
     # recent-only sources accrete a backtestable PIT history. Reuses the live

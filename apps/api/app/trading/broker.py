@@ -117,6 +117,13 @@ class AlpacaPaperBroker:
         )
         return data if isinstance(data, list) else []
 
+    async def get_asset(self, symbol: str) -> dict:
+        """Asset metadata (tradable, fractionable, ...). Crypto uses the slashed
+        form ('BTC/USD'); equities the plain ticker."""
+        if not self.enabled:
+            raise BrokerError("Alpaca paper keys not configured", None)
+        return await self._get_json(f"/v2/assets/{symbol}")
+
     # ---- writes (gated) ----------------------------------------------------
     async def submit_order(
         self,
@@ -133,6 +140,8 @@ class AlpacaPaperBroker:
         take_profit_price: float | None = None,
         stop_loss_price: float | None = None,
         stop_loss_limit_price: float | None = None,
+        trail_percent: float | None = None,
+        trail_price: float | None = None,
     ) -> dict:
         """Submit one order to the PAPER account. Exactly one of qty/notional.
 
@@ -144,6 +153,12 @@ class AlpacaPaperBroker:
         work on EQUITIES — crypto is market/limit/long-only on Alpaca, so the
         caller must not pass a bracket for a crypto symbol.
 
+        Trailing stops: pass ``order_type='trailing_stop'`` with exactly one of
+        ``trail_percent`` (e.g. 1.5 → trails 1.5% below the high-water mark) or
+        ``trail_price`` (a dollar give-back). Used for the momentum exit so winners
+        run while a fixed stop distance below the peak protects the gain. Like
+        brackets, trailing stops are EQUITIES-only and need a whole-share ``qty``.
+
         Raises BrokerError on any rejection (insufficient buying power, wash
         trade, PDT, bad symbol) carrying Alpaca's reason — callers record it,
         they do not retry.
@@ -153,6 +168,11 @@ class AlpacaPaperBroker:
             raise BrokerError("submit_order needs exactly one of qty / notional", None)
         if order_class in ("bracket", "oco", "oto") and qty is None:
             raise BrokerError("bracket/oco/oto orders require a whole-share qty (no notional)", None)
+        if order_type == "trailing_stop":
+            if (trail_percent is None) == (trail_price is None):
+                raise BrokerError("trailing_stop needs exactly one of trail_percent / trail_price", None)
+            if qty is None:
+                raise BrokerError("trailing_stop orders require a whole-share qty (no notional)", None)
         body: dict = {
             "symbol": symbol,
             "side": side,
@@ -176,6 +196,10 @@ class AlpacaPaperBroker:
             if stop_loss_limit_price is not None:
                 sl["limit_price"] = str(round(float(stop_loss_limit_price), 2))
             body["stop_loss"] = sl
+        if trail_percent is not None:
+            body["trail_percent"] = str(round(float(trail_percent), 4))
+        if trail_price is not None:
+            body["trail_price"] = str(round(float(trail_price), 2))
         try:
             resp = await self._http.post(
                 f"{self._base}/v2/orders", json_body=body, headers=self._headers(),

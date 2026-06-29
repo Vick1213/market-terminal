@@ -291,3 +291,61 @@ async def series(
         return out
 
     return SeriesResponse(series=await loop.run_in_executor(None, _q))
+
+
+# --- intraday 1-minute bars (for the day-trader trade chart) ------------------
+# The daily PRICE: series is too coarse for a fast-loop trade. This serves the
+# same batched 1-min bars the day trader itself uses (Alpaca data API), so the
+# expandable TradeChart can render the actual intraday timeframe with the trade's
+# entry / take-profit / stop-loss levels drawn against real candles.
+class IntradayBar(BaseModel):
+    t: int  # unix seconds (UTC)
+    o: float
+    h: float
+    l: float
+    c: float
+    v: float = 0.0
+
+
+class IntradayResponse(BaseModel):
+    symbol: str
+    bars: list[IntradayBar]
+
+
+def _parse_ts(ts) -> int:
+    """Alpaca bar ts -> unix seconds. Accepts ISO8601 ('...Z') or epoch."""
+    if isinstance(ts, (int, float)):
+        return int(ts)
+    try:
+        s = str(ts).replace("Z", "+00:00")
+        return int(datetime.fromisoformat(s).timestamp())
+    except (ValueError, TypeError):
+        return 0
+
+
+@router.get("/series/intraday", response_model=IntradayResponse)
+async def series_intraday(
+    request: Request,
+    symbol: str = Query(description="ticker, e.g. NVDA or ETH/USD"),
+    minutes: int = Query(default=180, le=1440, description="lookback window in minutes"),
+) -> IntradayResponse:
+    settings = request.app.state.settings
+    http = request.app.state.http
+    key, secret = settings.alpaca_key_id, settings.alpaca_secret_key
+    if not key or not secret:
+        return IntradayResponse(symbol=symbol, bars=[])
+    asset_class = "crypto" if "/USD" in symbol.upper() or symbol.upper().endswith("USD") else "equity"
+    try:
+        from app.ingest.alpaca import fetch_intraday_bars
+        data = await fetch_intraday_bars(http, key, secret, [(symbol, asset_class)], minutes=minutes)
+    except Exception:
+        return IntradayResponse(symbol=symbol, bars=[])
+    # fetch_intraday_bars keys by the Alpaca symbol; tolerate slash/no-slash.
+    bars = (data.get(symbol) or data.get(symbol.replace("/", ""))
+            or (next(iter(data.values())) if len(data) == 1 else []))
+    out = [
+        IntradayBar(t=_parse_ts(b.get("ts")), o=float(b["o"]), h=float(b["h"]),
+                    l=float(b["l"]), c=float(b["c"]), v=float(b.get("v") or 0.0))
+        for b in bars if b.get("c") is not None
+    ]
+    return IntradayResponse(symbol=symbol, bars=out)

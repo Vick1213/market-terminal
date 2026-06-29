@@ -48,6 +48,8 @@ import type {
   ClevelandNowcastResponse,
   PolicyRiskResponse,
   FedSpeechesResponse,
+  TradesResponse,
+  DayReview,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -81,6 +83,17 @@ export async function fetchSeries(ids: string[], days = 365): Promise<SeriesResp
   const qs = new URLSearchParams({ ids: ids.join(","), days: String(days) });
   const res = await fetch(`${API_URL}/api/series?${qs}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`series request failed: ${res.status}`);
+  return res.json();
+}
+
+export interface IntradayBar { t: number; o: number; h: number; l: number; c: number; v: number }
+export interface IntradayResponse { symbol: string; bars: IntradayBar[] }
+
+/** 1-minute bars for the day-trader trade chart (Alpaca intraday, last `minutes`). */
+export async function fetchIntradayBars(symbol: string, minutes = 180): Promise<IntradayResponse> {
+  const qs = new URLSearchParams({ symbol, minutes: String(minutes) });
+  const res = await fetch(`${API_URL}/api/series/intraday?${qs}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`intraday request failed: ${res.status}`);
   return res.json();
 }
 
@@ -345,6 +358,29 @@ export async function setDayEnabled(enabled: boolean): Promise<{ enabled: boolea
     method: "POST",
   });
   if (!res.ok) throw new Error(`day ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// --- Tradebook: paired entry/exit trades + the day-sleeve learning loop ---
+export async function fetchTrades(sleeve?: string, status?: string): Promise<TradesResponse> {
+  const qs = new URLSearchParams();
+  if (sleeve) qs.set("sleeve", sleeve);
+  if (status) qs.set("status", status);
+  const q = qs.toString();
+  const res = await fetch(`${API_URL}/api/bot/trades${q ? `?${q}` : ""}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`trades request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchDayReview(): Promise<DayReview> {
+  const res = await fetch(`${API_URL}/api/bot/day/review`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`day review request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runDayReview(): Promise<DayReview> {
+  const res = await fetch(`${API_URL}/api/bot/day/review/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`day review run failed: ${res.status}`);
   return res.json();
 }
 

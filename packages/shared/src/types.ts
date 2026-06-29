@@ -986,6 +986,115 @@ export interface DayAction {
   max_loss_est?: number;
 }
 
+// One leg of a (possibly hedged) intraday bracket. The "primary" leg carries
+// the tradeable entry / take-profit / stop-loss prices the bot submitted.
+export interface DayLeg {
+  symbol: string;
+  side: string;
+  qty: number | null;
+  asset_class?: string;
+  bracket?: boolean;
+  role: "primary" | "hedge" | string;
+  entry?: number | null;
+  tp_price?: number | null;
+  sl_price?: number | null;
+  beta?: number | null;
+  lev?: number | null;
+}
+
+// Decoded shape of DayProposal.rationale for hedged-bracket day trades.
+export interface DayProposalRationale {
+  kind?: string | null;
+  reason?: string;
+  signal?: Record<string, unknown> | null;
+  plan_bias?: string | null;
+  legs?: DayLeg[];
+  [k: string]: unknown;
+}
+
+// Price levels to draw on a trade's chart as horizontal lines.
+export interface TradeLevels {
+  entry?: number | null;
+  tp?: number | null;
+  sl?: number | null;
+}
+
+// --- Tradebook: one paired entry/exit round-trip (GET /api/bot/trades) ---
+export interface Trade {
+  sleeve: string; // swing | day
+  symbol: string;
+  qty: number;
+  entry_price: number | null;
+  entry_time: string | null;
+  exit_price: number | null;
+  exit_time: string | null;
+  status: "open" | "closed";
+  pnl: number | null; // closed: realized; open: marked to last price (or null)
+  pnl_pct: number | null;
+  hold_minutes: number | null;
+  reason: string | null; // short "why" from the entry order's proposal rationale
+}
+
+export interface TradesResponse {
+  trades: Trade[];
+}
+
+// --- Learning loop: GET /api/bot/day/review ({} when none persisted) ---
+export interface DayReviewStatLeg {
+  n: number;
+  wins: number;
+  losses: number;
+  win_rate: number | null;
+  avg_pnl: number | null;
+  total_pnl: number | null;
+}
+
+export interface DayReviewStats {
+  trade_date_rows?: number;
+  counts_by_decision?: Record<string, number>;
+  by_signal_kind?: Record<string, DayReviewStatLeg>;
+  by_regime?: Record<string, DayReviewStatLeg>;
+  by_symbol?: Record<string, DayReviewStatLeg>;
+  conviction?: {
+    winners_avg: number | null;
+    losers_avg: number | null;
+    n_winners: number;
+    n_losers: number;
+  };
+  top_skip_reasons?: { reason: string; count: number }[];
+  top_block_reasons?: { reason: string; count: number }[];
+  hedge_rebalances?: number;
+  n_acted?: number;
+  skip_rate?: number | null;
+}
+
+export interface DayReviewFinding {
+  severity: "info" | "warn" | "critical" | string;
+  title: string;
+  detail: string;
+  tag: string;
+}
+
+export interface DayReviewSuggestion {
+  param: string;
+  current: number | boolean | string;
+  proposed: number | boolean | string;
+  rationale: string;
+  finding?: string;
+}
+
+// {} (empty object) when no review has been persisted yet — every field optional.
+export interface DayReview {
+  trade_date?: string;
+  created_at?: string;
+  stats?: DayReviewStats;
+  findings?: DayReviewFinding[];
+  suggestions?: DayReviewSuggestion[];
+  summary?: string;
+  model?: string;
+  no_data?: boolean;
+}
+
 export interface DayProposal {
   id: number;
   symbol: string;
@@ -1014,6 +1123,49 @@ export interface IntradayPlan {
   vol_signal?: VolOverlaySignal | null;
 }
 
+// --- market + portfolio context surfaced on the day-bot status endpoint ---
+// Snapshot of the macro/strategist regime the day sleeve is trading into.
+export interface MarketContext {
+  regime: string;
+  composite_score: number | null;
+  stress_on: boolean;
+  dealer_gamma: "short" | "long" | "unknown" | string;
+  vol_pctile: number | null;
+  vol_regime: string | null;
+  suggested_exposure: number | null;
+  breadth_pct: number | null;
+  strategist_favor: string[];
+  strategist_avoid: string[];
+  risk_on: boolean;
+  notes: string[];
+}
+
+// Aggregate broker portfolio state (both sleeves) with net-beta + sector tilt.
+export interface PortfolioStatePosition {
+  symbol: string;
+  qty: number;
+  market_value: number;
+  beta: number;
+  sector: string;
+  asset_class: string;
+  unrealized_pl: number;
+}
+
+export interface PortfolioState {
+  equity: number;
+  cash: number;
+  gross_long: number;
+  gross_short: number;
+  net_beta_dollars: number;
+  net_beta_pct: number;
+  sector_exposure: Record<string, number>;
+  swing_value: number;
+  day_value: number;
+  day_budget: number;
+  day_remaining: number;
+  positions: PortfolioStatePosition[];
+}
+
 export interface DayStatusResponse {
   config: { enabled: boolean };
   universe: string[];
@@ -1026,6 +1178,8 @@ export interface DayStatusResponse {
   };
   market_open?: boolean;
   holdings?: Record<string, number>;
+  market_context?: MarketContext | null;
+  portfolio_state?: PortfolioState | null;
   recent_orders: BotOrder[];
   recent_proposals: DayProposal[];
   account_error?: string;

@@ -18,6 +18,8 @@ timer. The handlers are thin — all logic lives in TradingBotService.
 
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Body, Query, Request
 
 from app.trading.broker import BrokerError
@@ -160,6 +162,45 @@ async def day_enable(request: Request) -> dict:
 @router.post("/day/disable")
 async def day_disable(request: Request) -> dict:
     return await _day(request).set_enabled(False)
+
+
+@router.get("/day/review")
+async def day_review_get(request: Request, date: str | None = Query(None)) -> dict:
+    """Latest end-of-day review (or ?date=YYYY-MM-DD). {} if none persisted."""
+    from app.trading.day_review import latest_review
+
+    return latest_review(request.app.state.sqlite, date)
+
+
+@router.post("/day/review/run")
+async def day_review_run(request: Request, date: str | None = Query(None)) -> dict:
+    """Run the learning-loop review now (backfills P&L + writes day_review)."""
+    import functools
+
+    from app.trading.day_review import review_day
+
+    state = request.app.state
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        functools.partial(
+            review_day, state.sqlite, state.duck, state.settings,
+            trade_date=date, llm=getattr(state, "llm", None),
+        ),
+    )
+
+
+@router.get("/trades")
+async def trades(request: Request, sleeve: str | None = Query(None),
+                 status: str | None = Query(None)) -> dict:
+    """Trade-level (paired entry/exit) view over bot_orders. FIFO-pairs filled
+    buys with subsequent filled sells per symbol+sleeve; open lots are marked to
+    the latest ts_price close. ?sleeve=swing|day  ?status=open|closed."""
+    from app.trading.tradebook import list_trades
+
+    state = request.app.state
+    return {"trades": list_trades(state.sqlite, sleeve=sleeve, status=status,
+                                  duck=getattr(state, "duck", None))}
 
 
 @router.get("/orders")

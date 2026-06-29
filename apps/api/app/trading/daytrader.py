@@ -17,6 +17,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 from app.db.duck import DuckStore
@@ -25,8 +26,11 @@ from app.ingest.alpaca import alpaca_symbol, fetch_intraday_bars
 from app.trading.bot import sleeve_holdings
 from app.trading.broker import BrokerError
 from app.trading.broker_cache import BrokerState
+from app.trading.context import (
+    DAY_HEDGE_SYMBOL, beta_for, build_market_context, build_portfolio_state, sector_for,
+)
 from app.trading.guardrails import GuardrailConfig, buys_halted, norm_symbol
-from app.trading.intraday import UNHEDGEABLE_INDEX, build_plan, hedge_for
+from app.trading.intraday import UNHEDGEABLE_INDEX, build_plan, compute_bracket, hedge_for
 from app.trading.optimizer import PortfolioOptimizer
 from app.trading.signals import intraday_signal, major_news, portfolio_conflict
 from app.ws.hub import ConnectionManager
@@ -54,6 +58,22 @@ def _to_float(v) -> float | None:
 def _last_close(bars: dict, sym: str) -> float | None:
     b = bars.get(sym) or bars.get(sym.replace("/", "")) or []
     return _to_float(b[-1].get("c")) if b else None
+
+
+def _session_date() -> str:
+    """US-market session date (ET, DST approximated as UTC-4) — groups a day's
+    journal/review rows. Good enough for end-of-day batching."""
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) - timedelta(hours=4)).strftime("%Y-%m-%d")
+
+
+def _sellable_qty(held_qty: float, broker_qty: float | None) -> float:
+    """Largest qty we can actually sell. Capped at the broker's reported
+    available balance (crypto fees are taken in-kind, so the fillable qty is a
+    hair below what we bought) and floored to 6dp so the request never rounds
+    *up* past what's available — which is what got ETH/USD sells rejected."""
+    qty = held_qty if broker_qty is None else min(held_qty, broker_qty)
+    return math.floor(max(0.0, qty) * 1_000_000) / 1_000_000
 
 
 class DayTraderService:
@@ -141,6 +161,13 @@ class DayTraderService:
                     hedge_syms.add(h[0])
             hedge_syms -= active_syms
         fetch_list = active + [(h, "equity") for h in sorted(hedge_syms)]
+        # The net-beta hedge instrument (SH) is NOT in the universe or the per-name
+        # inverse-ETF set, so its price was never fetched — _net_beta_hedge always
+        # saw sh_price=None and silently placed ZERO hedges. Pull its bars too.
+        if (market_open and self._s.day_net_beta_enabled
+                and DAY_HEDGE_SYMBOL not in active_syms
+                and DAY_HEDGE_SYMBOL not in hedge_syms):
+            fetch_list.append((DAY_HEDGE_SYMBOL, "equity"))
 
         try:
             bars = await fetch_intraday_bars(
@@ -158,7 +185,11 @@ class DayTraderService:
         regime = self._latest_regime()
         vol_signal = await self._vol_signal()
         plan = build_plan(regime, vol_signal, base_stop_pct=self._s.day_stop_pct,
-                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio)
+                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio,
+                          stop_sigma=self._s.day_stop_sigma, tp_sigma=self._s.day_tp_sigma,
+                          trail_sigma=self._s.day_trail_sigma,
+                          reversion_stop_sigma=self._s.day_reversion_stop_sigma,
+                          min_rr=self._s.day_min_rr)
         hedge_price = {h: _last_close(bars, h) for h in hedge_syms}
 
         equity = _to_float(account.get("equity")) or 0.0
@@ -169,11 +200,35 @@ class DayTraderService:
         swing_hold = sleeve_holdings(self._sqlite, "swing")
         pos_price = {norm_symbol(p.get("symbol", "")): _to_float(p.get("current_price"))
                      for p in positions}
+        # Actually-sellable balance per name. Crypto fees are taken in-kind, so the
+        # fillable balance sits a hair below the qty we bought — selling the
+        # recorded fill qty gets rejected for "insufficient balance". qty_available
+        # also nets out shares tied up in open orders.
+        pos_avail = {norm_symbol(p.get("symbol", "")):
+                     _to_float(p.get("qty_available") or p.get("qty"))
+                     for p in positions}
         halted = buys_halted(account, self._guard)
-        deployed = sum((day_hold.get(norm_symbol(s), 0.0)) * (pos_price.get(norm_symbol(s)) or 0.0)
-                       for s, _ in items)
 
-        actions: list[dict] = []
+        # --- coherent shared context (what the day trader now "knows") ----------
+        strategist = None
+        try:
+            from app.edge.strategist import latest_snapshot
+            strategist = latest_snapshot(self._duck)
+        except Exception:
+            strategist = None
+        market_ctx = build_market_context(self._duck, vol_signal=vol_signal, strategist=strategist)
+        portfolio = build_portfolio_state(account, positions, self._sqlite, day_budget=day_budget)
+        # Day-sleeve capital in use = the sleeve's value bounded by ACTUAL broker
+        # positions (incl. inverse-ETF hedges). Using portfolio.day_value rather
+        # than the raw ledger means a desynced/phantom ledger entry (bracket exit
+        # that filled but wasn't recorded) can NEVER again silently fill the budget
+        # and freeze the day trader.
+        deployed = portfolio.day_value
+        run_id = datetime.now(timezone.utc).strftime("%Y%m%d%H%M%S")
+        trade_date = _session_date()
+
+        # --- 1) evaluate EVERY candidate (no orders yet) ------------------------
+        candidates: list[dict] = []
         for sym, asset_class in active:
             mapped = alpaca_symbol(sym, asset_class)
             if mapped is None:
@@ -193,55 +248,82 @@ class DayTraderService:
                                min_abs_score=self._s.day_news_min_abs_score,
                                min_outlets=self._s.day_news_min_outlets)
                     if asset_class == "equity" else None)
-
             decision = self._decide(
                 sym=sym, asym=asym, asset_class=asset_class, sig=sig, price=price,
-                held_qty=held_qty, day_budget=day_budget, deployed=deployed,
-                swing_val=swing_val, equity=equity, halted=halted, news=news,
+                held_qty=held_qty, broker_qty=pos_avail.get(n), day_budget=day_budget,
+                deployed=deployed, swing_val=swing_val, equity=equity, halted=halted,
+                news=news,
             )
-            # Transform an actionable LONG into a hedged-bracket trade (long the
-            # name + buy a beta-sized inverse-ETF hedge, each equity leg bracketed
-            # stop-loss/take-profit). Falls back to the plain decision if it can't
-            # size whole shares / a hedge.
-            if (decision.get("act") and decision.get("side") == "buy"
-                    and self._s.day_hedged_enabled):
-                decision = self._build_hedged(decision, plan, price, hedge_price, asset_class)
-            actions.append(decision)
-            if decision.get("act") and cfg["enabled"]:
-                submitted = await self._submit(decision, asset_class)
-                decision["submitted"] = submitted
-                if submitted and decision["side"] == "buy":
-                    deployed += decision.get("notional") or 0.0
+            decision["price"] = price
+            decision["sector"] = sector_for(asym)
+            decision["conviction"] = self._conviction(decision, sig, market_ctx)
+            candidates.append(decision)
+
+        # --- 2) segmentation: rank buys by conviction, carve the day budget,
+        #        cap per-tick / per-sector, respect the strategist's avoid list ---
+        self._segment(candidates, portfolio)
+
+        # --- 3) execute: exits/sells always go; selected longs go BRACKETED
+        #        (no per-trade hedge — the net-beta hedge below carries the risk) -
+        actions: list[dict] = []
+        for d in candidates:
+            out = d
+            if d.get("act") and d.get("side") == "sell":
+                if cfg["enabled"]:
+                    d["submitted"] = await self._submit(d, d["asset_class"])
+            elif d.get("selected"):
+                out = self._build_long(d, plan, d.get("price"), d["asset_class"])
+                # Only submit if _build_long actually produced a tradeable order
+                # (it returns act=False when an equity can't be sized to a whole
+                # bracketable share — never open a naked, stop-less day position).
+                if out.get("act") and cfg["enabled"]:
+                    out["submitted"] = await self._submit(out, d["asset_class"])
+                    if out.get("submitted"):
+                        deployed += out.get("notional") or 0.0
+            actions.append(out)
+            self._journal(run_id, trade_date, out, market_ctx)
+
+        # --- 4) net-beta hedge ONCE (single SH position to a target, not a pile) -
+        if cfg["enabled"] and self._s.day_net_beta_enabled and market_open:
+            hedge = await self._net_beta_hedge(account, positions, bars)
+            if hedge:
+                actions.append(hedge)
+                self._journal(run_id, trade_date, hedge, market_ctx)
 
         await self.reconcile()
         return {
             "ok": True, "config": cfg, "market_open": market_open,
             "day_pct": day_pct, "day_budget": round(day_budget, 2),
             "deployed": round(deployed, 2), "actions": actions,
+            "market_context": market_ctx.to_dict(),
+            "portfolio_state": portfolio.to_dict(),
             "disclaimer": DISCLAIMER,
         }
 
-    def _decide(self, *, sym, asym, asset_class, sig, price, held_qty, day_budget,
-                deployed, swing_val, equity, halted, news) -> dict:
+    def _decide(self, *, sym, asym, asset_class, sig, price, held_qty, broker_qty,
+                day_budget, deployed, swing_val, equity, halted, news) -> dict:
         """Pure-ish decision for one symbol: hold / buy / sell, with reasons."""
         base = {"symbol": asym, "strategist_sym": sym, "asset_class": asset_class,
                 "signal": sig, "news": news, "act": False, "side": None,
                 "notional": None, "qty": None, "reason": ""}
         direction = sig.get("direction")
         strength = float(sig.get("strength") or 0.0)
+        sell_qty = _sellable_qty(held_qty, broker_qty)
 
         # Major adverse news while holding -> exit regardless of the setup.
         if news and news["score"] < 0 and held_qty > 0:
-            return {**base, "act": True, "side": "sell", "qty": round(held_qty, 6),
+            if sell_qty <= 0:
+                return {**base, "reason": "adverse news but no sellable day balance"}
+            return {**base, "act": True, "side": "sell", "qty": sell_qty,
                     "reason": f"major adverse news (score {news['score']:+.2f}) — exit day position"}
 
         if direction == "none" or strength < self._s.day_min_signal:
             return {**base, "reason": sig.get("detail", "no actionable setup")}
 
         if direction == "sell":
-            if held_qty <= 0:
+            if sell_qty <= 0:
                 return {**base, "reason": "fade signal but no day position to trim"}
-            return {**base, "act": True, "side": "sell", "qty": round(held_qty, 6),
+            return {**base, "act": True, "side": "sell", "qty": sell_qty,
                     "reason": f"{sig['detail']} — close day position"}
 
         # direction == buy
@@ -268,6 +350,259 @@ class DayTraderService:
                 "max_loss_est": round(notional * stop / 100.0, 2),
                 "reason": f"{sig['kind']} buy ({sig['detail']})"}
 
+    # ---- Phase 2: conviction / segmentation / net-beta hedge ---------------
+    def _conviction(self, decision: dict, sig: dict, mc) -> float:
+        """Rank score for a BUY candidate, shaped by the shared context: the
+        strategist's avoid list is a hard veto (0), its favored sectors get a
+        boost, and an unfriendly tape down-weights (stress kills) momentum chasing.
+        Non-actionable / non-buy candidates score 0."""
+        if not (decision.get("act") and decision.get("side") == "buy"):
+            return 0.0
+        score = float(sig.get("strength") or 0.0)
+        sec = (decision.get("sector") or "other").lower()
+        sym = (decision.get("strategist_sym") or decision.get("symbol") or "").lower()
+
+        def _hit(words: list[str]) -> bool:
+            for w in words:
+                w = (w or "").lower()
+                if not w:
+                    continue
+                if w == sym or w in sec or sec in w:
+                    return True
+            return False
+
+        if self._s.day_respect_strategist and _hit(mc.strategist_avoid):
+            decision["reason"] += " | vetoed: strategist avoids this sleeve"
+            return 0.0
+        if _hit(mc.strategist_favor):
+            score *= 1.25
+        kind = sig.get("kind")
+        if mc.stress_on and kind == "momentum":
+            decision["reason"] += " | vetoed: no momentum-chasing in stress"
+            return 0.0
+        if not mc.risk_on and kind == "momentum":
+            score *= 0.4
+        return round(score, 3)
+
+    def _segment(self, candidates: list[dict], portfolio) -> None:
+        """Pick which BUY candidates actually run this tick. Marks each with
+        ``selected`` and annotates skips. Ranks by conviction, then enforces:
+        per-tick count cap, per-sector cap, and the remaining day budget — so the
+        sleeve carves its small risk pool deliberately instead of acting on every
+        name that twitches."""
+        for c in candidates:
+            c.setdefault("selected", False)
+        buys = sorted((c for c in candidates if c.get("act") and c.get("side") == "buy"),
+                      key=lambda c: c.get("conviction", 0.0), reverse=True)
+        remaining = portfolio.day_remaining
+        per_sector: dict[str, int] = {}
+        picked = 0
+        for c in buys:
+            if c.get("conviction", 0.0) <= 0:
+                continue  # reason already annotated by _conviction
+            if picked >= self._s.day_max_new_positions:
+                c["reason"] += " | skipped: hit max new positions this tick"
+                continue
+            sec = c.get("sector", "other")
+            if per_sector.get(sec, 0) >= self._s.day_max_per_sector:
+                c["reason"] += f" | skipped: {sec} sector cap this tick"
+                continue
+            notional = c.get("notional") or 0.0
+            if notional > remaining + 1e-6:
+                c["reason"] += f" | skipped: ${notional:,.0f} over ${remaining:,.0f} day budget left"
+                continue
+            c["selected"] = True
+            picked += 1
+            per_sector[sec] = per_sector.get(sec, 0) + 1
+            remaining -= notional
+
+    def _build_long(self, decision: dict, plan: dict, price, asset_class: str) -> dict:
+        """A selected long as a single vol-normalized, structure-aware leg, sized
+        and shaped by the setup (no per-trade inverse-ETF hedge — the net-beta
+        hedge carries book risk):
+
+          * momentum  → whole-share market BUY + a TRAILING-STOP sell (winners run),
+          * reversion → a normal OCO bracket: SL just past the extreme, TP at VWAP.
+
+        Distances are σ-multiples via ``compute_bracket``, which also enforces the
+        ``min_rr`` reward:risk gate — a trade that can't structure ≥ min_rr is
+        SKIPPED (``act=False``). Crypto can't bracket/trail on Alpaca, so it keeps
+        the synthetic signal exit but still gets a vol-normalized σ-stop LEVEL."""
+        notional = (decision.get("notional") or 0.0) * plan["risk_scale"]
+        if not price or price <= 0 or notional <= 0:
+            return decision
+        sig = decision.get("signal") or {}
+        if asset_class == "equity":
+            qty = int(notional // price)
+            if qty < 1:
+                # Can't afford a whole share — a fractional/notional equity buy
+                # CAN'T be bracketed/trailed on Alpaca (need whole-share qty), so
+                # it would be an unprotected position with no stop. Skip it rather
+                # than open a naked day trade (the TSLA-$217 bug).
+                return {**decision, "act": False, "mode": None,
+                        "reason": decision["reason"] +
+                        f" | skip: ${notional:,.0f} < 1 share (${price:,.2f}) — can't bracket, no naked day buys"}
+            br = compute_bracket(sig, price, plan)
+            if not br["ok"]:
+                # Can't structure the required reward:risk — don't take the trade.
+                return {**decision, "act": False, "mode": None,
+                        "reason": decision["reason"] + f" | skip: {br['reason']}"}
+            primary_notional = qty * price
+            leg = {"symbol": decision["symbol"], "side": "buy", "qty": qty,
+                   "asset_class": "equity", "role": "primary", "entry": round(price, 2),
+                   "exit_type": br["exit_type"], "bracket": br["exit_type"] == "bracket",
+                   "sl_price": round(br["sl"], 2), "rr": round(br["rr"], 2),
+                   "have_sigma": br["have_sigma"]}
+            if br["exit_type"] == "trailing":
+                leg["trail_price"] = round(br["trail_dist"], 2)
+                why = (decision["reason"] +
+                       f", trailing stop ${leg['trail_price']} ({plan['trail_sigma']}σ), "
+                       f"SL≈{leg['sl_price']}, R:R proxy {leg['rr']}")
+            else:
+                leg["tp_price"] = round(br["tp"], 2)
+                why = (decision["reason"] +
+                       f", bracket SL {leg['sl_price']} / TP {leg['tp_price']}"
+                       f"{' (VWAP)' if sig.get('kind') == 'reversion' else ''}, R:R {leg['rr']}")
+            max_loss = br["stop_dist"] * qty
+        else:  # crypto: synthetic exit, but compute a vol-normalized σ-stop LEVEL
+            sigma = sig.get("sigma")
+            if sigma and sigma > 0:
+                if sig.get("kind") == "reversion":
+                    extreme = sig.get("win_low") or price
+                    sl_price = round(extreme - plan["reversion_stop_sigma"] * sigma, 2)
+                else:
+                    sl_price = round(price - plan["stop_sigma"] * sigma, 2)
+            else:
+                sl_price = round(price * (1 - plan["stop_pct"] / 100.0), 2)
+            sl_price = max(0.0, sl_price)
+            primary_notional = notional
+            leg = {"symbol": decision["symbol"], "side": "buy", "notional": round(notional, 2),
+                   "asset_class": "crypto", "role": "primary", "entry": round(price, 2),
+                   "exit_type": "none", "bracket": False, "sl_price": sl_price,
+                   "have_sigma": bool(sigma and sigma > 0)}
+            max_loss = (price - sl_price) * (notional / price) if price else 0.0
+            why = decision["reason"] + f", synthetic σ-stop {sl_price} (crypto: no Alpaca bracket)"
+        return {**decision, "mode": "hedged", "legs": [leg], "plan_bias": plan["bias"],
+                "notional": round(primary_notional, 2),
+                "max_loss_est": round(max(0.0, max_loss), 2), "reason": why}
+
+    async def _net_beta_hedge(self, account: dict, positions: list[dict], bars: dict) -> dict | None:
+        """Keep the DAY sleeve near market-neutral with ONE inverse-ETF position
+        (SH, -1x S&P) sized to the sleeve's net beta. Computes the day book's net
+        beta in dollars (hedge instrument excluded), targets a whole-share SH
+        position that offsets net-LONG beta, and only trades the delta when it
+        drifts beyond the band — so the hedge can never accumulate into a pile."""
+        day_hold = sleeve_holdings(self._sqlite, "day")
+        pos_price = {norm_symbol(p.get("symbol", "")): _to_float(p.get("current_price"))
+                     for p in positions}
+        hsym_n = norm_symbol(DAY_HEDGE_SYMBOL)
+        net_beta_usd = 0.0
+        for n, q in day_hold.items():
+            if n == hsym_n:
+                continue
+            px = pos_price.get(n) or 0.0
+            net_beta_usd += q * px * beta_for(n)
+        equity = _to_float(account.get("equity")) or 0.0
+        band = max(self._s.day_net_beta_band_pct / 100.0 * equity, self._s.day_min_order_notional)
+        sh_price = pos_price.get(hsym_n) or _last_close(bars, DAY_HEDGE_SYMBOL) or 0.0
+        if sh_price <= 0:
+            return None
+        cur_sh = day_hold.get(hsym_n, 0.0)
+        target_sh = int(max(0.0, net_beta_usd) / sh_price)  # only hedge net-long beta
+        delta = target_sh - cur_sh
+        if abs(delta * sh_price) < band:
+            return None  # within band — no churn
+        side = "buy" if delta > 0 else "sell"
+        qty = round(abs(delta), 6)
+        reason = (f"net-beta hedge: day net β ${net_beta_usd:,.0f} -> target {target_sh} "
+                  f"{DAY_HEDGE_SYMBOL} (have {cur_sh:g}) -> {side} {qty}")
+        ok = await self._submit_hedge_order(DAY_HEDGE_SYMBOL, side, qty, reason)
+        return {"symbol": DAY_HEDGE_SYMBOL, "asset_class": "equity", "act": True, "side": side,
+                "qty": qty, "notional": round(qty * sh_price, 2), "mode": "net_beta_hedge",
+                "sector": "hedge", "conviction": 0.0, "signal": {"kind": "hedge"},
+                "reason": reason, "submitted": ok}
+
+    async def _submit_hedge_order(self, symbol: str, side: str, qty: float, reason: str) -> bool:
+        """Plain market order for the net-beta hedge, recorded in the day ledger
+        (no bracket — the hedge is managed by rebalancing, not a stop)."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        pid = self._sqlite.execute_returning_id(
+            "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, bucket, "
+            "side, order_type, qty, notional, conviction, max_loss_est, rationale, status, "
+            "blocks, sleeve) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'day')",
+            [now[:10].replace("-", ""), now, symbol, None, "day", side, "market", qty, None,
+             None, None, json.dumps({"kind": "net_beta_hedge", "reason": reason}), "proposed",
+             json.dumps([])],
+        )
+        cid = f"day-hedge-{pid}"
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+            "order_type, qty, status, submitted_at, sleeve) "
+            "VALUES (?,?,?,?,?,?, 'submitting', datetime('now'), 'day')",
+            [pid, cid, symbol, side, "market", qty],
+        )
+        try:
+            order = await self._broker.submit_order(
+                symbol, side, qty=qty, order_type="market", time_in_force="day",
+                client_order_id=cid)
+        except BrokerError as exc:
+            definite = exc.status is not None and 400 <= exc.status < 500
+            self._sqlite.execute(
+                "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                ["rejected" if definite else "unknown", exc.reason, cid])
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = 'rejected', blocks = ?, updated_at = datetime('now') "
+                "WHERE id = ?", [json.dumps([f"hedge {exc.reason}"]), pid])
+            log.warning("net-beta hedge %s %s rejected: %s", side, symbol, exc.reason)
+            return False
+        self._sqlite.execute(
+            "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+            "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+            [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+             _to_float(order.get("filled_avg_price")), json.dumps(order), cid])
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = 'submitted', updated_at = datetime('now') WHERE id = ?",
+            [pid])
+        return True
+
+    def _journal(self, run_id: str, trade_date: str, d: dict, mc) -> None:
+        """Persist EVERY signal the day trader saw this tick — acted, skipped, or
+        blocked — with the market context it decided against. The transparency
+        record AND the substrate the end-of-day learning loop mines for mistakes."""
+        sig = d.get("signal") or {}
+        if d.get("mode") == "net_beta_hedge":
+            decision = "hedge"
+        elif d.get("submitted") or (d.get("selected") and d.get("act")):
+            decision = "acted"
+        elif d.get("reason", "").find("block") >= 0 or "guardrail" in d.get("reason", ""):
+            decision = "blocked"
+        else:
+            decision = "skipped"
+        # Stash σ (and the chosen exit) in the JSON context column — no schema
+        # migration — so day_review can replay σ-based exits / grid-search stops.
+        legs = d.get("legs") or []
+        primary = next((lg for lg in legs if lg.get("role") == "primary"), None)
+        ctx = {"market": mc.to_dict(), "conviction": d.get("conviction"),
+               "selected": d.get("selected"), "plan_bias": d.get("plan_bias"),
+               "sigma": sig.get("sigma"),
+               "exit_type": (primary or {}).get("exit_type"),
+               "rr": (primary or {}).get("rr")}
+        try:
+            self._sqlite.execute(
+                "INSERT INTO day_signal_journal (ts, run_id, trade_date, symbol, asset_class, "
+                "sector, signal_kind, direction, strength, z, last_price, vwap, regime, vol_pctile, "
+                "market_bias, decision, side, notional, qty, conviction, reason, context, "
+                "proposal_id, outcome) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?, 'open')",
+                [datetime.now(timezone.utc).isoformat(timespec="seconds"), run_id, trade_date,
+                 d.get("symbol"), d.get("asset_class"), d.get("sector"), sig.get("kind"),
+                 sig.get("direction"), sig.get("strength"), sig.get("z"), sig.get("last"),
+                 sig.get("vwap"), mc.regime, mc.vol_pctile, d.get("plan_bias"), decision,
+                 d.get("side"), d.get("notional"), d.get("qty"), d.get("conviction"),
+                 (d.get("reason") or "")[:500], json.dumps(ctx), d.get("proposal_id")],
+            )
+        except Exception:
+            log.debug("journal write failed for %s", d.get("symbol"), exc_info=True)
+
     async def _submit(self, decision: dict, asset_class: str) -> bool:
         """Persist a day proposal + auto-submit the order (paper). Returns True
         on a submitted order. Mirrors the swing insert-before-submit pattern."""
@@ -288,6 +623,7 @@ class DayTraderService:
              side, "market", qty, notional, decision["signal"].get("strength"),
              decision.get("max_loss_est"), json.dumps(rationale), "proposed", json.dumps([])],
         )
+        decision["proposal_id"] = pid  # link the journal row to this proposal
         client_order_id = f"day-{pid}"
         is_crypto = asset_class == "crypto"
         tif = "gtc" if is_crypto else "day"
@@ -412,11 +748,18 @@ class DayTraderService:
              decision["signal"].get("strength"), decision.get("max_loss_est"),
              json.dumps(rationale), "proposed", json.dumps([])],
         )
+        decision["proposal_id"] = pid  # link the journal row to this proposal
         ok_primary = False
         for i, leg in enumerate(legs):
             cid = f"day-{pid}-{leg['role'][0]}{i}"
             is_crypto = leg.get("asset_class") == "crypto"
-            is_bracket = bool(leg.get("bracket"))
+            exit_type = leg.get("exit_type") or ("bracket" if leg.get("bracket") else "none")
+            is_bracket = exit_type == "bracket"
+            is_trailing = exit_type == "trailing"
+            # Momentum trailing legs ENTER with a plain market buy; the trailing
+            # stop is a SEPARATE order submitted after the entry (Alpaca can't
+            # attach a trailing stop as a bracket leg). Brackets enter via
+            # order_class so Alpaca attaches the OCO take-profit + stop-loss.
             otype = "bracket" if is_bracket else "market"
             self._sqlite.execute(
                 "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
@@ -451,6 +794,14 @@ class DayTraderService:
                 [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
                  _to_float(order.get("filled_avg_price")), json.dumps(order), cid],
             )
+            if is_bracket:
+                self._record_child_legs(order)
+            if is_trailing and leg["side"] == "buy" and leg.get("trail_price"):
+                # Entry filled (or accepted) — attach the trailing-stop exit. Like
+                # bracket child legs it carries NO proposal link, so reconcile()
+                # tracks its fill and sleeve_holdings nets the exit (no phantom).
+                await self._submit_trailing_exit(
+                    cid, leg["symbol"], leg["qty"], leg["trail_price"], is_crypto)
             if leg["role"] == "primary":
                 ok_primary = True
         self._sqlite.execute(
@@ -461,6 +812,61 @@ class DayTraderService:
                  decision["symbol"], pid, len(legs))
         await self._broadcast("day")
         return ok_primary
+
+    def _record_child_legs(self, order: dict) -> None:
+        """A bracket order spawns OCO child legs (take-profit + stop-loss) with
+        their OWN broker ids that reconcile() would otherwise never see — so when
+        a child fills, the broker position drops but the sleeve ledger never
+        decrements (the bug that left phantom NFLX/SOXS/NVDA 'holdings'). Record
+        each child as a day order keyed by its client_order_id, with NO proposal
+        link (it only adjusts holdings, not proposal status), so reconcile()
+        tracks its fill and sleeve_holdings nets the exit."""
+        for leg in (order.get("legs") or []):
+            cid = leg.get("client_order_id")
+            if not cid:
+                continue
+            self._sqlite.execute(
+                "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, "
+                "side, order_type, qty, notional, status, submitted_at, broker_order_id, "
+                "filled_qty, filled_avg_price, raw, sleeve) "
+                "VALUES (NULL,?,?,?,?,?,?,?, datetime('now'), ?,?,?,?, 'day')",
+                [cid, leg.get("symbol"), leg.get("side"), leg.get("type") or "limit",
+                 _to_float(leg.get("qty")), None, leg.get("status") or "new",
+                 leg.get("id"), _to_float(leg.get("filled_qty")),
+                 _to_float(leg.get("filled_avg_price")), json.dumps(leg)],
+            )
+
+    async def _submit_trailing_exit(self, parent_cid: str, symbol: str, qty: float,
+                                    trail_price: float, is_crypto: bool) -> bool:
+        """Attach a TRAILING-STOP sell to a momentum entry (equities only) — the
+        winners-run exit. Recorded as an unlinked day order (proposal_id NULL) so
+        reconcile() tracks its fill and sleeve_holdings nets the position out when
+        it triggers (mirrors how bracket OCO child legs are tracked)."""
+        cid = f"{parent_cid}-trail"
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+            "order_type, qty, status, submitted_at, sleeve) "
+            "VALUES (NULL,?,?,?,?,?, 'submitting', datetime('now'), 'day')",
+            [cid, symbol, "sell", "trailing_stop", qty],
+        )
+        try:
+            order = await self._broker.submit_order(
+                symbol, "sell", qty=qty, order_type="trailing_stop",
+                trail_price=trail_price, time_in_force="gtc" if is_crypto else "day",
+                client_order_id=cid)
+        except BrokerError as exc:
+            definite = exc.status is not None and 400 <= exc.status < 500
+            self._sqlite.execute(
+                "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                ["rejected" if definite else "unknown", exc.reason, cid])
+            log.warning("day trailing exit %s rejected: %s", symbol, exc.reason)
+            return False
+        self._sqlite.execute(
+            "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+            "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+            [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+             _to_float(order.get("filled_avg_price")), json.dumps(order), cid])
+        return True
 
     # ---- reconcile / status ------------------------------------------------
     async def reconcile(self) -> dict:
@@ -514,6 +920,19 @@ class DayTraderService:
             out["intraday_plan"] = await self.intraday_plan()
         except Exception:
             out["intraday_plan"] = None
+        # Market context (no broker call) — "what the day trader sees", always shown.
+        try:
+            strategist = None
+            try:
+                from app.edge.strategist import latest_snapshot
+                strategist = latest_snapshot(self._duck)
+            except Exception:
+                strategist = None
+            mc = build_market_context(self._duck, vol_signal=await self._vol_signal(),
+                                      strategist=strategist)
+            out["market_context"] = mc.to_dict()
+        except Exception:
+            out["market_context"] = None
         if self._broker.enabled:
             try:
                 if self._has_inflight():
@@ -521,6 +940,13 @@ class DayTraderService:
                 out["market_open"] = await self._broker.is_market_open()
                 holds = sleeve_holdings(self._sqlite, "day")
                 out["holdings"] = holds
+                # Portfolio state (equity, net beta incl. hedges, sectors, budget).
+                account = await self._broker.account()
+                positions = await self._broker.positions()
+                day_budget = (_to_float(account.get("equity")) or 0.0) * \
+                    float(self._optimizer.latest().get("day_pct") or 0.0) / 100.0
+                out["portfolio_state"] = build_portfolio_state(
+                    account, positions, self._sqlite, day_budget=day_budget).to_dict()
             except BrokerError as exc:
                 out["account_error"] = exc.reason
         return out
@@ -581,7 +1007,11 @@ class DayTraderService:
         hedge requirement). No LLM, no broker call — safe to poll for the UI."""
         vol_signal = await self._vol_signal()
         plan = build_plan(self._latest_regime(), vol_signal, base_stop_pct=self._s.day_stop_pct,
-                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio)
+                          base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio,
+                          stop_sigma=self._s.day_stop_sigma, tp_sigma=self._s.day_tp_sigma,
+                          trail_sigma=self._s.day_trail_sigma,
+                          reversion_stop_sigma=self._s.day_reversion_stop_sigma,
+                          min_rr=self._s.day_min_rr)
         plan["hedged_enabled"] = self._s.day_hedged_enabled
         plan["vol_signal"] = vol_signal
         return plan

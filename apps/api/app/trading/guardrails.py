@@ -27,6 +27,12 @@ class GuardrailConfig:
     daily_loss_limit_pct: float    # halt new buys if account down this % today
     rebalance_band_pp: float       # ignore target/actual drifts smaller than this
     allow_live: bool = False
+    # Safe/core assets (bonds, T-bills, gold) are the user's intended LARGE
+    # low-risk allocations — they use the higher caps below instead of the tight
+    # per-name caps that exist to stop concentration in speculative names.
+    safe_assets: frozenset[str] = frozenset()
+    safe_max_position_pct: float = 60.0
+    safe_max_position_notional: float = 80_000.0
 
     @classmethod
     def from_settings(cls, s) -> "GuardrailConfig":
@@ -37,7 +43,17 @@ class GuardrailConfig:
             daily_loss_limit_pct=float(s.bot_daily_loss_limit_pct),
             rebalance_band_pp=float(s.bot_rebalance_band_pp),
             allow_live=bool(s.bot_allow_live_trading),
+            safe_assets=frozenset(norm_symbol(x) for x in getattr(s, "bot_safe_assets", [])),
+            safe_max_position_pct=float(getattr(s, "bot_safe_max_position_pct", 60.0)),
+            safe_max_position_notional=float(getattr(s, "bot_safe_max_position_notional", 80_000.0)),
         )
+
+    def caps_for(self, symbol: str) -> tuple[float, float]:
+        """(max_position_pct, max_position_notional) for a symbol — the relaxed
+        safe-asset caps for bonds/T-bills/gold, else the tight speculative caps."""
+        if norm_symbol(symbol) in self.safe_assets:
+            return self.safe_max_position_pct, self.safe_max_position_notional
+        return self.max_position_pct, self.max_position_notional
 
 
 def norm_symbol(symbol: str) -> str:
@@ -122,18 +138,21 @@ def evaluate_order(
             f"order ${order_value:,.0f} exceeds buying power ${buying_power:,.0f}"
         )
 
+    # Safe/core assets (bonds, T-bills, gold) get the relaxed caps so a deliberate
+    # large low-risk allocation isn't blocked like a speculative single name.
+    max_pct, max_notional = cfg.caps_for(symbol)
     resulting = current_position_value + order_value
     if equity > 0:
         pct = resulting / equity * 100.0
-        if pct > cfg.max_position_pct + 1e-6:
+        if pct > max_pct + 1e-6:
             blocks.append(
                 f"{symbol} would be {pct:.1f}% of equity, over the "
-                f"{cfg.max_position_pct:.0f}% per-position cap"
+                f"{max_pct:.0f}% per-position cap"
             )
-    if resulting > cfg.max_position_notional + 1e-6:
+    if resulting > max_notional + 1e-6:
         blocks.append(
             f"{symbol} position ${resulting:,.0f} would exceed the "
-            f"${cfg.max_position_notional:,.0f} per-position notional cap"
+            f"${max_notional:,.0f} per-position notional cap"
         )
 
     return blocks

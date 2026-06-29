@@ -35,3 +35,9 @@ apps/api/.env
 .vscode/
 .idea/
 *.log
+
+# --- session scratch & generated output (never commit) ---
+/scratchpad/
+/brag-output/
+/brag-output-*/
+.claude/settings.local.json

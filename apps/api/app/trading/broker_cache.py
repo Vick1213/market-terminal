@@ -87,6 +87,24 @@ class BrokerState:
     async def list_orders(self, status: str = "all", limit: int = 200) -> list[dict]:
         return await self._broker.list_orders(status, limit)
 
+    async def fractionable(self, symbol: str) -> bool:
+        """Whether the asset supports fractional / notional orders. Cached for the
+        process lifetime (the flag never changes). Unknown / error -> True so the
+        normal order path still runs and surfaces any genuine rejection."""
+        cache = getattr(self, "_frac", None)
+        if cache is None:
+            cache = self._frac = {}
+        key = (symbol or "").upper()
+        if key in cache:
+            return cache[key]
+        try:
+            asset = await self._broker.get_asset(symbol)
+            frac = bool(asset.get("fractionable", True))
+        except Exception:
+            frac = True
+        cache[key] = frac
+        return frac
+
     # writes: pass through, then drop the cache so the next read is fresh
     async def submit_order(self, *args, **kwargs) -> dict:
         try:

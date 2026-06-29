@@ -1,12 +1,22 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import type { BotProposal } from "@market/shared";
+import type {
+  BotProposal,
+  BotPosition,
+  DayProposal,
+  DayProposalRationale,
+  MarketContext,
+  PortfolioState,
+  TradeLevels,
+} from "@market/shared";
+import { TradeChart } from "@/components/charts/TradeChart";
 import {
   executeBotProposal,
   fetchBotStatus,
   fetchDayStatus,
+  fetchTrades,
   reconcileBot,
   runBotPropose,
   runDay,
@@ -40,6 +50,29 @@ const usd = (v: number | null | undefined) =>
 const pct = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : `${v > 0 ? "+" : ""}${v.toFixed(2)}%`;
 
+// green for risk-on/neutral, red for risk-off/stress
+const regimeColor = (regime: string | null | undefined) => {
+  const r = (regime ?? "").toLowerCase();
+  if (r.includes("stress") || r.includes("risk-off") || r.includes("off")) return "var(--red)";
+  if (r.includes("risk-on") || r.includes("on") || r.includes("neutral")) return "var(--green)";
+  return "var(--text-dim)";
+};
+
+// Pull entry / take-profit / stop-loss out of a day proposal's hedged-bracket
+// rationale (the "primary" leg carries the tradeable prices).
+function dayTradeLevels(p: DayProposal): TradeLevels | null {
+  const r = (p.rationale ?? null) as DayProposalRationale | null;
+  const legs = r?.legs ?? [];
+  const primary = legs.find((l) => l.role === "primary") ?? legs[0];
+  if (!primary) return null;
+  const lv: TradeLevels = {
+    entry: primary.entry ?? null,
+    tp: primary.tp_price ?? null,
+    sl: primary.sl_price ?? null,
+  };
+  return lv.entry == null && lv.tp == null && lv.sl == null ? null : lv;
+}
+
 function ProposalRow({
   p,
   canExecute,
@@ -47,6 +80,7 @@ function ProposalRow({
   onToggle,
   onExecute,
   executing,
+  entryPrice,
 }: {
   p: BotProposal;
   canExecute: boolean;
@@ -54,6 +88,7 @@ function ProposalRow({
   onToggle: () => void;
   onExecute: () => void;
   executing: boolean;
+  entryPrice?: number | null;
 }) {
   const size = p.side === "buy" ? usd(p.notional) : `${(p.qty ?? 0).toLocaleString(undefined, { maximumFractionDigits: 4 })} sh`;
   const actionable = p.status === "proposed" && !p.stale;
@@ -145,6 +180,193 @@ function ProposalRow({
           {!!p.blocks?.length && (
             <div style={{ color: "var(--yellow)" }}>⛔ {p.blocks.join(" · ")}</div>
           )}
+          {open && (
+            <TradeChart
+              symbol={p.symbol}
+              levels={entryPrice != null ? { entry: entryPrice } : null}
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Compact market + portfolio context for the day sleeve. Every field may be
+// absent on older API responses, so guard each one.
+function ContextStrip({
+  market,
+  portfolio,
+}: {
+  market?: MarketContext | null;
+  portfolio?: PortfolioState | null;
+}) {
+  if (!market && !portfolio) return null;
+  const chip = {
+    fontSize: 9,
+    padding: "0 4px",
+    borderRadius: 3,
+    border: "1px solid var(--border, #2a2a2a)",
+  } as const;
+  const sectors = portfolio
+    ? Object.entries(portfolio.sector_exposure ?? {})
+        .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]))
+        .slice(0, 4)
+    : [];
+  const budgetUsed =
+    portfolio && portfolio.day_budget > 0
+      ? Math.min(1, Math.max(0, portfolio.day_value / portfolio.day_budget))
+      : null;
+  const betaHot = portfolio != null && Math.abs(portfolio.net_beta_pct) > 70;
+
+  return (
+    <div
+      style={{
+        fontSize: 10,
+        marginBottom: 6,
+        padding: "4px 6px",
+        borderRadius: 3,
+        border: "1px solid var(--border, #2a2a2a)",
+        display: "flex",
+        flexDirection: "column",
+        gap: 4,
+      }}
+    >
+      {market && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+          <span style={{ fontSize: 9, color: "var(--text-dim)", flex: "0 0 auto" }}>mkt</span>
+          <span style={{ fontWeight: 700, color: regimeColor(market.regime) }}>
+            {(market.regime || "—").toUpperCase()}
+          </span>
+          <span
+            style={{
+              ...chip,
+              color: market.risk_on ? "var(--green)" : "var(--red)",
+              borderColor: market.risk_on ? "var(--green)" : "var(--red)",
+            }}
+          >
+            {market.risk_on ? "RISK-ON" : "RISK-OFF"}
+          </span>
+          {market.stress_on && (
+            <span style={{ ...chip, color: "var(--red)", borderColor: "var(--red)" }}>STRESS</span>
+          )}
+          {market.composite_score != null && (
+            <span className="num" style={{ color: "var(--text-dim)" }}>
+              score {market.composite_score.toFixed(0)}
+            </span>
+          )}
+          {market.breadth_pct != null && (
+            <span className="num" style={{ color: "var(--text-dim)" }}>
+              breadth {market.breadth_pct.toFixed(0)}%
+            </span>
+          )}
+          <span style={{ color: "var(--text-dim)" }}>
+            γ{" "}
+            <span
+              style={{
+                color:
+                  market.dealer_gamma === "short"
+                    ? "var(--red)"
+                    : market.dealer_gamma === "long"
+                      ? "var(--green)"
+                      : "var(--text-dim)",
+              }}
+            >
+              {market.dealer_gamma}
+            </span>
+          </span>
+          {market.vol_pctile != null && (
+            <span className="num" style={{ color: "var(--text-dim)" }}>
+              vol {Math.round(market.vol_pctile)}%-ile
+              {market.vol_regime ? ` ${market.vol_regime}` : ""}
+            </span>
+          )}
+          {market.suggested_exposure != null && (
+            <span className="num" style={{ color: "var(--text-dim)" }}>
+              exp ×{market.suggested_exposure.toFixed(2)}
+            </span>
+          )}
+        </div>
+      )}
+      {market && (!!market.strategist_favor?.length || !!market.strategist_avoid?.length) && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, color: "var(--text-dim)" }}>
+          {!!market.strategist_favor?.length && (
+            <span>
+              <span style={{ color: "var(--green)" }}>favor:</span> {market.strategist_favor.join(", ")}
+            </span>
+          )}
+          {!!market.strategist_avoid?.length && (
+            <span>
+              <span style={{ color: "var(--red)" }}>avoid:</span> {market.strategist_avoid.join(", ")}
+            </span>
+          )}
+        </div>
+      )}
+      {market && !!market.notes?.length && (
+        <div
+          style={{
+            color: "var(--text-dim)",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+          title={market.notes.join(" · ")}
+        >
+          {market.notes.join(" · ")}
+        </div>
+      )}
+      {portfolio && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "baseline" }}>
+          <span style={{ fontSize: 9, color: "var(--text-dim)", flex: "0 0 auto" }}>pf</span>
+          <span className="num" style={{ color: "var(--text-dim)" }}>
+            equity {usd(portfolio.equity)}
+          </span>
+          <span className="num" style={{ color: "var(--text-dim)" }}>
+            cash {usd(portfolio.cash)}
+          </span>
+          <span className="num" style={{ fontWeight: 700, color: betaHot ? "var(--red)" : "var(--text)" }}>
+            net β {portfolio.net_beta_pct.toFixed(0)}%
+          </span>
+          {portfolio.day_budget > 0 && (
+            <span
+              className="num"
+              style={{ color: "var(--text-dim)", display: "flex", alignItems: "center", gap: 4 }}
+              title={`day sleeve deployed ${usd(portfolio.day_value)} of ${usd(portfolio.day_budget)} budget`}
+            >
+              day {usd(portfolio.day_value)}/{usd(portfolio.day_budget)}
+              {budgetUsed != null && (
+                <span
+                  style={{
+                    display: "inline-block",
+                    width: 40,
+                    height: 5,
+                    borderRadius: 3,
+                    background: "var(--border, #2a2a2a)",
+                    overflow: "hidden",
+                  }}
+                >
+                  <span
+                    style={{
+                      display: "block",
+                      height: "100%",
+                      width: `${budgetUsed * 100}%`,
+                      background: budgetUsed > 0.9 ? "var(--red)" : "var(--accent, #7aa2f7)",
+                    }}
+                  />
+                </span>
+              )}
+            </span>
+          )}
+        </div>
+      )}
+      {portfolio && !!sectors.length && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 10, color: "var(--text-dim)" }}>
+          {sectors.map(([sector, value]) => (
+            <span key={sector} className="num">
+              {sector} {usd(value)}
+              {portfolio.equity > 0 && ` (${((value / portfolio.equity) * 100).toFixed(0)}%)`}
+            </span>
+          ))}
         </div>
       )}
     </div>
@@ -153,11 +375,20 @@ function ProposalRow({
 
 function DaySection() {
   const qc = useQueryClient();
-  const q = useQuery({ queryKey: ["day"], queryFn: fetchDayStatus, refetchInterval: 60_000 });
+  const [openDayId, setOpenDayId] = useState<number | null>(null);
+  const q = useQuery({ queryKey: ["day"], queryFn: fetchDayStatus, refetchInterval: 15_000 });
   const inv = () => {
     qc.invalidateQueries({ queryKey: ["day"] });
     qc.invalidateQueries({ queryKey: ["bot"] });
   };
+  // The day bot broadcasts a "bot" WS event after every tick / order — refresh
+  // live on it (the swing section already does this) so fills/exits show up
+  // without a manual reload.
+  const { last } = useWebSocket("bot", 1);
+  useEffect(() => {
+    if (last) inv();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [last]);
   const toggle = useMutation({ mutationFn: setDayEnabled, onSuccess: inv });
   const run = useMutation({ mutationFn: runDay, onSuccess: inv });
   const d = q.data;
@@ -222,21 +453,37 @@ function DaySection() {
               )}
             </div>
           )}
+          <ContextStrip market={d.market_context} portfolio={d.portfolio_state} />
           {d.recent_proposals?.length ? (
             d.recent_proposals.slice(0, 8).map((p) => {
               const r = (p.rationale ?? null) as { reason?: string; kind?: string } | null;
+              const isOpen = openDayId === p.id;
+              const levels = dayTradeLevels(p);
               return (
-                <div key={p.id} style={{ display: "flex", gap: 6, fontSize: 11, alignItems: "baseline" }}>
-                  <span className="num" style={{ flex: "0 0 38px", fontWeight: 600,
-                    color: p.side === "buy" ? "var(--green)" : "var(--red)" }}>{p.side.toUpperCase()}</span>
-                  <span style={{ flex: "0 0 70px", fontWeight: 600 }}>{p.symbol}</span>
-                  <span style={{ flex: "0 0 60px", fontSize: 10, color: STATUS_COLOR[p.status] ?? "var(--text-dim)" }}>
-                    {p.status}
-                  </span>
-                  <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                    fontSize: 10, color: "var(--text-dim)" }}>
-                    {r?.reason ?? r?.kind ?? ""}
-                  </span>
+                <div key={p.id}>
+                  <div
+                    style={{ display: "flex", gap: 6, fontSize: 11, alignItems: "baseline", cursor: "pointer" }}
+                    onClick={() => setOpenDayId(isOpen ? null : p.id)}
+                  >
+                    <span style={{ minWidth: 9, color: "var(--text-dim)", fontSize: 10 }}>
+                      {isOpen ? "▾" : "▸"}
+                    </span>
+                    <span className="num" style={{ flex: "0 0 38px", fontWeight: 600,
+                      color: p.side === "buy" ? "var(--green)" : "var(--red)" }}>{p.side.toUpperCase()}</span>
+                    <span style={{ flex: "0 0 70px", fontWeight: 600 }}>{p.symbol}</span>
+                    <span style={{ flex: "0 0 60px", fontSize: 10, color: STATUS_COLOR[p.status] ?? "var(--text-dim)" }}>
+                      {p.status}
+                    </span>
+                    <span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                      fontSize: 10, color: "var(--text-dim)" }}>
+                      {r?.reason ?? r?.kind ?? ""}
+                    </span>
+                  </div>
+                  {isOpen && (
+                    <div style={{ padding: "2px 0 4px 15px" }}>
+                      <TradeChart symbol={p.symbol} levels={levels} intraday />
+                    </div>
+                  )}
                 </div>
               );
             })
@@ -274,6 +521,27 @@ export function BotPanel() {
       if (r && r.ok === false) window.alert(`Not executed: ${r.detail ?? "blocked"}`);
     },
   });
+
+  // Tradebook join: per-symbol closed/open status so a "filled" order whose
+  // position has since been CLOSED reads "closed · +$pnl" instead of "filled".
+  const tradesQ = useQuery({
+    queryKey: ["trades", "swing"],
+    queryFn: () => fetchTrades("swing"),
+    refetchInterval: 30_000,
+  });
+  const symbolPnl = useMemo(() => {
+    const m = new Map<string, { hasOpen: boolean; hasClosed: boolean; pnl: number }>();
+    for (const t of tradesQ.data?.trades ?? []) {
+      const e = m.get(t.symbol) ?? { hasOpen: false, hasClosed: false, pnl: 0 };
+      if (t.status === "open") e.hasOpen = true;
+      else {
+        e.hasClosed = true;
+        e.pnl += t.pnl ?? 0;
+      }
+      m.set(t.symbol, e);
+    }
+    return m;
+  }, [tradesQ.data]);
 
   const [openId, setOpenId] = useState<number | null>(null);
   const d = q.data;
@@ -450,6 +718,10 @@ export function BotPanel() {
                 onToggle={() => setOpenId(openId === p.id ? null : p.id)}
                 onExecute={() => execute.mutate(p.id)}
                 executing={execute.isPending && execute.variables === p.id}
+                entryPrice={
+                  (d.positions ?? []).find((pos: BotPosition) => pos.symbol === p.symbol)
+                    ?.avg_entry_price ?? null
+                }
               />
             ))}
 
@@ -484,19 +756,35 @@ export function BotPanel() {
                 <div className="macro-detail-title" style={{ marginTop: 8 }}>
                   Recent orders
                 </div>
-                {d.recent_orders.slice(0, 6).map((o) => (
-                  <div key={o.id} style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--text-dim)" }}>
-                    <span style={{ flex: "0 0 38px", color: SIDE_COLOR[o.side] }}>{o.side}</span>
-                    <span style={{ flex: "0 0 72px" }}>{o.symbol}</span>
-                    <span style={{ flex: "0 0 70px", color: STATUS_COLOR[o.status ?? ""] ?? "var(--text-dim)" }}>
-                      {o.status}
-                    </span>
-                    <span className="num" style={{ flex: 1, textAlign: "right" }}>
-                      {o.filled_avg_price ? `@ ${o.filled_avg_price}` : ""}
-                      {o.error ? ` ${o.error.slice(0, 40)}` : ""}
-                    </span>
-                  </div>
-                ))}
+                {d.recent_orders.slice(0, 6).map((o) => {
+                  // If this name's position has since been fully closed, show
+                  // "closed · +$pnl" (colored) instead of the raw "filled".
+                  const sp = symbolPnl.get(o.symbol);
+                  const closed =
+                    (o.status ?? "") === "filled" && sp && sp.hasClosed && !sp.hasOpen;
+                  return (
+                    <div key={o.id} style={{ display: "flex", gap: 6, fontSize: 10, color: "var(--text-dim)" }}>
+                      <span style={{ flex: "0 0 38px", color: SIDE_COLOR[o.side] }}>{o.side}</span>
+                      <span style={{ flex: "0 0 72px" }}>{o.symbol}</span>
+                      {closed ? (
+                        <span
+                          style={{ flex: "0 0 110px", color: (sp!.pnl) >= 0 ? "var(--green)" : "var(--red)" }}
+                          title="position has been closed since this fill"
+                        >
+                          closed · {sp!.pnl >= 0 ? "+" : "−"}${Math.abs(sp!.pnl).toFixed(2)}
+                        </span>
+                      ) : (
+                        <span style={{ flex: "0 0 70px", color: STATUS_COLOR[o.status ?? ""] ?? "var(--text-dim)" }}>
+                          {o.status}
+                        </span>
+                      )}
+                      <span className="num" style={{ flex: 1, textAlign: "right" }}>
+                        {o.filled_avg_price ? `@ ${o.filled_avg_price}` : ""}
+                        {o.error ? ` ${o.error.slice(0, 40)}` : ""}
+                      </span>
+                    </div>
+                  );
+                })}
               </>
             )}
 

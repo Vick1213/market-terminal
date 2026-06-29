@@ -283,6 +283,18 @@ class Settings(BaseSettings):
     bot_max_position_pct: float = 15.0       # cap any one symbol at this % of equity
     bot_max_position_notional: float = 5_000.0  # absolute $ cap per symbol
     bot_min_order_notional: float = 100.0    # skip dust trades below this $
+    # Safe/core assets (T-bill & Treasury ETFs, broad bond funds, gold) are the
+    # user's intended LARGE, low-risk allocations. The tight per-name caps above
+    # exist to stop concentration in SPECULATIVE names — they shouldn't block a
+    # deliberate bond/cash-equivalent core, so safe assets are matched by symbol
+    # and get their own (much higher) caps instead.
+    bot_safe_assets: list[str] = [
+        "SGOV", "BIL", "SHV", "SHY", "GOVT", "IEF", "IEI", "TLT", "TLH",
+        "VGSH", "VGIT", "VGLT", "BND", "AGG", "BNDX", "USFR", "TFLO",
+        "GIGB", "XFIV", "GLD", "IAU",
+    ]
+    bot_safe_max_position_pct: float = 60.0       # one safe asset <= this % of equity
+    bot_safe_max_position_notional: float = 80_000.0  # absolute $ cap per safe asset
     bot_daily_loss_limit_pct: float = 3.0    # halt NEW BUYS if account is down this % today
     bot_rebalance_band_pp: float = 2.0       # ignore drifts smaller than this (pp of equity)
     # Per-asset assumed adverse move used only to surface an illustrative
@@ -299,8 +311,8 @@ class Settings(BaseSettings):
     # The optimizer splits capital between a long-term SWING sleeve (the
     # strategist allocator) and a short-term DAY sleeve (the fast trader),
     # by market conditions. Day stays a small slice; swing gets the rest.
-    day_alloc_min_pct: float = 5.0    # day sleeve floor (% of equity)
-    day_alloc_max_pct: float = 10.0   # day sleeve ceiling (% of equity)
+    day_alloc_min_pct: float = 3.0    # day sleeve floor (% of equity)
+    day_alloc_max_pct: float = 7.0    # day sleeve ceiling (% of equity); midpoint 5%
     # Day trader. Small liquid universe keeps the data footprint to ~2 batched
     # snapshot calls per tick. Crypto runs 24/7; equities are market-hours gated.
     day_universe: list[str] = [
@@ -328,8 +340,15 @@ class Settings(BaseSettings):
     # leg gets a bracket (stop-loss + take-profit) so both sides are risk-capped
     # and exits are automatic + fast. Crypto falls back to plain entries.
     day_hedged_enabled: bool = True
-    day_stop_pct: float = 0.8          # bracket stop-loss % from entry (tight)
-    day_tp_pct: float = 1.6            # bracket take-profit % (~2:1 reward:risk)
+    day_stop_pct: float = 0.8          # FALLBACK bracket stop-loss % when σ unavailable
+    day_tp_pct: float = 1.6            # FALLBACK bracket take-profit % when σ unavailable
+    # Vol-normalized, structure-aware brackets (replace flat %): all distances in
+    # σ units (the signal's intraday close stdev). 3:1 baseline reward:risk.
+    day_stop_sigma: float = 1.0            # momentum stop = stop_sigma·σ below entry (or struct)
+    day_tp_sigma: float = 3.0             # target multiple (and trailing R:R proxy) → 3:1 baseline
+    day_trail_sigma: float = 1.5          # momentum trailing-stop give-back = trail_sigma·σ
+    day_min_rr: float = 3.0               # min reward:risk to take a trade (else skip)
+    day_reversion_stop_sigma: float = 0.5  # reversion stop = this·σ past the win_low extreme
     day_hedge_ratio: float = 1.0       # fraction of the beta-neutral hedge to short
     day_min_hedge_notional: float = 50.0
     # Day-trade signal thresholds.
@@ -337,6 +356,15 @@ class Settings(BaseSettings):
     day_momentum_min_pct: float = 0.30      # min intraday move to call it momentum
     day_reversion_z: float = 2.0            # |z| vs intraday VWAP to call mean-reversion
     day_min_signal: float = 1.0             # min combined signal strength to act
+    # --- Phase 2: segmentation + portfolio-net-beta hedge (coherent day trader) ---
+    day_max_new_positions: int = 3          # cap NEW longs opened per tick (segmentation)
+    day_max_per_sector: int = 2             # cap NEW longs per sector per tick
+    day_respect_strategist: bool = True     # veto day longs in the strategist's avoid list
+    # Net-beta hedge: keep the DAY sleeve near market-neutral with ONE inverse-ETF
+    # position sized to the sleeve's net beta (replaces per-trade hedge spam that
+    # let PSQ pile up). Only rebalanced when net beta drifts beyond the band.
+    day_net_beta_enabled: bool = True
+    day_net_beta_band_pct: float = 1.0      # rebalance when |day net-beta $| > this % of equity
     # Day guardrails (sized against the DAY SLEEVE budget, not whole equity).
     day_max_position_pct: float = 40.0      # one name <= this % of the day sleeve
     day_min_order_notional: float = 50.0

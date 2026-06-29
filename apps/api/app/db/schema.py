@@ -864,6 +864,62 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         """
     )
 
+    # --- Phase 2/3: day-trader decision journal + end-of-day review ---
+    # Every SIGNAL the day trader sees each tick (acted, skipped, or blocked) is
+    # journaled with the full market + portfolio context it decided against — the
+    # transparency layer AND the training substrate for the learning loop. Nothing
+    # is thrown away, so the analyzer can mine systematic mistakes after the fact.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS day_signal_journal (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            ts           TEXT NOT NULL,        -- decision time (UTC iso)
+            run_id       TEXT NOT NULL,        -- one fast-loop tick sweep
+            trade_date   TEXT NOT NULL,        -- YYYY-MM-DD session, for daily review
+            symbol       TEXT NOT NULL,
+            asset_class  TEXT,
+            sector       TEXT,
+            signal_kind  TEXT,                 -- momentum | reversion | none
+            direction    TEXT,                 -- buy | sell | none
+            strength     REAL,
+            z            REAL,
+            last_price   REAL,
+            vwap         REAL,
+            regime       TEXT,
+            vol_pctile   REAL,
+            market_bias  TEXT,                 -- plan bias (risk-on/off)
+            decision     TEXT NOT NULL,        -- acted | skipped | blocked | hedge
+            side         TEXT,
+            notional     REAL,
+            qty          REAL,
+            conviction   REAL,                 -- segmentation rank score
+            reason       TEXT,
+            context      TEXT,                 -- JSON: market ctx + portfolio snapshot
+            proposal_id  INTEGER,              -- bot_proposals link when acted
+            outcome      TEXT,                 -- filled by review: win|loss|flat|open
+            pnl          REAL                  -- realized/marked P&L, filled by review
+        );
+        """
+    )
+    sqlite.execute(
+        "CREATE INDEX IF NOT EXISTS idx_day_journal_date ON day_signal_journal (trade_date);"
+    )
+    # One row per end-of-day review pass: stats, detected mistakes, and concrete
+    # strategy-parameter suggestions (LLM + heuristics over the journal above).
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS day_review (
+            trade_date  TEXT PRIMARY KEY,
+            created_at  TEXT NOT NULL,
+            stats       TEXT,                  -- JSON: win rates by setup/regime/symbol
+            findings    TEXT,                  -- JSON: list of systematic-mistake findings
+            suggestions TEXT,                  -- JSON: [{param, current, proposed, rationale}]
+            summary     TEXT,                  -- narrative (LLM or deterministic fallback)
+            model       TEXT
+        );
+        """
+    )
+
     # Seed the default watchlist once (idempotent).
     sqlite.executemany(
         "INSERT OR IGNORE INTO watchlist (symbol, asset_class, display_name, sort_order) "

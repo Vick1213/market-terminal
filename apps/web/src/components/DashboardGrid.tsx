@@ -26,6 +26,7 @@ import { RotationPanel } from "./panels/RotationPanel";
 import { SourceHealthPanel } from "./panels/SourceHealthPanel";
 import { StrategistPanel } from "./panels/StrategistPanel";
 import { TffPositioningPanel } from "./panels/TffPositioningPanel";
+import { TradebookPanel } from "./panels/TradebookPanel";
 import { TreasurySupplyPanel } from "./panels/TreasurySupplyPanel";
 import { VolOverlayPanel } from "./panels/VolOverlayPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
@@ -63,6 +64,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "strategist", el: <StrategistPanel /> },
   { i: "voloverlay", el: <VolOverlayPanel /> },
   { i: "bot", el: <BotPanel /> },
+  { i: "tradebook", el: <TradebookPanel /> },
   { i: "sources", el: <SourceHealthPanel /> },
   { i: "help", el: <HelpPanel /> },
 ];
@@ -106,9 +108,11 @@ const layouts: Layouts = {
     { i: "fedspeak", x: 6, y: 89, w: 6, h: 9 },
     // Phase 12/13: paper bots — full-width (optimizer split + swing proposals + day sleeve).
     { i: "bot", x: 0, y: 98, w: 12, h: 12 },
-    { i: "system", x: 0, y: 110, w: 4, h: 6 },
-    { i: "sources", x: 4, y: 110, w: 4, h: 6 },
-    { i: "help", x: 8, y: 110, w: 4, h: 6 },
+    // Tradebook: paired entry/exit trades by sleeve + the learning loop.
+    { i: "tradebook", x: 0, y: 110, w: 12, h: 11 },
+    { i: "system", x: 0, y: 121, w: 4, h: 6 },
+    { i: "sources", x: 4, y: 121, w: 4, h: 6 },
+    { i: "help", x: 8, y: 121, w: 4, h: 6 },
   ],
 };
 
