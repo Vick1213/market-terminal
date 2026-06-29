@@ -1358,6 +1358,43 @@ export interface PolicyRiskResponse {
   tpu: TpuRow[];
 }
 
+// --- §12 follow-through: volatility-targeted exposure overlay ---
+export interface VolOverlaySignal {
+  symbol: string;
+  as_of: string;
+  forecast_vol_annual: number;
+  target_vol: number;
+  suggested_exposure: number;
+  regime: string;
+  vol_percentile: number;
+}
+export interface VolOverlayStratMetrics {
+  cagr?: number;
+  vol?: number;
+  sharpe?: number;
+  maxdd?: number;
+  calmar?: number;
+  avg_w?: number;
+  turnover_yr?: number;
+}
+export interface VolOverlayResponse {
+  signal: VolOverlaySignal;
+  backtest: Record<string, VolOverlayStratMetrics>;
+}
+
+export interface FactorRow {
+  symbol: string;
+  score: number;
+  bm: number | null;
+  qual: number | null;
+}
+export interface FactorRanksResponse {
+  as_of?: string;
+  leaders: FactorRow[];
+  laggards: FactorRow[];
+  error?: string;
+}
+
 // --- Phase 16 §11 rank 11: Fed speeches scored hawk/dove ---
 export interface FedSpeech {
   url: string;

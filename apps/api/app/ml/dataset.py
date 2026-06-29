@@ -44,10 +44,12 @@ multi-year history* and therefore modellable:
 Release-lag calibration (calendar days from the row's stamped reference date to
 the first session the value is usable *at the close*):
   * FRED ts is the **observation/reference** date, NOT the publish date, and the
-    stored value is the latest *revised* value — ALFRED point-in-time vintages
-    are NOT available on this DB. We cannot undo revisions; we mitigate the
-    worst (timing) leak with conservative publication lags and flag the
-    revision caveat. See REVISION_CAVEAT below.
+    stored ts_macro value is the latest *revised* value. For NFCI/ANFCI (the
+    revision-prone financial-conditions family that drove the apparent edge) we
+    now load ALFRED point-in-time first-print vintages from ts_macro_vintage and
+    join on the **actual publication date** (pit=True specs) — fully revision-
+    leak-safe. For the other revised series we still mitigate only the timing
+    leak with conservative publication lags. See REVISION_CAVEAT below.
   * FRED daily rates (H.15 etc.): published ~4:15pm the next business day → +1d.
   * H.4.1 balance sheet (WALCL/WRESBAL/WTREGEN, Wed ref): Thu 4:30pm → +2d.
   * NFCI/ANFCI (Fri ref): released the following Wed → +5d.
@@ -72,9 +74,13 @@ import numpy as np
 import pandas as pd
 
 REVISION_CAVEAT = (
-    "macro values are latest-revised (no ALFRED vintages on this DB); release "
-    "lags fix timing leakage but not revision leakage — treat as a known, "
-    "documented limitation per PLAN §12.3."
+    "NFCI/ANFCI now use ALFRED point-in-time first-print vintages (pit=True, from "
+    "ts_macro_vintage) — revision leak resolved for the family that carried the "
+    "apparent edge. Doing so collapsed NFCI's forward-IC from ~0.2 (revised) to "
+    "~0.06 (PIT) ⇒ the EDGE_FOUND verdict was ~60% revision leakage. Other revised "
+    "FRED series (WALCL/WRESBAL/WEI/M2/OAS) are still latest-revised; release lags "
+    "fix their timing leak but not revision leak — extend pit=True to any that "
+    "prove material per PLAN §12.3."
 )
 
 Table = Literal["ts_macro", "ts_cot"]
@@ -101,6 +107,7 @@ class FeatureSpec:
     key: str
     release_lag_days: int
     field: str = "value"
+    pit: bool = False  # load ALFRED point-in-time vintages (revision-leak-safe)
 
 
 # Asset-independent ("broadcast") macro/positioning features. Only series with
@@ -121,9 +128,16 @@ MACRO_SPECS: tuple[FeatureSpec, ...] = (
     # FRED credit OAS — only 2023-06+ on this DB; coverage-flagged at build.
     FeatureSpec("oas_ig", "ts_macro", "BAMLC0A0CM", 1),
     FeatureSpec("oas_hy", "ts_macro", "BAMLH0A0HYM2", 1),
-    # FRED weekly financial-conditions / balance sheet.
-    FeatureSpec("nfci", "ts_macro", "NFCI", 5),
-    FeatureSpec("anfci", "ts_macro", "ANFCI", 5),
+    # FRED weekly financial-conditions / balance sheet. NFCI/ANFCI are heavily
+    # revised: the latest-revised value leaks future information (its weekly
+    # *change* rank-correlates only ~0.45 with the genuinely-knowable first
+    # print). pit=True loads ALFRED initial-release vintages from
+    # ts_macro_vintage and joins on the actual publication date — verified
+    # 2026-06-28 to collapse the apparent NFCI edge from IC~0.2 to ~0.06 (= the
+    # honest deployable number). Falls back to the lagged revised value if no
+    # vintage rows are present (e.g. the table hasn't been backfilled).
+    FeatureSpec("nfci", "ts_macro", "NFCI", 5, pit=True),
+    FeatureSpec("anfci", "ts_macro", "ANFCI", 5, pit=True),
     FeatureSpec("walcl", "ts_macro", "WALCL", 2),
     FeatureSpec("wresbal", "ts_macro", "WRESBAL", 2),
     FeatureSpec("tga", "ts_macro", "WTREGEN", 2),
@@ -195,6 +209,27 @@ def _load_macro(duck, series_id: str) -> pd.DataFrame:
     return df
 
 
+def _load_macro_pit(duck, series_id: str) -> pd.DataFrame:
+    """ALFRED point-in-time first-print vintages for a revised series.
+
+    Returns ``[ref_date, release_date, value]`` — ``release_date`` is the actual
+    publication date the value became knowable (not a modelled lag), so a
+    backward as-of join on it is revision-leak-safe by construction. Empty if the
+    vintage table hasn't been backfilled (caller falls back to the revised value).
+    """
+    rows = duck.fetchall(
+        "SELECT ref_date, release_date, value FROM ts_macro_vintage "
+        "WHERE series_id = ? AND value IS NOT NULL ORDER BY release_date",
+        [series_id],
+    )
+    if not rows:
+        return pd.DataFrame(columns=["ref_date", "release_date", "value"])
+    df = pd.DataFrame(rows, columns=["ref_date", "release_date", "value"])
+    df["ref_date"] = pd.to_datetime(df["ref_date"]).dt.normalize()
+    df["release_date"] = pd.to_datetime(df["release_date"]).dt.normalize()
+    return df
+
+
 def _load_cot(duck, market_code: str, field: str) -> pd.DataFrame:
     rows = duck.fetchall(
         "SELECT ts, noncomm_long, noncomm_short, comm_long, comm_short, open_interest "
@@ -249,10 +284,13 @@ def release_join(
     """Backward as-of join of ``feature`` onto ``calendar`` on **release date**.
 
     ``feature`` has ``[ref_date, <col>]``; its release date is
-    ``ref_date + release_lag_days``. For each calendar day ``t`` the result
-    holds the value of the most recent observation **released on or before t**.
-    Returns columns ``[<col>, _release_date]`` indexed by the calendar — the
-    retained release date lets :func:`assert_pit_safe` verify no leak.
+    ``ref_date + release_lag_days`` — UNLESS the frame already carries an
+    explicit ``release_date`` column (ALFRED point-in-time vintages), in which
+    case that actual publication date is used verbatim and the lag is ignored.
+    For each calendar day ``t`` the result holds the value of the most recent
+    observation **released on or before t**. Returns columns
+    ``[<col>, _release_date]`` indexed by the calendar — the retained release
+    date lets :func:`assert_pit_safe` verify no leak.
 
     By construction (``direction='backward'``) no value with release_date > t
     can ever be selected, so the join is leak-safe *for the declared lag*; the
@@ -264,7 +302,14 @@ def release_join(
         cal["_release_date"] = pd.NaT
         return cal.set_index("date")
     feat = feature.copy()
-    feat["_release_date"] = feat["ref_date"] + pd.Timedelta(days=release_lag_days)
+    if "release_date" in feat.columns:
+        feat["_release_date"] = pd.to_datetime(feat["release_date"]).dt.normalize()
+    else:
+        feat["_release_date"] = feat["ref_date"] + pd.Timedelta(days=release_lag_days)
+    # merge_asof requires identical key dtypes; DuckDB DATE vs the price-derived
+    # TIMESTAMP calendar can differ in resolution (s vs us). Pin both to ns.
+    cal["date"] = cal["date"].astype("datetime64[ns]")
+    feat["_release_date"] = feat["_release_date"].astype("datetime64[ns]")
     feat = feat.sort_values("_release_date")
     merged = pd.merge_asof(
         cal,
@@ -375,7 +420,16 @@ def build_feature_matrix(
     qualified: list[tuple[FeatureSpec, pd.DataFrame]] = []
     for spec in macro_specs:
         if spec.table == "ts_macro":
-            feat = _load_macro(duck, spec.key)
+            if spec.pit:
+                feat = _load_macro_pit(duck, spec.key)
+                if feat.empty:  # vintages not backfilled → fall back to revised
+                    feat = _load_macro(duck, spec.key)
+                    report.caveats.append(
+                        f"{spec.name}: no ALFRED vintages on DB → using "
+                        f"latest-revised value (revision leak NOT mitigated)."
+                    )
+            else:
+                feat = _load_macro(duck, spec.key)
         elif spec.table == "ts_cot":
             feat = _load_cot(duck, spec.key, spec.field)
         else:  # pragma: no cover - guarded by Literal

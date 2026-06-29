@@ -322,6 +322,7 @@ async def lifespan(app: FastAPI):
         fed_speeches_pipeline=fed_speeches_pipeline,
         edgar_8k_pipeline=edgar_8k_pipeline,
         edgar_13d_pipeline=edgar_13d_pipeline,
+        duck=duck,
     )
     scheduler.start()
     log.info("scheduler started — jobs: %s", [j.id for j in scheduler.get_jobs()])

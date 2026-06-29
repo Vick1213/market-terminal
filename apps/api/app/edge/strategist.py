@@ -225,7 +225,7 @@ def _pct_return(duck: DuckStore, symbol: str, bars: int) -> float | None:
 
 def _equity_stock_picks(
     duck: DuckStore, sqlite: SqliteStore, benchmark: str, now: datetime,
-    max_picks: int = 5,
+    max_picks: int = 5, factor_leaders: list[dict] | None = None,
 ) -> list[dict]:
     """Score single names across every symbol-level signal the terminal
     stores; only names clearing the conviction bar survive, each carrying
@@ -239,6 +239,13 @@ def _equity_stock_picks(
         c = cands.setdefault(sym, {"symbol": sym, "score": 0.0, "evidence": []})
         c["score"] += pts
         c["evidence"].append(why)
+
+    # Fundamental factor screen (value/quality/small composite from EDGAR XBRL).
+    # A mild descriptive + — the composite has no deflation-cleared alpha (size
+    # carries it, fails DSR), so it nudges conviction, never drives it alone.
+    for r in factor_leaders or []:
+        add(r.get("symbol"), 1.0,
+            f"screens cheap/quality/small (factor composite {r.get('score', 0):+.1f})")
 
     # Insider Form 4 open-market buys (14d) — the strongest informed signal.
     for sym, buyers, value, ceo in duck.fetchall(
@@ -554,6 +561,38 @@ def compute_strategist(
     else:
         signals.append(_signal("cookbook", "Cookbook broken cards", None, "no data yet"))
 
+    # --- vol-targeted exposure overlay (the deployable risk signal) ----------
+    # The one signal with a validated edge: forward vol is forecastable, so we
+    # size exposure inversely to the GK-vol forecast. NOT alpha — defensive.
+    try:
+        from app.ml.vol_overlay import current_signal as _vol_signal
+        vs = _vol_signal("SPY", duck=duck)
+    except Exception as exc:  # missing OHLC / ml deps — fail soft
+        log.warning("vol_overlay signal failed (%s)", exc)
+        vs = None
+    if vs:
+        exp = float(vs["suggested_exposure"])
+        sig = _signal("vol_overlay", "Vol-target exposure", f"{exp:.0%}",
+                      f"SPY forecast vol {vs['forecast_vol_annual']:.0%} "
+                      f"({vs['vol_percentile']:.0%}-ile), target {vs['target_vol']:.0%}",
+                      vs["as_of"], max_age_days=3)
+        signals.append(sig)
+        if not sig["stale"]:
+            if exp <= 0.70:
+                cut = int(round((1.0 - exp) * 6))  # de-risk proportional to vol
+                tilts += [("equities", -cut, "vol_overlay",
+                           f"SPY forecast vol {vs['forecast_vol_annual']:.0%} above target — "
+                           f"vol-target sizing says hold {exp:.0%} equity, trim into the vol"),
+                          ("cash", +cut, "vol_overlay",
+                           "elevated-vol regime — vol-target overlay raises cash")]
+            elif exp >= 0.99 and float(vs["vol_percentile"]) <= 0.40:
+                tilts.append(("equities", +1, "vol_overlay",
+                              f"forecast vol calm ({vs['vol_percentile']:.0%}-ile) — "
+                              "vol-target allows full size"))
+    else:
+        signals.append(_signal("vol_overlay", "Vol-target exposure", None,
+                               "no SPY OHLC for vol overlay"))
+
     # --- RRG rotation (sector tilt inside the equity sleeve) -----------------
     rrg = compute_rrg(duck, sectors, benchmark)
     equity_tilt = None
@@ -847,8 +886,23 @@ def compute_strategist(
     total = sum(weights.values()) or 1.0
     weights = {k: v / total * 100.0 for k, v in weights.items()}
 
+    # --- fundamental factor screen (descriptive, feeds picks) -----------------
+    factor_leaders: list[dict] = []
+    try:
+        from app.ml.factors import latest_ranks as _factor_ranks
+        fr = _factor_ranks(top=8)
+        factor_leaders = fr.get("leaders", [])
+        signals.append(_signal(
+            "factors", "Factor screen leaders", len(factor_leaders),
+            ", ".join(p["symbol"] for p in factor_leaders[:6]) or "none",
+            fr.get("as_of"), max_age_days=45))
+    except Exception as exc:  # missing fundamentals DB — fail soft
+        log.warning("factor screen failed (%s)", exc)
+        signals.append(_signal("factors", "Factor screen leaders", None,
+                               "fundamentals not loaded"))
+
     # --- individual holdings inside each sleeve --------------------------------
-    picks = _equity_stock_picks(duck, sqlite, benchmark, now)
+    picks = _equity_stock_picks(duck, sqlite, benchmark, now, factor_leaders=factor_leaders)
     signals.append(_signal(
         "picks", "Single-name conviction", len(picks),
         ", ".join(f"{p['symbol']} ({p['score']:.1f})" for p in picks)

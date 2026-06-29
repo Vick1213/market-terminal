@@ -77,6 +77,35 @@ async def cot(request: Request) -> dict:
     return {"markets": markets}
 
 
+@router.get("/vol-overlay")
+async def vol_overlay(request: Request, symbol: str = Query("SPY"),
+                      target_vol: float = Query(0.15, ge=0.05, le=0.50)) -> dict:
+    """Volatility-targeted exposure overlay — the defensive use of forecastable
+    vol. Returns the latest suggested exposure/regime + backtest summary."""
+    from app.ml.vol_overlay import overlay_payload
+
+    duck = request.app.state.duck
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None, overlay_payload, duck, symbol, target_vol
+    )
+
+
+@router.get("/factors")
+async def factors(request: Request) -> dict:
+    """Fundamental factor screen (value/quality/investment/size composite) from
+    EDGAR XBRL. Descriptive cross-sectional ranks — NOT a deflation-cleared alpha
+    (the composite L/S fails DSR; size carries most of it). Leaders/laggards only."""
+    from app.ml.factors import latest_ranks
+
+    loop = asyncio.get_running_loop()
+    try:
+        ranks = await loop.run_in_executor(None, latest_ranks, 6)
+    except Exception as exc:  # missing fundamentals DB — fail soft
+        return {"error": str(exc), "leaders": [], "laggards": []}
+    return ranks
+
+
 @router.get("/short-interest")
 async def short_interest(request: Request) -> dict:
     from app.edge.short_interest import short_interest_summary

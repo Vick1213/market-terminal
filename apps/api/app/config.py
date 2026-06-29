@@ -206,6 +206,18 @@ class Settings(BaseSettings):
     # Strategist snapshot cadence (pure local reads + optional LLM notes).
     strategist_poll_minutes: int = 360
 
+    # --- ML meta-signal (PLAN §12) -----------------------------------------
+    # ALFRED point-in-time vintage refresh (NFCI/ANFCI first-print). Cheap, keyed
+    # FRED call; keeps the revision-safe ML feature current. Rides the FRED key
+    # gate; daily cadence is plenty (weekly series).
+    alfred_vintage_poll_minutes: int = 1440
+    # PIT snapshot logger (lever #3): logs every signal as-knowable-today into a
+    # SEPARATE data/ml/snapshots.duckdb so recent-only sources (FinBERT news,
+    # divergence, retail) accrete a backtestable PIT history over time. Ships
+    # DEFAULT-OFF like the trading bots — opt in to start the clock.
+    ml_snapshot_enabled: bool = False
+    ml_snapshot_poll_minutes: int = 1440
+
     # LLM provider for the brief/strategist narratives.
     #   ollama    — local, default ($0 tokens; uses ollama_url/ollama_model)
     #   openai    — api.openai.com (needs MARKET_LLM_API_KEY)

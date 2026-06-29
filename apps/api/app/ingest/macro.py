@@ -156,6 +156,58 @@ async def fetch_fred(
     return rows
 
 
+# --- ALFRED point-in-time vintages --------------------------------------
+
+# Revised FRED series whose *latest-revised* value would leak future information
+# into a backtest. We archive their ALFRED **initial-release** (first-print)
+# values, each stamped at the date it was actually published, so the ML feature
+# matrix can use the value that was knowable as-of each decision date. NFCI is
+# the empirically-confirmed leaker (its weekly *change* is ~60% of the model's
+# apparent edge, but revised vs first-print rank-correlate only ~0.45). ANFCI is
+# its sibling. Add other revised drivers here (WEI, WRESBAL) if shown material.
+ALFRED_VINTAGE_SERIES = ["NFCI", "ANFCI"]
+ALFRED_VINTAGE_START = "2004-01-01"
+
+
+async def fetch_alfred_first_print(
+    http: HttpClient, series_id: str, api_key: str, start: str
+) -> list[tuple[str, str, float]]:
+    """ALFRED initial-release (``output_type=4``): one row per observation with
+    its **first-published** value and the actual publication date
+    (``realtime_start``). This value carries zero future information, so a
+    feature built from it is revision-leak-safe by construction. Returns
+    ``[(ref_date, release_date, value)]`` (ISO strings). NFCI vintages only
+    exist from ~2011-06 on ALFRED; earlier observations are simply absent."""
+    try:
+        data = await http.get_json(
+            "https://api.stlouisfed.org/fred/series/observations",
+            params={
+                "series_id": series_id,
+                "api_key": api_key,
+                "file_type": "json",
+                "output_type": 4,  # initial release only
+                "realtime_start": "1990-01-01",
+                "realtime_end": "9999-12-31",
+                "observation_start": start,
+            },
+            conditional=False,  # key would be cached into the URL entry
+        )
+        obs = data.get("observations", [])
+    except Exception as exc:
+        log.warning("alfred %s failed: %s", series_id, exc)
+        return []
+    out: list[tuple[str, str, float]] = []
+    for o in obs:
+        ref, rel, vs = o.get("date", ""), o.get("realtime_start", ""), o.get("value", ".")
+        if not ref or not rel or vs.strip() in ("", "."):
+            continue
+        try:
+            out.append((ref, rel, float(vs)))
+        except ValueError:
+            continue
+    return out
+
+
 # --- CBOE ---------------------------------------------------------------
 
 
@@ -432,6 +484,35 @@ class MacroPipeline:
             )
         log.info("fred ingest: %s points (%s series)", total, len(FRED_SERIES))
         await self.recompute_composite()
+
+    async def run_alfred_vintages(self) -> None:
+        """Archive ALFRED first-print vintages for the revision-prone series into
+        ts_macro_vintage so the ML matrix can use point-in-time values. Idempotent
+        (INSERT OR REPLACE on series_id+ref_date+release_date). Default-safe: a
+        no-op without a FRED key, never touches ts_macro/the composite."""
+        if not self._fred_api_key:
+            log.info("alfred vintage ingest skipped (no MARKET_FRED_API_KEY)")
+            return
+        loop = asyncio.get_running_loop()
+        total = 0
+        for sid in ALFRED_VINTAGE_SERIES:
+            rows = await fetch_alfred_first_print(
+                self._http, sid, self._fred_api_key, ALFRED_VINTAGE_START
+            )
+            if not rows:
+                continue
+            await loop.run_in_executor(
+                None,
+                self._duck.executemany,
+                "INSERT OR REPLACE INTO ts_macro_vintage "
+                "(series_id, ref_date, release_date, value) VALUES (?, ?, ?, ?)",
+                [(sid, ref, rel, val) for ref, rel, val in rows],
+            )
+            total += len(rows)
+        log.info(
+            "alfred vintage ingest: %s first-print rows (%s series)",
+            total, len(ALFRED_VINTAGE_SERIES),
+        )
 
     async def run_cboe(self) -> None:
         loop = asyncio.get_running_loop()

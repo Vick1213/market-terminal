@@ -107,6 +107,7 @@ def build_scheduler(
     fed_speeches_pipeline: FedSpeechPipeline | None = None,
     edgar_8k_pipeline: Edgar8KPipeline | None = None,
     edgar_13d_pipeline: Edgar13DPipeline | None = None,
+    duck=None,
 ) -> AsyncIOScheduler:
     scheduler = AsyncIOScheduler(timezone="UTC")
     scheduler.add_job(
@@ -236,6 +237,17 @@ def build_scheduler(
             id="macro_move",
             **common,
         )
+        # ALFRED point-in-time vintages (NFCI/ANFCI first-print) for the ML
+        # feature matrix — revision-leak-safe. Rides the FRED key gate.
+        if settings.fred_api_key:
+            scheduler.add_job(
+                macro_pipeline.run_alfred_vintages,
+                trigger="interval",
+                minutes=settings.alfred_vintage_poll_minutes,
+                next_run_time=soon + timedelta(seconds=320),
+                id="macro_alfred_vintages",
+                **common,
+            )
         # Safety-net recompute (each ingest already recomputes on success).
         scheduler.add_job(
             macro_pipeline.recompute_composite,
@@ -633,5 +645,27 @@ def build_scheduler(
             id="trading_day",
             max_instances=1, coalesce=True, misfire_grace_time=60, jitter=10,
         )
+
+    # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.
+    # Logs every signal as-knowable-today into a separate snapshots DB so the
+    # recent-only sources accrete a backtestable PIT history. Reuses the live
+    # `duck` reader (no second open of the single-writer DB).
+    if duck is not None and settings.ml_snapshot_enabled:
+        from app.ml.snapshot import run_snapshot_job
+
+        async def _ml_snapshot():
+            await run_snapshot_job(duck)
+
+        scheduler.add_job(
+            _ml_snapshot,
+            trigger="interval",
+            minutes=settings.ml_snapshot_poll_minutes,
+            next_run_time=soon + timedelta(seconds=180),
+            id="ml_snapshot",
+            max_instances=1, coalesce=True, misfire_grace_time=600, jitter=30,
+        )
+    elif duck is not None:
+        log.info("ml snapshot logger disabled (set MARKET_ML_SNAPSHOT_ENABLED=true "
+                 "to start accruing a point-in-time signal history)")
 
     return scheduler

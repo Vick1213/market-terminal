@@ -81,6 +81,28 @@ def vol_scaled_label(
     return r / sigma
 
 
+def forward_realized_vol(close: pd.Series, h: int, *, log: bool = True) -> pd.Series:
+    """**Volatility target** (PLAN §12 lever #2): realised vol over the *next*
+    ``h`` sessions, ``std(log-returns over (t, t+h])``, in daily units, aligned
+    at the decision day ``t``.
+
+    Unlike direction, vol is genuinely forecastable (vol clusters) — this is the
+    one free-data target where an honest, gate-clearing edge is plausible. Modeled
+    in log space by default (vol is right-skewed and ~log-normal; ``log=True``
+    predicts ``ln σ`` so the loss isn't dominated by crisis spikes). The tail
+    ``h`` rows are NaN (no future window yet).
+    """
+    if h < 1:
+        raise ValueError("horizon h must be >= 1")
+    r = np.log(close).diff()
+    # Forward window (t, t+h]: shift the trailing rolling-std back by h so it sits
+    # at the decision day. min_periods just below h tolerates the odd missing day.
+    fwd = r.rolling(h, min_periods=max(2, h - 1)).std().shift(-h)
+    if log:
+        return np.log(fwd.clip(lower=1e-6))
+    return fwd
+
+
 # --- triple-barrier (López de Prado) ---------------------------------------
 
 

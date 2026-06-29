@@ -27,6 +27,7 @@ import { SourceHealthPanel } from "./panels/SourceHealthPanel";
 import { StrategistPanel } from "./panels/StrategistPanel";
 import { TffPositioningPanel } from "./panels/TffPositioningPanel";
 import { TreasurySupplyPanel } from "./panels/TreasurySupplyPanel";
+import { VolOverlayPanel } from "./panels/VolOverlayPanel";
 import { WatchlistPanel } from "./panels/WatchlistPanel";
 import { WhalesPanel } from "./panels/WhalesPanel";
 
@@ -60,6 +61,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "policyrisk", el: <PolicyRiskPanel /> },
   { i: "fedspeak", el: <FedSpeechesPanel /> },
   { i: "strategist", el: <StrategistPanel /> },
+  { i: "voloverlay", el: <VolOverlayPanel /> },
   { i: "bot", el: <BotPanel /> },
   { i: "sources", el: <SourceHealthPanel /> },
   { i: "help", el: <HelpPanel /> },
@@ -81,8 +83,10 @@ const layouts: Layouts = {
     { i: "positioning", x: 8, y: 21, w: 4, h: 6 },
     { i: "rotation", x: 0, y: 27, w: 6, h: 8 },
     { i: "cookbook", x: 6, y: 27, w: 6, h: 8 },
-    { i: "whales", x: 0, y: 35, w: 6, h: 8 },
-    { i: "strategist", x: 6, y: 35, w: 6, h: 8 },
+    { i: "whales", x: 0, y: 35, w: 4, h: 8 },
+    { i: "strategist", x: 4, y: 35, w: 4, h: 8 },
+    // §12 follow-through: vol-target overlay sits beside the strategist it feeds.
+    { i: "voloverlay", x: 8, y: 35, w: 4, h: 8 },
     // Phase 15: narrative-vs-money divergence + Polymarket front-running.
     { i: "divergence", x: 0, y: 43, w: 12, h: 10 },
     // Phase 16 §11 ranks 12+13: the two EDGAR corporate-event scanners, side by side.

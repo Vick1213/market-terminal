@@ -23,6 +23,8 @@ import type {
   SourceHealthResponse,
   ReportCardResponse,
   StrategistResponse,
+  VolOverlayResponse,
+  FactorRanksResponse,
   WatchlistLiveResponse,
   WatchlistQuote,
   WatchlistResponse,
@@ -466,6 +468,25 @@ export async function runClevelandNowcast(): Promise<{ ok: boolean }> {
 export async function fetchPolicyRisk(limit = 120): Promise<PolicyRiskResponse> {
   const res = await fetch(`${API_URL}/api/policy-risk?limit=${limit}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`policy-risk request failed: ${res.status}`);
+  return res.json();
+}
+
+// --- §12 follow-through: volatility-targeted exposure overlay ---
+export async function fetchVolOverlay(
+  symbol = "SPY",
+  targetVol = 0.15,
+): Promise<VolOverlayResponse> {
+  const res = await fetch(
+    `${API_URL}/api/vol-overlay?symbol=${symbol}&target_vol=${targetVol}`,
+    { cache: "no-store" },
+  );
+  if (!res.ok) throw new Error(`vol-overlay request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchFactors(): Promise<FactorRanksResponse> {
+  const res = await fetch(`${API_URL}/api/factors`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`factors request failed: ${res.status}`);
   return res.json();
 }
 

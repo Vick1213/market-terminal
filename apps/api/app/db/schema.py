@@ -58,6 +58,22 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # Point-in-time (ALFRED) vintages for *revised* FRED series. One row per
+    # observation per vintage that changed its value: release_date is the actual
+    # publication date that value became known. Lets the ML feature matrix use
+    # the value that was knowable as-of each decision date (revision-leak-safe)
+    # instead of ts_macro's latest-revised value. See app/ml/dataset.py.
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ts_macro_vintage (
+            series_id    VARCHAR NOT NULL,
+            ref_date     DATE NOT NULL,
+            release_date DATE NOT NULL,
+            value        DOUBLE,
+            PRIMARY KEY (series_id, ref_date, release_date)
+        );
+        """
+    )
     # Sentiment scores, keyed by text hash so a re-seen article is never rescored.
     duck.execute(
         """
