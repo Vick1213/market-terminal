@@ -309,7 +309,7 @@ async def lifespan(app: FastAPI):
         intl_pipeline, strategist_service, insider_scan_pipeline,
         filings_diff_pipeline, fomc_diff_pipeline,
         short_interest_pipeline=short_interest_pipeline,
-        optimizer=optimizer, day_trader=day_trader,
+        optimizer=optimizer, day_trader=day_trader, trading_bot=trading_bot,
         polymarket_pipeline=polymarket_pipeline,
         divergence_pipeline=divergence_pipeline,
         treasury_pipeline=treasury_pipeline,

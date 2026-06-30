@@ -123,6 +123,13 @@ async def managed_exits_disable(request: Request) -> dict:
     return await _bot(request).set_managed_exits(False)
 
 
+@router.post("/run-exits")
+async def run_exits(request: Request) -> dict:
+    """Risk-only: enforce swing protective exits NOW (stops / 30-wk-MA trend trail
+    / rotation), no rebalancing. Also runs daily after the close via cron."""
+    return await _bot(request).run_protective_exits()
+
+
 @router.post("/posture-sizing/enable")
 async def posture_sizing_enable(request: Request) -> dict:
     return await _bot(request).set_posture_sizing(True)

@@ -316,8 +316,20 @@ class Settings(BaseSettings):
     # Posture-scaled gross + per-sector cap in build_proposals (off = legacy
     # sizing: gross_factor 1.0, no sector cap).
     swing_posture_sizing: bool = False
-    # Trailing-stop give-back from the position's high-water mark (% below HWM,
-    # only armed once the name is in profit).
+    # SWING stops are sized to a WEEKS/MONTHS hold — wide, so normal pullbacks
+    # don't shake you out; the rotation lifecycle (weekly RRG) is the primary exit.
+    # Hard stop = a DISASTER backstop (min stop width, close-based): the swing exit
+    # uses max(bucket stop %, swing_hard_stop_pct) so a tight 8% bucket can't knife
+    # a long-term position.
+    swing_hard_stop_pct: float = 18.0
+    # Trailing exit MODE. "trend" (default, swing-correct): ride a WINNER until it
+    # closes below its swing_trail_ma_weeks-week MA — a multi-week trend break, NOT
+    # a normal pullback (pullbacks stay above the MA). "pct": legacy % give-back
+    # from the high-water mark (swing_trail_pct) — tighter, can exit early.
+    swing_trail_mode: str = "trend"
+    swing_trail_ma_weeks: int = 30
+    # Trailing-stop give-back from the high-water mark (% below HWM, in "pct" mode
+    # only, armed once the name is in profit).
     swing_trail_pct: float = 8.0
     # Profit-take: trim swing_profit_take_frac of the position once it is up this %.
     swing_profit_take_pct: float = 20.0

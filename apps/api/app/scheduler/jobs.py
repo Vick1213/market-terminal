@@ -94,6 +94,7 @@ def build_scheduler(
     short_interest_pipeline: ShortInterestPipeline | None = None,
     optimizer=None,
     day_trader=None,
+    trading_bot=None,
     polymarket_pipeline=None,
     divergence_pipeline=None,
     treasury_pipeline: TreasuryAuctionPipeline | None = None,
@@ -720,6 +721,22 @@ def build_scheduler(
             timezone="America/New_York",
             id="trading_swing_review",
             max_instances=1, coalesce=True, misfire_grace_time=6 * 3600,
+        )
+
+    # SWING protective-exits — risk-only, evaluated on the DAILY CLOSE. The swing
+    # book is weeks/months, so this runs ONCE a day just after the US close (not
+    # intraday — wicks are ignored, only closing prices matter), enforcing the wide
+    # disaster stop + the 30-week-MA trend trail + the weekly RRG rotation. It NEVER
+    # rebalances or opens positions, and is a no-op (no broker calls) unless the
+    # managed-exits toggle + env master + kill switch are all on.
+    if trading_bot is not None:
+        scheduler.add_job(
+            trading_bot.run_protective_exits,
+            trigger="cron",
+            day_of_week="mon-fri", hour=16, minute=10,
+            timezone="America/New_York",
+            id="trading_swing_exits",
+            max_instances=1, coalesce=True, misfire_grace_time=2 * 3600,
         )
 
     # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.

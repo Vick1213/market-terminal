@@ -819,6 +819,23 @@ class TradingBotService:
     def _clear_pos_state(self, norm_sym: str) -> None:
         self._sqlite.execute("DELETE FROM swing_pos_state WHERE symbol = ?", [norm_sym])
 
+    def _weekly_below_ma(self, symbol: str, ma_weeks: int, price: float):
+        """(below, ma): is `symbol` trading below its `ma_weeks`-week moving average
+        (its long-term uptrend broken)? Uses weekly closes from ts_price. Any
+        failure / thin history -> (False, None) so a missing read never forces an
+        exit. This is the swing-correct trailing test: pullbacks stay above the MA,
+        only a multi-week breakdown closes below it."""
+        try:
+            from app.edge.posture import _closes, _resample_last
+            wk = _resample_last(_closes(self._duck, symbol), "W-FRI")
+            if wk is None or len(wk) < ma_weeks + 1:
+                return False, None
+            ma = float(wk.rolling(ma_weeks).mean().iloc[-1])
+            return (price < ma), round(ma, 2)
+        except Exception:
+            log.debug("weekly MA check failed for %s", symbol, exc_info=True)
+            return False, None
+
     async def _protective_exits(self, positions: list[dict], account: dict) -> list[dict]:
         """Enforce real protective SELLs on held SWING positions BEFORE rebalancing.
 
@@ -866,6 +883,9 @@ class TradingBotService:
         weekly_state = ((posture or {}).get("weekly") or {}).get("state", "unknown")
         posture_state = (posture or {}).get("state", "neutral")
         trail_pct = float(getattr(self._s, "swing_trail_pct", 8.0))
+        trail_mode = getattr(self._s, "swing_trail_mode", "trend")
+        ma_weeks = int(getattr(self._s, "swing_trail_ma_weeks", 30))
+        hard_stop_floor = float(getattr(self._s, "swing_hard_stop_pct", 18.0))
         pt_pct = float(getattr(self._s, "swing_profit_take_pct", 20.0))
         pt_frac = float(getattr(self._s, "swing_profit_take_frac", 0.25))
 
@@ -892,7 +912,9 @@ class TradingBotService:
             self._set_pos_state(n, hwm, 1 if trimmed else 0)
 
             bucket = bucket_of.get(n)
-            stop_pct = float(self._stop_pct.get(bucket or "", 10.0))
+            # Hard stop = DISASTER backstop, widened to the swing floor so a tight
+            # bucket stop (8% equities) can't shake a weeks/months position out.
+            stop_pct = max(float(self._stop_pct.get(bucket or "", 10.0)), hard_stop_floor)
 
             # Rotation lifecycle (only when posture/RRG are available).
             rot_action, quad = None, None
@@ -902,13 +924,28 @@ class TradingBotService:
                 rot_action = name_lifecycle(quad, monthly_state, weekly_state,
                                             posture_state).get("action")
 
+            # Trailing exit rides a WINNER (only when in profit) until its trend
+            # breaks. "trend" mode (swing-correct): exit when price closes below its
+            # N-week MA — a multi-week breakdown, NOT a normal pullback (pullbacks
+            # stay above the MA). "pct" mode: legacy give-back from the HWM. Losses
+            # are the hard stop / rotation's job, never the trail.
+            trail_hit, trail_reason = False, ""
+            if price >= avg_entry:
+                if trail_mode == "trend":
+                    below, ma = self._weekly_below_ma(sym, ma_weeks, price)
+                    if below:
+                        trail_hit, trail_reason = True, (
+                            f"trend trail: {price:.2f} < {ma_weeks}wk MA {ma:.2f} (trend broke)")
+                elif price <= hwm * (1 - trail_pct / 100.0):
+                    trail_hit, trail_reason = True, (
+                        f"trailing stop: {price:.2f} ≤ HWM {hwm:.2f} −{trail_pct:.0f}%")
+
             qty, reason, full = 0.0, "", False
             if price <= avg_entry * (1 - stop_pct / 100.0):
                 qty, reason, full = sleeve_qty, (
                     f"stop-loss: {price:.2f} ≤ entry {avg_entry:.2f} −{stop_pct:.0f}%"), True
-            elif price >= avg_entry and price <= hwm * (1 - trail_pct / 100.0):
-                qty, reason, full = sleeve_qty, (
-                    f"trailing stop: {price:.2f} ≤ HWM {hwm:.2f} −{trail_pct:.0f}%"), True
+            elif trail_hit:
+                qty, reason, full = sleeve_qty, trail_reason, True
             elif rot_action == "exit":
                 qty, reason, full = sleeve_qty, f"RRG {quad or 'n/a'} — rotate out", True
             elif price >= avg_entry * (1 + pt_pct / 100.0) and not trimmed:
@@ -981,6 +1018,28 @@ class TradingBotService:
             [pid])
         log.info("swing protective SELL %s qty %s (%s)", symbol, qty, reason)
         return True
+
+    async def run_protective_exits(self) -> dict:
+        """RISK-ONLY pass: enforce protective exits on the swing book WITHOUT
+        rebalancing or opening anything. This is what the daily-close scheduler
+        calls — stops/trailing/rotation are evaluated on the close once a day (the
+        right cadence for a weeks/months book; intraday wicks are ignored). Gated
+        by the managed-exits toggle + env master + kill switch inside
+        _protective_exits, so it's a no-op (no broker calls) when disarmed."""
+        if not self._broker.enabled:
+            return {"ok": False, "detail": "Alpaca paper keys not configured"}
+        if not (self._config().get("managed_exits")
+                and getattr(self._s, "swing_managed_exits", False)
+                and self._config().get("enabled")):
+            return {"ok": True, "exits": [], "note": "managed exits off — no-op"}
+        try:
+            account = await self._broker.account(fresh=True)
+            positions = await self._broker.positions(fresh=True)
+        except BrokerError as exc:
+            return {"ok": False, "detail": exc.reason}
+        exits = await self._protective_exits(positions, account)
+        await self.reconcile()
+        return {"ok": True, "exits": exits}
 
     # ---- run (auto, paper-only) -------------------------------------------
     async def run(self) -> dict:
