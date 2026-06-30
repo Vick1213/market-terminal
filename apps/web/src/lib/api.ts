@@ -50,6 +50,7 @@ import type {
   FedSpeechesResponse,
   TradesResponse,
   DayReview,
+  SwingReview,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -437,6 +438,18 @@ export async function fetchDayReview(): Promise<DayReview> {
 export async function runDayReview(): Promise<DayReview> {
   const res = await fetch(`${API_URL}/api/bot/day/review/run`, { method: "POST" });
   if (!res.ok) throw new Error(`day review run failed: ${res.status}`);
+  return res.json();
+}
+
+export async function fetchSwingReview(): Promise<SwingReview> {
+  const res = await fetch(`${API_URL}/api/bot/swing/review`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`swing review request failed: ${res.status}`);
+  return res.json();
+}
+
+export async function runSwingReview(): Promise<SwingReview> {
+  const res = await fetch(`${API_URL}/api/bot/swing/review/run`, { method: "POST" });
+  if (!res.ok) throw new Error(`swing review run failed: ${res.status}`);
   return res.json();
 }
 

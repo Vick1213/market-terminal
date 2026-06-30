@@ -144,6 +144,46 @@ class AlertEngine:
                  "Cookbook reversion plays and risk sizing should be re-checked.",
         )]
 
+    def _rule_posture_flip(self, now: datetime, regime: str) -> list[Alert]:
+        """The macro POSTURE state changed (aggressive ↔ neutral ↔ defensive) —
+        the moment the swing method says to act. Crossing semantics on the stored
+        posture state (same last_text mechanism as _rule_regime_flip) so it fires
+        once per flip, not every sweep. Defensive flips are the most urgent."""
+        from app.edge.posture import compute_posture
+
+        try:
+            posture = compute_posture(self._duck, benchmark="SPY")
+        except Exception as exc:
+            log.warning("compute_posture failed in posture-flip rule: %s", exc)
+            return []
+        state = posture.get("state")
+        if not state:
+            return []
+        _, _, prev = self._state("posture_flip")
+        self._save_state("posture_flip", text=state)
+        if prev is None or prev == state:
+            return []
+        gross = posture.get("gross_factor")
+        gross_s = f"{gross:.0%}" if isinstance(gross, (int, float)) else "n/a"
+        reasons = [str(r) for r in (posture.get("reasons") or [])][:2]
+        reason_s = ("; ".join(reasons)) if reasons else "mixed signals"
+        # Flipping to defensive = de-risk now (most urgent); to aggressive =
+        # deploy (good news, lower urgency); to neutral = re-check sizing.
+        sev = {"defensive": "critical", "aggressive": "info"}.get(state, "warn")
+        return [Alert(
+            rule="posture_flip", key="posture_flip", severity=sev,
+            title=f"Posture flip: {prev} → {state}",
+            body=f"Macro posture changed from {prev} to {state.upper()} "
+                 f"(deploy {gross_s} of sleeve gross). Top drivers: {reason_s}. "
+                 "This is the swing method's act signal — re-check gross exposure, "
+                 "single-name permission, and safe-asset tilt.",
+            value=round(float(gross), 3) if isinstance(gross, (int, float)) else None,
+            detail={"state": state, "prev": prev,
+                    "monthly": posture.get("monthly", {}).get("state"),
+                    "weekly": posture.get("weekly", {}).get("state"),
+                    "regime": posture.get("regime")},
+        )]
+
     def _rule_macro_z(self, now: datetime, regime: str) -> list[Alert]:
         out: list[Alert] = []
         for sid, (label, warn_z, crit_z) in _Z_SERIES.items():
@@ -811,7 +851,7 @@ class AlertEngine:
     # ------------------------------------------------------------------ sweep
 
     _RULES = (
-        _rule_regime_flip, _rule_macro_z, _rule_vix_term, _rule_corr_break,
+        _rule_regime_flip, _rule_posture_flip, _rule_macro_z, _rule_vix_term, _rule_corr_break,
         _rule_retail_spike, _rule_insider_cluster, _rule_cot_extreme,
         _rule_gex_flip, _rule_large_print,
         _rule_netliq_drain, _rule_congress_watchlist, _rule_whale_new_position,

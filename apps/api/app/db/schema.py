@@ -953,6 +953,24 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         """
     )
 
+    # SWING learning loop: slow-cadence review of the long-term sleeve's closed
+    # round-trips (win-rate / P&L overall + by bucket / direction / symbol).
+    # Keyed by the date the review ran (the swing book spans weeks/months, so a
+    # review covers the whole open+closed tradebook, not one session).
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS swing_review (
+            review_date TEXT PRIMARY KEY,
+            created_at  TEXT NOT NULL,
+            stats       TEXT,                  -- JSON: win rates by bucket/direction/symbol
+            findings    TEXT,                  -- JSON: list of systematic-mistake findings
+            suggestions TEXT,                  -- JSON: [{param, current, proposed, rationale}]
+            summary     TEXT,                  -- narrative (LLM or deterministic fallback)
+            model       TEXT
+        );
+        """
+    )
+
     # Seed the default watchlist once (idempotent).
     sqlite.executemany(
         "INSERT OR IGNORE INTO watchlist (symbol, asset_class, display_name, sort_order) "

@@ -683,6 +683,45 @@ def build_scheduler(
             max_instances=1, coalesce=True, misfire_grace_time=3600,
         )
 
+    # SWING learning loop: a SLOW-cadence review of the long-term sleeve. The
+    # swing book holds for weeks/months, so a daily review would mostly repeat
+    # itself — it runs WEEKLY (Friday ~30 min after the US close) over the whole
+    # swing tradebook. Gated on the optimizer (the swing-sleeve allocator, always
+    # built when bots are wired). Same closure pattern as the day review: a fresh
+    # SqliteStore (WAL multi-connection safe) + the live `duck` reader + an LLM
+    # client with a deterministic template fallback.
+    if optimizer is not None:
+        async def _swing_review() -> None:
+            import asyncio as _asyncio
+
+            from app.db.sqlite import SqliteStore
+            from app.edge.llm import LlmClient
+            from app.trading.swing_review import review_swing
+
+            sq = SqliteStore(settings.sqlite_path)
+            llm = LlmClient(
+                provider=settings.llm_provider, model=settings.llm_model,
+                api_key=settings.llm_api_key, base_url=settings.llm_base_url,
+                ollama_url=settings.ollama_url, ollama_model=settings.ollama_model,
+                timeout=settings.llm_timeout_seconds,
+            )
+            try:
+                loop = _asyncio.get_running_loop()
+                await loop.run_in_executor(
+                    None, lambda: review_swing(sq, duck, settings, llm=llm)
+                )
+            finally:
+                sq.close()
+
+        scheduler.add_job(
+            _swing_review,
+            trigger="cron",
+            day_of_week="fri", hour=16, minute=30,
+            timezone="America/New_York",
+            id="trading_swing_review",
+            max_instances=1, coalesce=True, misfire_grace_time=6 * 3600,
+        )
+
     # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.
     # Logs every signal as-knowable-today into a separate snapshots DB so the
     # recent-only sources accrete a backtestable PIT history. Reuses the live

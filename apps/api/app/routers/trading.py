@@ -251,6 +251,33 @@ async def day_review_run(request: Request, date: str | None = Query(None)) -> di
     )
 
 
+@router.get("/swing/review")
+async def swing_review_get(request: Request, date: str | None = Query(None)) -> dict:
+    """Latest swing learning-loop review (or ?date=YYYY-MM-DD). {} if none."""
+    from app.trading.swing_review import latest_swing_review
+
+    return latest_swing_review(request.app.state.sqlite, date)
+
+
+@router.post("/swing/review/run")
+async def swing_review_run(request: Request, date: str | None = Query(None)) -> dict:
+    """Run the swing learning-loop review now (mines the swing tradebook +
+    writes a swing_review row)."""
+    import functools
+
+    from app.trading.swing_review import review_swing
+
+    state = request.app.state
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(
+        None,
+        functools.partial(
+            review_swing, state.sqlite, state.duck, state.settings,
+            review_date=date, llm=getattr(state, "llm", None),
+        ),
+    )
+
+
 @router.get("/trades")
 async def trades(request: Request, sleeve: str | None = Query(None),
                  status: str | None = Query(None)) -> dict:

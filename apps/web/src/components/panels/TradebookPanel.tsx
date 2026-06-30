@@ -7,10 +7,17 @@ import type {
   DayReviewFinding,
   DayReviewStatLeg,
   DayReviewSuggestion,
+  SwingReview,
   Trade,
 } from "@market/shared";
 import { TradeChart } from "@/components/charts/TradeChart";
-import { fetchDayReview, fetchTrades, runDayReview } from "@/lib/api";
+import {
+  fetchDayReview,
+  fetchSwingReview,
+  fetchTrades,
+  runDayReview,
+  runSwingReview,
+} from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
 type Tab = "swing" | "day" | "learning";
@@ -320,7 +327,34 @@ function SuggestionCard({ s }: { s: DayReviewSuggestion }) {
   );
 }
 
-function LearningTab() {
+// Shared summary header + run button used by both review views.
+function ReviewHeader({ label, model, runLabel, running, onRun }: {
+  label: string;
+  model?: string;
+  runLabel: string;
+  running: boolean;
+  onRun: () => void;
+}) {
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
+      <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+        {label}
+        {model ? ` · ${model}` : ""}
+      </span>
+      <button
+        className="expand-btn"
+        style={{ marginLeft: "auto", fontSize: 11 }}
+        disabled={running}
+        title={runLabel}
+        onClick={onRun}
+      >
+        {running ? "running…" : "↻ Run review now"}
+      </button>
+    </div>
+  );
+}
+
+function DayLearningView() {
   const qc = useQueryClient();
   const { data, isLoading, isError } = useQuery({
     queryKey: ["day-review"],
@@ -342,21 +376,13 @@ function LearningTab() {
 
   return (
     <div>
-      <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 6 }}>
-        <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
-          {review.trade_date ? `session ${review.trade_date}` : "learning loop"}
-          {review.model ? ` · ${review.model}` : ""}
-        </span>
-        <button
-          className="expand-btn"
-          style={{ marginLeft: "auto", fontSize: 11 }}
-          disabled={run.isPending}
-          title="Run the end-of-day review now (backfills P&L + LLM/heuristic findings)"
-          onClick={() => run.mutate()}
-        >
-          {run.isPending ? "running…" : "↻ Run review now"}
-        </button>
-      </div>
+      <ReviewHeader
+        label={review.trade_date ? `session ${review.trade_date}` : "day learning loop"}
+        model={review.model}
+        runLabel="Run the end-of-day review now (backfills P&L + LLM/heuristic findings)"
+        running={run.isPending}
+        onRun={() => run.mutate()}
+      />
 
       {isLoading && <div style={{ color: "var(--text-dim)" }}>loading…</div>}
 
@@ -399,6 +425,132 @@ function LearningTab() {
   );
 }
 
+// One realized-vs-marked summary line for the swing book.
+function SwingOverall({ stats }: { stats: SwingReview["stats"] }) {
+  const o = stats?.overall;
+  if (!o) return null;
+  return (
+    <div style={{ fontSize: 11, marginBottom: 8, display: "flex", gap: 12, flexWrap: "wrap" }}>
+      <span>
+        <span style={{ color: "var(--text-dim)" }}>closed </span>
+        {stats?.n_closed ?? 0}
+        {o.win_rate != null && (
+          <span style={{ color: "var(--text-dim)" }}> · {Math.round(o.win_rate * 100)}% win</span>
+        )}
+        <span style={{ color: pnlColor(o.total_pnl), marginLeft: 6 }}>{signed(o.total_pnl)}</span>
+      </span>
+      {!!stats?.n_open && (
+        <span>
+          <span style={{ color: "var(--text-dim)" }}>open </span>
+          {stats.n_open}
+          {stats.open_pnl != null && (
+            <span style={{ color: pnlColor(stats.open_pnl), marginLeft: 6 }}>
+              {signed(stats.open_pnl)}
+            </span>
+          )}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function SwingLearningView() {
+  const qc = useQueryClient();
+  const { data, isLoading, isError } = useQuery({
+    queryKey: ["swing-review"],
+    queryFn: fetchSwingReview,
+    refetchInterval: 60_000,
+  });
+  const run = useMutation({
+    mutationFn: runSwingReview,
+    onSuccess: () => qc.invalidateQueries({ queryKey: ["swing-review"] }),
+  });
+
+  const review = (data ?? {}) as SwingReview;
+  const empty = !review || Object.keys(review).length === 0 || review.no_data;
+  const stats = review.stats;
+  const findings = (review.findings ?? []).filter((f) => f.tag !== "none");
+  const suggestions = review.suggestions ?? [];
+
+  if (isError) return <div style={{ color: "var(--red)" }}>API unreachable — is the backend running?</div>;
+
+  return (
+    <div>
+      <ReviewHeader
+        label={review.review_date ? `reviewed ${review.review_date}` : "swing learning loop"}
+        model={review.model}
+        runLabel="Run the swing review now (mines the swing tradebook)"
+        running={run.isPending}
+        onRun={() => run.mutate()}
+      />
+
+      {isLoading && <div style={{ color: "var(--text-dim)" }}>loading…</div>}
+
+      {!isLoading && empty && (
+        <div style={{ color: "var(--text-dim)", fontSize: 11 }}>
+          no swing review yet — runs weekly after Friday’s close, or hit “Run review now”.
+        </div>
+      )}
+
+      {!isLoading && !empty && (
+        <>
+          {review.summary && (
+            <div style={{ fontSize: 12, lineHeight: 1.45, marginBottom: 8,
+              padding: "5px 7px", border: "1px solid var(--border, #2a2a2a)", borderRadius: 4 }}>
+              {review.summary}
+            </div>
+          )}
+
+          <SwingOverall stats={stats} />
+
+          <StatGroup title="Win-rate by bucket" legs={stats?.by_bucket} />
+          <StatGroup title="Long vs short" legs={stats?.by_direction} />
+          <StatGroup title="Win-rate by symbol" legs={stats?.by_symbol} />
+
+          {!!findings.length && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="macro-detail-title">Findings</div>
+              {findings.map((f, i) => <FindingRow key={i} f={f} />)}
+            </div>
+          )}
+
+          {!!suggestions.length && (
+            <div>
+              <div className="macro-detail-title">Suggested parameter tweaks</div>
+              {suggestions.map((s, i) => <SuggestionCard key={i} s={s} />)}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// Learning tab: a sub-toggle between the fast DAY loop and the slow SWING loop.
+function LearningTab() {
+  const [mode, setMode] = useState<"day" | "swing">("swing");
+  const MODES: { id: "day" | "swing"; label: string }[] = [
+    { id: "swing", label: "Long term" },
+    { id: "day", label: "Short term" },
+  ];
+  return (
+    <div>
+      <div className="chip-row" style={{ marginBottom: 6 }}>
+        {MODES.map((m) => (
+          <button
+            key={m.id}
+            className={`chip ${mode === m.id ? "active" : ""}`}
+            onClick={() => setMode(m.id)}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+      {mode === "swing" ? <SwingLearningView /> : <DayLearningView />}
+    </div>
+  );
+}
+
 // --- Panel shell ----------------------------------------------------------
 
 export function TradebookPanel() {
@@ -411,6 +563,7 @@ export function TradebookPanel() {
     if (last) {
       qc.invalidateQueries({ queryKey: ["trades"] });
       qc.invalidateQueries({ queryKey: ["day-review"] });
+      qc.invalidateQueries({ queryKey: ["swing-review"] });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [last]);

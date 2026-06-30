@@ -764,6 +764,26 @@ export interface StrategistEquityTilt {
   avoid: string[]; // lagging RRG sectors
 }
 
+// The shared macro POSTURE the whole book runs on (compute_posture). A
+// top-level key of the strategist snapshot; absent on snapshots taken before the
+// engine shipped, or null if the engine failed that run.
+export interface PostureTrendLeg {
+  state?: string; // "up" | "down" | "flat" | "unknown"
+  detail?: string;
+}
+
+export interface PostureSummary {
+  state: "aggressive" | "neutral" | "defensive" | string;
+  gross_factor: number; // equity gross scaler (defensive ~0.3 … aggressive ~1.0+)
+  score?: number; // posture points (not the regime composite)
+  monthly?: PostureTrendLeg; // long-trend leg
+  weekly?: PostureTrendLeg; // medium-trend leg
+  regime?: string;
+  breadth?: { value: number | null; trend?: string };
+  net_liquidity?: { value: number | null; trend?: string };
+  reasons?: string[];
+}
+
 export interface StrategistResponse {
   status?: "warming-up"; // only set when no snapshot exists yet
   as_of?: string;
@@ -771,6 +791,7 @@ export interface StrategistResponse {
   score?: number | null;
   buckets?: StrategistBucket[];
   equity_tilt?: StrategistEquityTilt | null;
+  posture?: PostureSummary | null; // shared macro posture strip
   signals?: StrategistSignal[];
   notes?: string[]; // 3-5 strategy notes (LLM or template)
   model?: string; // LLM label or "template"
@@ -1106,6 +1127,31 @@ export interface DayReview {
   trade_date?: string;
   created_at?: string;
   stats?: DayReviewStats;
+  findings?: DayReviewFinding[];
+  suggestions?: DayReviewSuggestion[];
+  summary?: string;
+  model?: string;
+  no_data?: boolean;
+}
+
+// --- Swing learning loop (mirrors DayReview, but over the swing tradebook) ---
+
+export interface SwingReviewStats {
+  trades_total?: number;
+  n_closed?: number;
+  n_open?: number;
+  overall?: DayReviewStatLeg;
+  open_pnl?: number | null; // marked unrealized P&L of the open book
+  by_bucket?: Record<string, DayReviewStatLeg>; // equities | metals | crypto | cash
+  by_direction?: Record<string, DayReviewStatLeg>; // long vs short
+  by_symbol?: Record<string, DayReviewStatLeg>;
+}
+
+// {} (empty object) when no swing review has been persisted yet.
+export interface SwingReview {
+  review_date?: string;
+  created_at?: string;
+  stats?: SwingReviewStats;
   findings?: DayReviewFinding[];
   suggestions?: DayReviewSuggestion[];
   summary?: string;

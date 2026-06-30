@@ -3,6 +3,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  PostureSummary,
   ReportCardResponse,
   StrategistBucket,
   StrategistHolding,
@@ -217,6 +218,73 @@ function ReportCard({ r }: { r: ReportCardResponse }) {
   );
 }
 
+// Compact macro POSTURE strip: state (color-coded), the equity gross factor,
+// monthly/weekly trend arrows, and the top reason(s). Small + consistent with
+// the rest of the panel.
+const POSTURE_COLOR: Record<string, string> = {
+  aggressive: "var(--green)",
+  neutral: "var(--yellow)",
+  defensive: "var(--red)",
+};
+
+const TREND_ARROW: Record<string, string> = { up: "▲", down: "▼", flat: "–" };
+
+function trendGlyph(leg?: { state?: string }): string {
+  return TREND_ARROW[leg?.state ?? ""] ?? "–";
+}
+
+function trendColor(leg?: { state?: string }): string {
+  const st = leg?.state;
+  return st === "up" ? "var(--green)" : st === "down" ? "var(--red)" : "var(--text-dim)";
+}
+
+function PostureStrip({ p }: { p: PostureSummary }) {
+  const color = POSTURE_COLOR[p.state] ?? "var(--text-dim)";
+  const reasons = (p.reasons ?? []).slice(0, 2);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        flexWrap: "wrap",
+        gap: 8,
+        fontSize: 11,
+        padding: "4px 7px",
+        marginBottom: 8,
+        border: `1px solid ${color}`,
+        borderRadius: 4,
+      }}
+      title={(p.reasons ?? []).join("\n")}
+    >
+      <span style={{ fontSize: 9, letterSpacing: 0.5, color: "var(--text-dim)" }}>POSTURE</span>
+      <span style={{ fontWeight: 700, color, textTransform: "uppercase" }}>{p.state}</span>
+      <span className="num" style={{ color: "var(--text-dim)" }} title="equity gross scaler">
+        gross ×{p.gross_factor.toFixed(1)}
+      </span>
+      <span style={{ color: "var(--text-dim)" }} title="monthly (long) trend">
+        M <span style={{ color: trendColor(p.monthly) }}>{trendGlyph(p.monthly)}</span>
+      </span>
+      <span style={{ color: "var(--text-dim)" }} title="weekly (medium) trend">
+        W <span style={{ color: trendColor(p.weekly) }}>{trendGlyph(p.weekly)}</span>
+      </span>
+      {!!reasons.length && (
+        <span
+          style={{
+            color: "var(--text-dim)",
+            flex: 1,
+            minWidth: 0,
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            whiteSpace: "nowrap",
+          }}
+        >
+          {reasons.join(" · ")}
+        </span>
+      )}
+    </div>
+  );
+}
+
 function SignalChip({ s }: { s: StrategistSignal }) {
   return (
     <span
@@ -326,6 +394,8 @@ export function StrategistPanel() {
                 as of {d.as_of?.replace("T", " ")}
               </span>
             </div>
+
+            {d.posture && <PostureStrip p={d.posture} />}
 
             <div className="macro-detail-title">Suggested allocation (click a row for why)</div>
             {d.buckets!.map((b) => (
