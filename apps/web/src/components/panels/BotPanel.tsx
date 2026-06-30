@@ -22,6 +22,8 @@ import {
   runDay,
   setBotEnabled,
   setBotMode,
+  setManagedExits,
+  setPostureSizing,
   setDayEnabled,
   setDayHedge,
   setDaySoftStop,
@@ -599,6 +601,8 @@ export function BotPanel() {
   const reconcile = useMutation({ mutationFn: reconcileBot, onSuccess: invalidate });
   const toggleEnabled = useMutation({ mutationFn: setBotEnabled, onSuccess: invalidate });
   const toggleMode = useMutation({ mutationFn: setBotMode, onSuccess: invalidate });
+  const toggleManagedExits = useMutation({ mutationFn: setManagedExits, onSuccess: invalidate });
+  const togglePostureSizing = useMutation({ mutationFn: setPostureSizing, onSuccess: invalidate });
   const execute = useMutation({
     mutationFn: executeBotProposal,
     onSuccess: (r) => {
@@ -634,6 +638,8 @@ export function BotPanel() {
   const brokerOff = d && !d.broker.enabled;
   const enabled = !!d?.config.enabled;
   const mode = d?.config.mode ?? "proposal";
+  const managedExits = !!d?.config.managed_exits;
+  const postureSizing = !!d?.config.posture_sizing;
   const acct = d?.account;
   const dailyLimit = d?.guardrails.daily_loss_limit_pct ?? 0;
   const halted =
@@ -732,6 +738,38 @@ export function BotPanel() {
                 }}
               >
                 mode: {mode}
+              </button>
+              <button
+                onClick={() => toggleManagedExits.mutate(!managedExits)}
+                disabled={toggleManagedExits.isPending || brokerOff}
+                title="Enforced protective exits: stop-loss / trailing / profit-take / RRG rotation (needs the env master swing_managed_exits on too)"
+                style={{
+                  fontSize: 11,
+                  padding: "2px 8px",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  border: `1px solid ${managedExits ? "var(--green)" : "var(--border, #2a2a2a)"}`,
+                  color: managedExits ? "var(--green)" : "var(--text-dim)",
+                  background: "transparent",
+                }}
+              >
+                exits: {managedExits ? "on" : "off"}
+              </button>
+              <button
+                onClick={() => togglePostureSizing.mutate(!postureSizing)}
+                disabled={togglePostureSizing.isPending || brokerOff}
+                title="Posture-scaled gross + per-sector cap when sizing proposals (needs the env master swing_posture_sizing on too)"
+                style={{
+                  fontSize: 11,
+                  padding: "2px 8px",
+                  borderRadius: 3,
+                  cursor: "pointer",
+                  border: `1px solid ${postureSizing ? "var(--green)" : "var(--border, #2a2a2a)"}`,
+                  color: postureSizing ? "var(--green)" : "var(--text-dim)",
+                  background: "transparent",
+                }}
+              >
+                posture: {postureSizing ? "on" : "off"}
               </button>
               {acct && (
                 <span style={{ marginLeft: "auto", fontSize: 11 }}>

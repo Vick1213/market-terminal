@@ -323,6 +323,26 @@ export async function setBotMode(mode: string): Promise<BotActionResponse> {
   return res.json();
 }
 
+// Swing: arm/disarm enforced protective exits (stop-loss / trailing / profit-take
+// / RRG rotation). Needs the env master swing_managed_exits on too. Default OFF.
+export async function setManagedExits(enabled: boolean): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/managed-exits/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`managed-exits ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// Swing: arm/disarm posture-scaled gross + per-sector cap when building proposals.
+// Needs the env master swing_posture_sizing on too. Default OFF (legacy sizing).
+export async function setPostureSizing(enabled: boolean): Promise<BotActionResponse> {
+  const res = await fetch(`${API_URL}/api/bot/posture-sizing/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`posture-sizing ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
 export async function fetchBotOptimizer(): Promise<BotOptimizer> {
   const res = await fetch(`${API_URL}/api/bot/optimizer`, { cache: "no-store" });
   if (!res.ok) throw new Error(`optimizer fetch failed: ${res.status}`);

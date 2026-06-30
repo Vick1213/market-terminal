@@ -307,6 +307,24 @@ class Settings(BaseSettings):
     # bot ticks collapses to a single paper-api call — the main IP-block guard.
     broker_cache_ttl_seconds: float = 4.0
 
+    # --- SWING execution overhaul (all default OFF; never change behaviour
+    #     until BOTH the env master here AND the panel toggle in bot_config are
+    #     armed). Master switches sit on top of the runtime bot_config toggles. ---
+    # Enforced protective exits (stop-loss / trailing / profit-take / RRG
+    # rotation) for swing positions, run early in run() before rebalancing.
+    swing_managed_exits: bool = False
+    # Posture-scaled gross + per-sector cap in build_proposals (off = legacy
+    # sizing: gross_factor 1.0, no sector cap).
+    swing_posture_sizing: bool = False
+    # Trailing-stop give-back from the position's high-water mark (% below HWM,
+    # only armed once the name is in profit).
+    swing_trail_pct: float = 8.0
+    # Profit-take: trim swing_profit_take_frac of the position once it is up this %.
+    swing_profit_take_pct: float = 20.0
+    swing_profit_take_frac: float = 0.25
+    # Per-sector gross cap for the swing book (% of equity) when posture sizing is on.
+    swing_sector_max_pct: float = 30.0
+
     # --- Phase 13: portfolio optimizer + two-sleeve bots ---
     # The optimizer splits capital between a long-term SWING sleeve (the
     # strategist allocator) and a short-term DAY sleeve (the fast trader),

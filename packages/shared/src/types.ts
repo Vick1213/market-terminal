@@ -833,6 +833,10 @@ export interface BotConfig {
   enabled: boolean; // kill switch
   mode: string; // "proposal" | "auto"
   updated_at: string | null;
+  // SWING execution overhaul (panel toggles; both default OFF and additionally
+  // gated by their env master switch server-side).
+  managed_exits?: boolean; // enforced stop-loss / trailing / profit-take / RRG rotation
+  posture_sizing?: boolean; // posture-scaled gross + per-sector cap in build_proposals
 }
 
 export interface BotBroker {

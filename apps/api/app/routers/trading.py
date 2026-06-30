@@ -112,6 +112,27 @@ async def set_mode(request: Request, mode: str = Body(..., embed=True)) -> dict:
         return {"ok": False, "detail": str(exc)}
 
 
+# --- SWING execution overhaul toggles (swing sleeve -> _bot) ---
+@router.post("/managed-exits/enable")
+async def managed_exits_enable(request: Request) -> dict:
+    return await _bot(request).set_managed_exits(True)
+
+
+@router.post("/managed-exits/disable")
+async def managed_exits_disable(request: Request) -> dict:
+    return await _bot(request).set_managed_exits(False)
+
+
+@router.post("/posture-sizing/enable")
+async def posture_sizing_enable(request: Request) -> dict:
+    return await _bot(request).set_posture_sizing(True)
+
+
+@router.post("/posture-sizing/disable")
+async def posture_sizing_disable(request: Request) -> dict:
+    return await _bot(request).set_posture_sizing(False)
+
+
 @router.get("/proposals")
 async def proposals(request: Request, run_id: str | None = Query(None),
                     limit: int = Query(100, le=500)) -> dict:

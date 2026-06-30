@@ -856,11 +856,32 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         "ALTER TABLE bot_config ADD COLUMN day_short_enabled INTEGER NOT NULL DEFAULT 0",
         # Pairs (relative-strength market-neutral) mode. Needs shorts armed. OFF.
         "ALTER TABLE bot_config ADD COLUMN day_pairs_enabled INTEGER NOT NULL DEFAULT 0",
+        # --- SWING execution overhaul ---
+        # Enforced protective exits (stop-loss / trailing / profit-take / RRG
+        # rotation) for the swing sleeve. Panel toggle on top of the env master
+        # (settings.swing_managed_exits). Default OFF — display-only stops today.
+        "ALTER TABLE bot_config ADD COLUMN swing_managed_exits INTEGER NOT NULL DEFAULT 0",
+        # Posture-scaled gross + per-sector cap when building swing proposals.
+        # Panel toggle on top of settings.swing_posture_sizing. Default OFF.
+        "ALTER TABLE bot_config ADD COLUMN swing_posture_sizing INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             sqlite.execute(stmt)
         except sqlite3.OperationalError:
             pass  # duplicate column — already migrated
+    # Per-symbol swing protective-exit state: the trailing-stop high-water mark
+    # and whether the position has already been profit-trimmed. One row per held
+    # name; cleared on a full exit so a re-entry starts fresh.
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS swing_pos_state (
+            symbol     TEXT PRIMARY KEY,
+            hwm        REAL,
+            trimmed    INTEGER DEFAULT 0,
+            updated_at TEXT
+        );
+        """
+    )
     # Optimizer snapshots: the capital split between sleeves, one row per run
     # (recompute replaces by minute). detail = JSON of the driving signals.
     sqlite.execute(

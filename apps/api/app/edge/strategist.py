@@ -42,6 +42,7 @@ from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.edge.cot import cot_summary
 from app.edge.llm import LlmClient
+from app.edge.posture import compute_posture, name_lifecycle
 from app.edge.rotation import SECTOR_NAMES, compute_rrg, compute_seasonality
 from app.edge.whales import whale_new_positions
 from app.ws.hub import ConnectionManager
@@ -494,6 +495,19 @@ def compute_strategist(
     signals: list[dict] = []
     tilts: list[tuple[str, float, str, str]] = []  # (bucket, delta, signal key, reason)
 
+    # --- POSTURE engine (the shared macro dial) ------------------------------
+    # One coherent top-down read (monthly tide / weekly trend / regime / breadth
+    # / net-liq) the whole book runs on. Computed once here and stapled onto the
+    # snapshot so the swing bot and the strategist agree on gross + lifecycle.
+    # Defensive: any failure leaves posture=None and the OLD behaviour intact
+    # (no gross scaling, no lifecycle tags).
+    posture: dict | None = None
+    try:
+        posture = compute_posture(duck, benchmark=benchmark)
+    except Exception as exc:  # missing data / pandas — degrade gracefully
+        log.warning("posture engine failed (%s) — snapshot runs un-postured", exc)
+        posture = None
+
     # --- regime / composite ------------------------------------------------
     regime = "unknown"
     row = duck.fetchone(
@@ -886,6 +900,23 @@ def compute_strategist(
     total = sum(weights.values()) or 1.0
     weights = {k: v / total * 100.0 for k, v in weights.items()}
 
+    # --- POSTURE gross scaling (de-risk the equity sleeve to match the tide) ---
+    # Scale the EQUITY bucket weight by posture['gross_factor'] (defensive -> 0.3,
+    # neutral -> 0.65, aggressive -> 1.0). Because each equity holding's weight_pct
+    # is the bucket weight x its sleeve share, scaling the bucket here scales every
+    # equity holding proportionally. The freed gross moves into the cash/short-
+    # duration sleeve (the existing 'cash' bucket = SGOV) so the book stays fully
+    # allocated. Only EQUITIES are scaled — gold/crypto/cash are left untouched.
+    if posture is not None:
+        try:
+            gf = float(posture.get("gross_factor", 1.0))
+            if gf < 1.0 and "equities" in weights:
+                freed = weights["equities"] * (1.0 - gf)
+                weights["equities"] *= gf
+                weights["cash"] = weights.get("cash", 0.0) + freed  # shift to safe sleeve
+        except Exception as exc:  # never let posture break the allocation
+            log.warning("posture gross scaling failed (%s)", exc)
+
     # --- fundamental factor screen (descriptive, feeds picks) -----------------
     factor_leaders: list[dict] = []
     try:
@@ -927,6 +958,25 @@ def compute_strategist(
         {**s, "share": s["share"] * (100.0 - stock_share) / 100.0}
         for s in _sector_sleeve(rrg)
     ]
+
+    # --- POSTURE lifecycle tags (enter/hold/trim/exit per equity name) --------
+    # Map each equity holding to an RRG quadrant: a sector ETF IS a sector, so it
+    # uses its own quadrant; a single name has no grid read (quadrant=None) and
+    # the classifier falls back to the weekly trend. Combined with the monthly +
+    # weekly posture states this tells the swing bot what to do with each name.
+    if posture is not None:
+        try:
+            quad_by_sym = {s["symbol"]: s.get("quadrant")
+                           for s in rrg.get("sectors", [])}
+            m_state = posture.get("monthly", {}).get("state", "unknown")
+            w_state = posture.get("weekly", {}).get("state", "unknown")
+            p_state = posture.get("state", "neutral")
+            for h in holdings_eq:
+                quad = quad_by_sym.get(h["symbol"]) if h.get("kind") == "sector" else None
+                h["lifecycle"] = name_lifecycle(quad, m_state, w_state, p_state)
+        except Exception as exc:  # tags are best-effort, never fatal
+            log.warning("posture lifecycle tagging failed (%s)", exc)
+
     holdings_by_bucket = {
         "equities": holdings_eq,
         "metals": _metals_split(duck, extremes),
@@ -950,6 +1000,9 @@ def compute_strategist(
                     "weight_pct": round(weights.get(key, 0.0) * h["share"] / 100.0, 1),
                     "score": h.get("score"),
                     "evidence": h["evidence"],
+                    # POSTURE lifecycle (enter/hold/trim/exit + trend_strength);
+                    # only equity holdings carry it, others are None.
+                    "lifecycle": h.get("lifecycle"),
                 }
                 for h in holdings_by_bucket.get(key, [])
             ],
@@ -963,6 +1016,9 @@ def compute_strategist(
         "score": score,
         "buckets": buckets_out,
         "equity_tilt": equity_tilt,
+        # The shared macro POSTURE the whole book runs on (None if the engine
+        # failed). Added field — existing snapshot consumers are unaffected.
+        "posture": posture,
         "signals": signals,
         "disclaimer": DISCLAIMER,
     }

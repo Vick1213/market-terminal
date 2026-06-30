@@ -283,6 +283,7 @@ async def lifespan(app: FastAPI):
         GuardrailConfig.from_settings(settings), optimizer,
         stop_pct=settings.bot_stop_assumption_pct,
         default_mode=settings.bot_mode_default,
+        settings=settings,
     )
     # Phase 13: fast day-trade sleeve (small universe, auto-exec paper). Uses
     # the DATA keys for intraday bars and the shared broker view for execution.

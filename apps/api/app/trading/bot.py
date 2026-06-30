@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 from datetime import datetime, timezone
 
 from app.db.duck import DuckStore
@@ -53,6 +54,18 @@ BUCKET_ASSET_CLASS = {
     "metals": "metal",
     "crypto": "crypto",
     "cash": "equity",  # SGOV / T-bill ETFs are ordinary equities to Alpaca
+}
+
+# Bridge from context.sector_for's coarse labels to the RRG sector ETF whose
+# quadrant governs that group — so a held swing name can be mapped to an RRG
+# read for the rotation-lifecycle exit. Groups with no clean sector ETF (crypto,
+# metals, broad index, bonds) get no RRG read and fall back to the weekly trend.
+_SECTOR_TO_ETF = {
+    "tech": "XLK", "megacap-tech": "XLK", "software": "XLK", "semis": "XLK",
+    "financials": "XLF", "fintech": "XLF",
+    "energy": "XLE", "healthcare": "XLV", "industrials": "XLI",
+    "staples": "XLP", "consumer": "XLY", "media": "XLY",
+    "utilities": "XLU", "materials": "XLB", "real-estate": "XLRE",
 }
 
 DISCLAIMER = (
@@ -117,6 +130,8 @@ def build_proposals(
     open_orders: list[dict] | None = None,
     sleeve_pct: float = 100.0,
     exclude_qty: dict[str, float] | None = None,
+    posture: dict | None = None,
+    sector_max_pct: float | None = None,
 ) -> dict:
     """Pure planning step: snapshot + broker state -> proposal dicts.
 
@@ -183,6 +198,31 @@ def build_proposals(
 
     allowlist = {t["symbol"] for t in targets.values()} | set(watchlist_alpaca)
 
+    # POSTURE sizing. The macro GROSS dial and the conviction tilt live in the
+    # STRATEGIST (the single brain — its snapshot weights are ALREADY posture-scaled
+    # by gross_factor and score-weighted), so the swing bot must NOT re-apply them or
+    # it would double-count. The one execution-level control the swing bot adds when
+    # posture-sizing is armed is a HARD per-SECTOR gross cap (which the strategist
+    # does not enforce). Off by default: no cap, exact legacy sizing.
+    scaled_tv: dict[str, float] = {
+        asym: equity * t["target_pct"] / 100.0 * sleeve_pct / 100.0
+        for asym, t in targets.items()
+    }
+
+    if posture and sector_max_pct and equity > 0:
+        from app.trading.context import sector_for  # local: avoid import cycle
+        cap = equity * sector_max_pct / 100.0
+        by_sector: dict[str, float] = {}
+        sec_of: dict[str, str] = {}
+        for asym, tv in scaled_tv.items():
+            sec = sector_for(asym)
+            sec_of[asym] = sec
+            by_sector[sec] = by_sector.get(sec, 0.0) + tv
+        for asym in scaled_tv:
+            total = by_sector[sec_of[asym]]
+            if total > cap and total > 0:
+                scaled_tv[asym] *= cap / total
+
     proposals: list[dict] = []
     for t in targets.values():
         asym = t["symbol"]
@@ -190,8 +230,9 @@ def build_proposals(
         bucket = t["bucket"]
         target_pct = t["target_pct"]
         # Scale the strategist target to THIS sleeve's slice of capital so the
-        # swing book leaves room for the day sleeve (sleeve_pct < 100).
-        target_value = equity * target_pct / 100.0 * sleeve_pct / 100.0
+        # swing book leaves room for the day sleeve (sleeve_pct < 100) — and, when
+        # posture sizing is on, by the macro gross dial / conviction / sector cap.
+        target_value = scaled_tv[asym]
         cur = pos_map.get(nrm, {})
         price = cur.get("price")
         # Carve out shares the OTHER sleeve owns so we never trade its position.
@@ -366,6 +407,7 @@ class TradingBotService:
         *,
         stop_pct: dict[str, float],
         default_mode: str = "proposal",
+        settings=None,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -374,6 +416,7 @@ class TradingBotService:
         self._cfg = cfg
         self._optimizer = optimizer
         self._stop_pct = dict(stop_pct)
+        self._s = settings
         # bot_config row is seeded by schema.init_sqlite; default_mode only seeds
         # a fresh row if somehow missing.
         self._sqlite.execute(
@@ -405,12 +448,42 @@ class TradingBotService:
 
     def _config(self) -> dict:
         row = self._sqlite.fetchone(
-            "SELECT enabled, mode, updated_at FROM bot_config WHERE id = 1"
+            "SELECT enabled, mode, updated_at, swing_managed_exits, swing_posture_sizing "
+            "FROM bot_config WHERE id = 1"
         )
         if row is None:
-            return {"enabled": False, "mode": "proposal", "updated_at": None}
+            return {"enabled": False, "mode": "proposal", "updated_at": None,
+                    "managed_exits": False, "posture_sizing": False}
         return {"enabled": bool(row["enabled"]), "mode": row["mode"],
-                "updated_at": row["updated_at"]}
+                "updated_at": row["updated_at"],
+                # Panel toggles for the swing execution overhaul (both default OFF
+                # and additionally gated by their env master switch at run time).
+                "managed_exits": bool(row["swing_managed_exits"]),
+                "posture_sizing": bool(row["swing_posture_sizing"])}
+
+    async def set_managed_exits(self, enabled: bool) -> dict:
+        """Arm/disarm enforced protective exits (stop-loss / trailing / profit-take
+        / RRG rotation) for the swing sleeve. The env master ``swing_managed_exits``
+        must also be on for the exits to actually fire."""
+        self._sqlite.execute(
+            "UPDATE bot_config SET swing_managed_exits = ?, updated_at = datetime('now') WHERE id = 1",
+            [1 if enabled else 0],
+        )
+        log.info("swing MANAGED EXITS -> %s", "ENABLED" if enabled else "DISABLED")
+        await self._broadcast("config")
+        return self._config()
+
+    async def set_posture_sizing(self, enabled: bool) -> dict:
+        """Arm/disarm posture-scaled gross + per-sector cap in build_proposals.
+        OFF (default) = legacy sizing. The env master ``swing_posture_sizing`` must
+        also be on for the scaling to apply."""
+        self._sqlite.execute(
+            "UPDATE bot_config SET swing_posture_sizing = ?, updated_at = datetime('now') WHERE id = 1",
+            [1 if enabled else 0],
+        )
+        log.info("swing POSTURE SIZING -> %s", "ENABLED" if enabled else "DISABLED")
+        await self._broadcast("config")
+        return self._config()
 
     async def set_enabled(self, enabled: bool) -> dict:
         self._sqlite.execute(
@@ -430,6 +503,24 @@ class TradingBotService:
         if canceled is not None:
             out["canceled_orders"] = canceled
         return out
+
+    # ---- swing execution overhaul helpers ---------------------------------
+    def _sizing_posture(self) -> dict | None:
+        """The posture dict to scale build_proposals by, or None for LEGACY sizing.
+        Gated by BOTH the panel toggle and the env master — None preserves today's
+        behaviour exactly (gross_factor 1.0, no sector cap)."""
+        if not (self._config().get("posture_sizing")
+                and getattr(self._s, "swing_posture_sizing", False)):
+            return None
+        try:
+            from app.edge.posture import compute_posture
+            return compute_posture(self._duck)
+        except Exception:
+            log.debug("posture compute failed", exc_info=True)
+            return None
+
+    def _sector_max_pct(self) -> float | None:
+        return getattr(self._s, "swing_sector_max_pct", None)
 
     async def set_mode(self, mode: str) -> dict:
         if mode not in ("proposal", "auto"):
@@ -477,12 +568,15 @@ class TradingBotService:
         positions = await self._broker.positions()
         open_orders = await self._broker.open_orders()
         swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
+        posture = self._sizing_posture()
         plan = build_proposals(
             snapshot, account, positions, self._watchlist_alpaca(),
             self._cfg, self._stop_pct, open_orders=open_orders,
             sleeve_pct=swing_pct, exclude_qty=sleeve_holdings(self._sqlite, "day"),
+            posture=posture, sector_max_pct=self._sector_max_pct() if posture else None,
         )
         plan["sleeve_pct"] = swing_pct
+        plan["posture"] = posture
 
         run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
@@ -574,10 +668,12 @@ class TradingBotService:
         open_orders = await self._broker.open_orders(fresh=True)
         swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
         snapshot = self._latest_snapshot() or {}
+        posture = self._sizing_posture()
         fresh = build_proposals(
             snapshot, account, positions, self._watchlist_alpaca(),
             self._cfg, self._stop_pct, open_orders=open_orders,
             sleeve_pct=swing_pct, exclude_qty=sleeve_holdings(self._sqlite, "day"),
+            posture=posture, sector_max_pct=self._sector_max_pct() if posture else None,
         )
         fp = next((x for x in fresh["proposals"]
                    if norm_symbol(x["symbol"]) == norm_symbol(symbol)), None)
@@ -700,11 +796,212 @@ class TradingBotService:
                  side, symbol, proposal_id, order.get("id"))
         return {"ok": True, "proposal_id": proposal_id, "order": order}
 
+    # ---- enforced protective exits ----------------------------------------
+    @staticmethod
+    def _floor6(qty: float) -> float:
+        """Floor to 6dp so a sell request never rounds UP past the held balance."""
+        return math.floor(max(0.0, qty) * 1_000_000) / 1_000_000
+
+    def _pos_state(self, norm_sym: str) -> dict | None:
+        row = self._sqlite.fetchone(
+            "SELECT hwm, trimmed FROM swing_pos_state WHERE symbol = ?", [norm_sym]
+        )
+        return dict(row) if row is not None else None
+
+    def _set_pos_state(self, norm_sym: str, hwm: float, trimmed: int) -> None:
+        self._sqlite.execute(
+            "INSERT INTO swing_pos_state (symbol, hwm, trimmed, updated_at) "
+            "VALUES (?,?,?, datetime('now')) ON CONFLICT(symbol) DO UPDATE SET "
+            "hwm = excluded.hwm, trimmed = excluded.trimmed, updated_at = excluded.updated_at",
+            [norm_sym, hwm, trimmed],
+        )
+
+    def _clear_pos_state(self, norm_sym: str) -> None:
+        self._sqlite.execute("DELETE FROM swing_pos_state WHERE symbol = ?", [norm_sym])
+
+    async def _protective_exits(self, positions: list[dict], account: dict) -> list[dict]:
+        """Enforce real protective SELLs on held SWING positions BEFORE rebalancing.
+
+        For each name the sleeve owns (sleeve_qty = broker qty − day-sleeve qty):
+          * STOP-LOSS  — price ≤ entry·(1−bucket stop%) → sell all.
+          * TRAILING   — in profit and price ≤ HWM·(1−trail%) → sell all.
+          * PROFIT-TAKE— up ≥ profit_take% and not yet trimmed → sell a fraction.
+          * ROTATION   — RRG lifecycle exit → sell all; trim → sell a fraction.
+        Sells never exceed sleeve_qty and at most ONE action runs per symbol per
+        run (idempotent). Gated by the panel toggle AND env master AND kill switch.
+        """
+        cfg = self._config()
+        if not (cfg.get("managed_exits") and getattr(self._s, "swing_managed_exits", False)
+                and cfg.get("enabled")):
+            return []
+        exclude = sleeve_holdings(self._sqlite, "day")  # shares the day sleeve owns
+        bucket_of: dict[str, str] = {}
+        for r in self._sqlite.fetchall(
+            "SELECT symbol, bucket FROM bot_proposals WHERE sleeve = 'swing' ORDER BY id ASC"
+        ):
+            if r["symbol"]:
+                bucket_of[norm_symbol(r["symbol"])] = r["bucket"]
+
+        # Posture + RRG once for the rotation-lifecycle leg (best-effort).
+        posture = None
+        quad_by_etf: dict[str, str] = {}
+        name_lifecycle = None
+        sector_for = None
+        try:
+            from app.edge.posture import compute_posture, name_lifecycle as _nl
+            from app.edge.rotation import compute_rrg
+            from app.trading.context import sector_for as _sf
+            name_lifecycle, sector_for = _nl, _sf
+            posture = compute_posture(self._duck)
+            sectors = list(getattr(self._s, "sector_etfs", []) or [])
+            bench = getattr(self._s, "rrg_benchmark", "SPY")
+            if sectors:
+                for s in (compute_rrg(self._duck, sectors, bench).get("sectors") or []):
+                    if s.get("symbol") and s.get("quadrant"):
+                        quad_by_etf[s["symbol"]] = s["quadrant"]
+        except Exception:
+            log.debug("posture/RRG for protective exits failed", exc_info=True)
+
+        monthly_state = ((posture or {}).get("monthly") or {}).get("state", "unknown")
+        weekly_state = ((posture or {}).get("weekly") or {}).get("state", "unknown")
+        posture_state = (posture or {}).get("state", "neutral")
+        trail_pct = float(getattr(self._s, "swing_trail_pct", 8.0))
+        pt_pct = float(getattr(self._s, "swing_profit_take_pct", 20.0))
+        pt_frac = float(getattr(self._s, "swing_profit_take_frac", 0.25))
+
+        actions: list[dict] = []
+        for p in positions:
+            sym = p.get("symbol")
+            if not sym:
+                continue
+            n = norm_symbol(sym)
+            broker_qty = _to_float(p.get("qty")) or 0.0
+            sleeve_qty = self._floor6(max(0.0, broker_qty - exclude.get(n, 0.0)))
+            if sleeve_qty <= 0:
+                continue
+            avg_entry = _to_float(p.get("avg_entry_price"))
+            price = _to_float(p.get("current_price"))
+            if not avg_entry or not price or price <= 0:
+                continue
+
+            # High-water mark: persist max(seen, price) so the trailing stop never
+            # ratchets down. trimmed persists across runs until a FULL exit clears it.
+            state = self._pos_state(n) or {}
+            trimmed = bool(state.get("trimmed"))
+            hwm = max(_to_float(state.get("hwm")) or 0.0, price)
+            self._set_pos_state(n, hwm, 1 if trimmed else 0)
+
+            bucket = bucket_of.get(n)
+            stop_pct = float(self._stop_pct.get(bucket or "", 10.0))
+
+            # Rotation lifecycle (only when posture/RRG are available).
+            rot_action, quad = None, None
+            if posture and name_lifecycle and sector_for:
+                etf = _SECTOR_TO_ETF.get(sector_for(sym))
+                quad = quad_by_etf.get(etf) if etf else None
+                rot_action = name_lifecycle(quad, monthly_state, weekly_state,
+                                            posture_state).get("action")
+
+            qty, reason, full = 0.0, "", False
+            if price <= avg_entry * (1 - stop_pct / 100.0):
+                qty, reason, full = sleeve_qty, (
+                    f"stop-loss: {price:.2f} ≤ entry {avg_entry:.2f} −{stop_pct:.0f}%"), True
+            elif price >= avg_entry and price <= hwm * (1 - trail_pct / 100.0):
+                qty, reason, full = sleeve_qty, (
+                    f"trailing stop: {price:.2f} ≤ HWM {hwm:.2f} −{trail_pct:.0f}%"), True
+            elif rot_action == "exit":
+                qty, reason, full = sleeve_qty, f"RRG {quad or 'n/a'} — rotate out", True
+            elif price >= avg_entry * (1 + pt_pct / 100.0) and not trimmed:
+                qty, reason, full = self._floor6(sleeve_qty * pt_frac), (
+                    f"profit-take: up ≥ {pt_pct:.0f}%, trim {pt_frac * 100:.0f}%"), False
+            elif rot_action == "trim" and not trimmed:
+                qty, reason, full = self._floor6(sleeve_qty * pt_frac), (
+                    f"RRG {quad or 'n/a'} — trim"), False
+
+            qty = min(self._floor6(qty), sleeve_qty)
+            if qty <= 0 or not reason:
+                continue
+            ok = await self._submit_protective_sell(sym, qty, reason, bucket)
+            if ok:
+                if full:
+                    self._clear_pos_state(n)   # full exit -> reset HWM + trimmed
+                else:
+                    self._set_pos_state(n, hwm, 1)  # partial -> mark trimmed
+            actions.append({"symbol": sym, "qty": qty, "reason": reason,
+                            "full_exit": full, "submitted": ok})
+        if actions:
+            log.info("swing protective exits: %d submitted", sum(1 for a in actions if a["submitted"]))
+            await self._broadcast("protective_exits")
+        return actions
+
+    async def _submit_protective_sell(self, symbol: str, qty: float, reason: str,
+                                      bucket: str | None) -> bool:
+        """Plain market SELL for a protective exit, recorded as a swing
+        proposal+order (mirrors execute()'s insert-before-submit pattern)."""
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        pid = self._sqlite.execute_returning_id(
+            "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, bucket, "
+            "side, order_type, qty, conviction, max_loss_est, rationale, status, blocks, sleeve) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, 'swing')",
+            [now[:10].replace("-", ""), now, symbol, None, bucket, "sell", "market", qty,
+             None, None, json.dumps({"kind": "protective_exit", "reason": reason}),
+             "proposed", json.dumps([])],
+        )
+        cid = f"bot-exit-{pid}"
+        is_crypto = "/" in symbol
+        tif = "gtc" if is_crypto else "day"
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+            "order_type, qty, status, submitted_at, sleeve) "
+            "VALUES (?,?,?,?,?,?, 'submitting', datetime('now'), 'swing')",
+            [pid, cid, symbol, "sell", "market", qty],
+        )
+        try:
+            order = await self._broker.submit_order(
+                symbol, "sell", qty=qty, order_type="market", time_in_force=tif,
+                client_order_id=cid)
+        except BrokerError as exc:
+            definite = exc.status is not None and 400 <= exc.status < 500
+            self._sqlite.execute(
+                "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                ["rejected" if definite else "unknown", exc.reason, cid])
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = 'rejected', blocks = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                [json.dumps([f"protective exit {exc.reason}"]), pid])
+            log.warning("swing protective sell %s rejected: %s", symbol, exc.reason)
+            return False
+        self._sqlite.execute(
+            "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+            "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+            [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+             _to_float(order.get("filled_avg_price")), json.dumps(order), cid])
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = 'submitted', updated_at = datetime('now') WHERE id = ?",
+            [pid])
+        log.info("swing protective SELL %s qty %s (%s)", symbol, qty, reason)
+        return True
+
     # ---- run (auto, paper-only) -------------------------------------------
     async def run(self) -> dict:
         """Propose, then auto-execute every actionable proposal IFF mode='auto'
-        and the kill switch is on. Otherwise behaves exactly like propose()."""
+        and the kill switch is on. Otherwise behaves exactly like propose().
+
+        Enforced protective exits run FIRST (independent of rebalancing) — gated
+        by the managed-exits toggle + env master + kill switch."""
+        exits: list[dict] = []
+        me_on = (self._config().get("managed_exits")
+                 and getattr(self._s, "swing_managed_exits", False)
+                 and self._config().get("enabled"))
+        if me_on and self._broker.enabled:
+            try:
+                ex_account = await self._broker.account(fresh=True)
+                ex_positions = await self._broker.positions(fresh=True)
+                exits = await self._protective_exits(ex_positions, ex_account)
+            except BrokerError as exc:
+                log.warning("protective exits skipped: %s", exc.reason)
         result = await self.propose()
+        result["protective_exits"] = exits
         if not result.get("ok"):
             return result
         cfg_state = self._config()
@@ -815,10 +1112,13 @@ class TradingBotService:
                     open_orders = await self._broker.open_orders()
                     snap = self._latest_snapshot() or {}
                     swing_pct = float(self._optimizer.latest().get("swing_pct") or 100.0)
+                    posture = self._sizing_posture()
                     fresh = build_proposals(
                         snap, account, positions, self._watchlist_alpaca(), self._cfg,
                         self._stop_pct, open_orders=open_orders, sleeve_pct=swing_pct,
                         exclude_qty=sleeve_holdings(self._sqlite, "day"),
+                        posture=posture,
+                        sector_max_pct=self._sector_max_pct() if posture else None,
                     )
                     live = {(norm_symbol(x["symbol"]), x["side"])
                             for x in fresh["proposals"] if x["status"] == "proposed"}
