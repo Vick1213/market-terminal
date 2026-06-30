@@ -361,6 +361,42 @@ export async function setDayEnabled(enabled: boolean): Promise<{ enabled: boolea
   return res.json();
 }
 
+// Arm/disarm the day sleeve's net-beta SH hedge (off by default — see BotPanel).
+export async function setDayHedge(enabled: boolean): Promise<{ hedge_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/hedge/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day hedge ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// Soft stop: pause NEW day entries but keep managing open positions (true = paused).
+export async function setDaySoftStop(paused: boolean): Promise<{ soft_stop: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/soft-stop/${paused ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day soft-stop ${paused ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// Shorts: arm/disarm SHORT entries for the day sleeve (equities only). Default OFF.
+export async function setDayShorts(enabled: boolean): Promise<{ short_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/shorts/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day shorts ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
+// Pairs: arm/disarm relative-strength market-neutral mode (needs shorts armed).
+export async function setDayPairs(enabled: boolean): Promise<{ pairs_enabled: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/pairs/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day pairs ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
 // --- Tradebook: paired entry/exit trades + the day-sleeve learning loop ---
 export async function fetchTrades(sleeve?: string, status?: string): Promise<TradesResponse> {
   const qs = new URLSearchParams();

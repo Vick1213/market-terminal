@@ -61,10 +61,14 @@ function TradeRow({ t, intraday, open, onToggle }: {
   onToggle: () => void;
 }) {
   const closed = t.status === "closed";
+  // Chart lines: entry + the PLANNED protective levels recorded at entry (real
+  // SL/TP from the bracket), falling back to the realized exit for TP when no
+  // bracket target was stored.
   const levels =
     t.entry_price != null
-      ? { entry: t.entry_price, tp: t.exit_price ?? null, sl: null }
+      ? { entry: t.entry_price, tp: t.tp_price ?? t.exit_price ?? null, sl: t.sl_price ?? null }
       : null;
+  const hasBracket = t.sl_price != null || t.tp_price != null || t.trail_price != null;
   return (
     <div style={{ borderBottom: "1px solid var(--border, #2a2a2a)", paddingBottom: 3, marginBottom: 3 }}>
       <div
@@ -72,7 +76,11 @@ function TradeRow({ t, intraday, open, onToggle }: {
         onClick={onToggle}
       >
         <span style={{ minWidth: 10, color: "var(--text-dim)", fontSize: 10 }}>{open ? "▾" : "▸"}</span>
-        <span className="num" style={{ flex: "0 0 34px", fontWeight: 600, color: "var(--green)" }}>BUY</span>
+        <span className="num" style={{ flex: "0 0 40px", fontWeight: 600,
+          color: t.direction === "short" ? "var(--red)" : "var(--green)" }}
+          title={t.direction === "short" ? "short (sell→buy)" : "long (buy→sell)"}>
+          {t.direction === "short" ? "SHORT" : "LONG"}
+        </span>
         <span style={{ flex: "0 0 60px", fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis" }}>{t.symbol}</span>
         <span className="num" style={{ flex: "0 0 56px", textAlign: "right", color: "var(--text-dim)", fontSize: 10 }}
           title={`${t.qty} shares`}>
@@ -110,6 +118,32 @@ function TradeRow({ t, intraday, open, onToggle }: {
         </span>
       </div>
 
+      {/* planned protective levels (SL / TP / trail), always visible under the row */}
+      {hasBracket && (
+        <div style={{ paddingLeft: 16, fontSize: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
+          {t.sl_price != null && (
+            <span style={{ color: "var(--red)" }} title="stop-loss recorded at entry">
+              SL {t.sl_price.toFixed(2)}
+            </span>
+          )}
+          {t.tp_price != null && (
+            <span style={{ color: "var(--green)" }} title="take-profit recorded at entry">
+              TP {t.tp_price.toFixed(2)}
+            </span>
+          )}
+          {t.trail_price != null && (
+            <span style={{ color: "var(--yellow)" }} title="trailing-stop give-back ($) recorded at entry">
+              trail ${t.trail_price.toFixed(2)}
+            </span>
+          )}
+          {t.rr != null && (
+            <span style={{ color: "var(--text-dim)" }} title="planned reward:risk">
+              R:R {t.rr.toFixed(1)}
+            </span>
+          )}
+        </div>
+      )}
+
       {/* truncated rationale, always visible under the row */}
       {t.reason && (
         <div
@@ -134,6 +168,17 @@ function TradeRow({ t, intraday, open, onToggle }: {
             )}
             <span>{t.sleeve}</span>
           </div>
+          {hasBracket && (
+            <div style={{ marginBottom: 3 }}>
+              <span style={{ color: "var(--accent, #7aa2f7)" }}>
+                exit plan{t.exit_type ? ` (${t.exit_type})` : ""}:{" "}
+              </span>
+              {t.sl_price != null && <span style={{ color: "var(--red)" }}>stop {t.sl_price.toFixed(2)}</span>}
+              {t.tp_price != null && <span style={{ color: "var(--green)" }}> · target {t.tp_price.toFixed(2)}</span>}
+              {t.trail_price != null && <span style={{ color: "var(--yellow)" }}> · trail ${t.trail_price.toFixed(2)}</span>}
+              {t.rr != null && <span style={{ color: "var(--text-dim)" }}> · planned R:R {t.rr.toFixed(1)}:1</span>}
+            </div>
+          )}
           {t.reason && (
             <div style={{ marginBottom: 3 }}>
               <span style={{ color: "var(--accent, #7aa2f7)" }}>why taken: </span>
@@ -248,13 +293,26 @@ function FindingRow({ f }: { f: DayReviewFinding }) {
 }
 
 function SuggestionCard({ s }: { s: DayReviewSuggestion }) {
+  // Advisory (low-sample / unvalidated) suggestions are de-emphasized so they're
+  // never mistaken for a vetted, apply-it change.
+  const advisory = s.actionable === false;
+  const arrowColor = advisory ? "var(--text-dim)" : "var(--accent, #7aa2f7)";
   return (
-    <div style={{ border: "1px solid var(--border, #2a2a2a)", borderRadius: 4, padding: "4px 6px", marginBottom: 4, fontSize: 11 }}>
+    <div style={{ border: `1px solid ${advisory ? "var(--border, #2a2a2a)" : "var(--accent, #7aa2f7)"}`,
+      borderRadius: 4, padding: "4px 6px", marginBottom: 4, fontSize: 11, opacity: advisory ? 0.7 : 1 }}>
       <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
         <span className="num" style={{ fontWeight: 600 }}>{s.param}</span>
+        {s.confidence && (
+          <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, textTransform: "uppercase",
+            color: advisory ? "var(--text-dim)" : "var(--green)",
+            border: `1px solid ${advisory ? "var(--text-dim)" : "var(--green)"}` }}
+            title={s.n != null ? `${s.n} closed trades` : undefined}>
+            {advisory ? "advisory" : "ready"} · {s.confidence}{s.n != null ? ` · n=${s.n}` : ""}
+          </span>
+        )}
         <span className="num" style={{ marginLeft: "auto" }}>
           <span style={{ color: "var(--text-dim)" }}>{String(s.current)}</span>
-          <span style={{ color: "var(--accent, #7aa2f7)" }}> → {String(s.proposed)}</span>
+          <span style={{ color: arrowColor }}> → {String(s.proposed)}</span>
         </span>
       </div>
       <div style={{ color: "var(--text-dim)", marginTop: 2 }}>{s.rationale}</div>
@@ -318,6 +376,7 @@ function LearningTab() {
           )}
 
           <StatGroup title="Win-rate by setup" legs={stats?.by_signal_kind} />
+          <StatGroup title="Long vs short" legs={stats?.by_direction} />
           <StatGroup title="Win-rate by regime" legs={stats?.by_regime} />
           <StatGroup title="Win-rate by symbol" legs={stats?.by_symbol} />
 

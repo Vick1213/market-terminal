@@ -318,17 +318,27 @@ class Settings(BaseSettings):
     day_universe: list[str] = [
         # index legs (the market factor — traded unhedged)
         "SPY", "QQQ", "IWM",
-        # megacap tech — hedged with QQQ
-        "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NFLX", "CRM", "ADBE",
-        # semis — hedged with SMH
-        "NVDA", "AMD", "AVGO", "MU", "QCOM", "SMCI", "TSM",
-        # crypto-proxy equities (high beta) — hedged with QQQ
-        "COIN", "MSTR",
-        # financials — hedged with XLF
-        "JPM", "BAC", "GS",
-        # energy — hedged with XLE
-        "XOM", "CVX",
-        # crypto spot (Alpaca: long-only, no hedge/bracket possible)
+        # megacap tech / internet
+        "AAPL", "MSFT", "AMZN", "GOOGL", "META", "TSLA", "NFLX", "CRM", "ADBE", "ORCL", "DIS",
+        # software / growth (high-beta, liquid intraday movers)
+        "PLTR", "NOW", "PANW", "CRWD", "SNOW",
+        # semis
+        "NVDA", "AMD", "AVGO", "MU", "QCOM", "SMCI", "TSM", "ARM", "AMAT", "LRCX", "MRVL", "INTC",
+        # internet / consumer discretionary
+        "UBER", "ABNB", "SHOP", "DASH",
+        # crypto-proxy equities + fintech (high beta)
+        "COIN", "MSTR", "HOOD", "PYPL",
+        # financials
+        "JPM", "BAC", "GS", "MS", "C", "WFC", "SCHW",
+        # healthcare
+        "LLY", "UNH",
+        # industrials
+        "BA", "CAT", "GE",
+        # energy
+        "XOM", "CVX", "COP", "SLB", "OXY",
+        # staples / retail (lower beta — diversifies the tape)
+        "WMT", "COST",
+        # crypto spot (Alpaca: long-only, no hedge/bracket/short possible)
         "BTC/USD", "ETH/USD",
     ]
     day_enabled_default: bool = False  # the day bot starts HALTED too
@@ -365,6 +375,12 @@ class Settings(BaseSettings):
     # let PSQ pile up). Only rebalanced when net beta drifts beyond the band.
     day_net_beta_enabled: bool = True
     day_net_beta_band_pct: float = 1.0      # rebalance when |day net-beta $| > this % of equity
+    # Net-beta hedge instrument. Phase 2: SHORT a dedicated broad S&P tracker (VOO)
+    # sized to the day book's net long beta — instead of BUYING the -1x inverse SH
+    # (which decayed and oscillated). VOO is β≈1, liquid, shortable, and NOT in the
+    # day universe, so it never tangles with a directional SPY/QQQ trade. Sizing
+    # uses the FRESH broker short qty (the oscillation fix).
+    day_hedge_symbol: str = "VOO"
     # Day guardrails (sized against the DAY SLEEVE budget, not whole equity).
     day_max_position_pct: float = 40.0      # one name <= this % of the day sleeve
     day_min_order_notional: float = 50.0
@@ -373,6 +389,24 @@ class Settings(BaseSettings):
     day_news_max_age_min: int = 30
     day_news_min_abs_score: float = 0.6
     day_news_min_outlets: int = 2
+    # --- Multi-strategy + short selling (Phase 1) ---------------------------
+    # Which intraday entry strategies the day trader runs (ranked together; the
+    # allocator takes only the top setups that fit available funds). All four are
+    # symmetric (long + short). ORB needs the opening-range cache (equities only).
+    day_strategies: list[str] = ["momentum", "reversion", "vwap_trend", "orb"]
+    day_orb_minutes: int = 30               # opening-range window for ORB
+    day_vwap_trend_min_pct: float = 0.15    # min % beyond VWAP to call a reclaim/loss
+    # SHORTS: master switch (env). A runtime panel toggle (bot_config.day_short_
+    # enabled, default OFF) sits on top. Shorts mirror longs (same SL/TP + min_rr +
+    # caps), equities only (Alpaca crypto is long-only), each with a MANDATORY
+    # upside stop. Sized from the SAME day-sleeve budget as longs ("match long").
+    day_short_enabled: bool = False
+    day_short_easy_to_borrow_only: bool = True  # skip hard-to-borrow names
+    # PAIRS (Phase 3): relative-strength market-neutral trades over intraday.PAIRS
+    # — long the strong leg + short the weak leg when their return spread diverges.
+    # Needs shorts armed (the short leg). Default OFF.
+    day_pairs_enabled: bool = False
+    day_pairs_min_spread_pct: float = 0.5   # min intraday return spread to open a pair
 
     # --- Phase 15: narrative-vs-money divergence + Polymarket front-running ---
     # Polymarket is keyless/public. The ingest snapshots active geopolitical/news

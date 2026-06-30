@@ -57,11 +57,28 @@ _BOND_LIKE = {
 _HEDGE_SECTOR = {"SOXS": "semis", "PSQ": "megacap-tech", "FAZ": "financials",
                  "ERY": "energy", "BITI": "crypto"}
 _SECTOR_EXTRA = {
-    "SPY": "index", "QQQ": "index", "IWM": "index", "DIA": "index",
+    "SPY": "index", "QQQ": "index", "IWM": "index", "DIA": "index", "VOO": "index", "IVV": "index",
     "GLD": "metals", "IAU": "metals", "SLV": "metals",
     "BTC/USD": "crypto", "ETH/USD": "crypto", "BTCUSD": "crypto", "ETHUSD": "crypto",
     "XLV": "healthcare", "XLP": "staples", "XLRE": "real-estate", "XLF": "financials",
     "XLE": "energy", "XLI": "industrials", "XLU": "utilities", "XLK": "tech",
+    # Expanded day universe → coarse sectors (for per-sector concentration caps).
+    "AAPL": "megacap-tech", "MSFT": "megacap-tech", "AMZN": "megacap-tech",
+    "GOOGL": "megacap-tech", "META": "megacap-tech", "TSLA": "megacap-tech",
+    "NFLX": "megacap-tech", "CRM": "software", "ADBE": "software", "ORCL": "software",
+    "DIS": "media", "PLTR": "software", "NOW": "software", "PANW": "software",
+    "CRWD": "software", "SNOW": "software",
+    "NVDA": "semis", "AMD": "semis", "AVGO": "semis", "MU": "semis", "QCOM": "semis",
+    "SMCI": "semis", "TSM": "semis", "ARM": "semis", "AMAT": "semis", "LRCX": "semis",
+    "MRVL": "semis", "INTC": "semis",
+    "UBER": "consumer", "ABNB": "consumer", "SHOP": "consumer", "DASH": "consumer",
+    "COIN": "crypto", "MSTR": "crypto", "HOOD": "fintech", "PYPL": "fintech",
+    "JPM": "financials", "BAC": "financials", "GS": "financials", "MS": "financials",
+    "C": "financials", "WFC": "financials", "SCHW": "financials",
+    "LLY": "healthcare", "UNH": "healthcare",
+    "BA": "industrials", "CAT": "industrials", "GE": "industrials",
+    "XOM": "energy", "CVX": "energy", "COP": "energy", "SLB": "energy", "OXY": "energy",
+    "WMT": "staples", "COST": "staples",
 }
 
 
@@ -247,15 +264,17 @@ def build_portfolio_state(
                          "beta": b, "sector": sec, "asset_class": ac,
                          "unrealized_pl": f(p.get("unrealized_pl"))})
 
-    # Sleeve value is capped at the broker's ACTUAL position qty: the local
-    # ledger can over-count when bracket take-profit/stop child legs fill on the
-    # broker but never get recorded (the desync that phantom-inflated day_value
-    # and froze the day budget). Bounding by broker truth makes the budget immune
-    # to that — a position the broker no longer holds contributes $0.
+    # Sleeve value is bounded into [0, broker qty]: the local ledger can OVER-count
+    # when bracket TP/stop child legs fill on the broker but never get recorded
+    # (phantom-inflated day_value, froze the budget), AND it can go NEGATIVE when a
+    # sell/heal over-counts vs recorded buys (a phantom oversold lot, e.g. AAPL −2
+    # the broker doesn't actually hold short). Clamping to max(0, min(ledger, broker))
+    # makes a long-only sleeve's value always ≥ 0 — a phantom short can't drive the
+    # day "trading amount" negative.
     broker_qty = {norm_symbol(p.get("symbol", "")): f(p.get("qty")) for p in positions}
 
     def _sleeve_value(hold: dict[str, float]) -> float:
-        return round(sum(min(q, broker_qty.get(n, 0.0)) * (price.get(n) or 0.0)
+        return round(sum(max(0.0, min(q, broker_qty.get(n, 0.0))) * (price.get(n) or 0.0)
                          for n, q in hold.items()), 2)
 
     st.sector_exposure = {k: round(v, 2) for k, v in sorted(sector.items(), key=lambda kv: -abs(kv[1]))}

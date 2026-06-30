@@ -73,7 +73,12 @@ def _is_synthetic(order_type, client_order_id) -> bool:
     if (order_type or "").lower() == "reconcile":
         return True
     coid = (client_order_id or "").lower()
-    return coid.startswith(("reconcile", "heal", "flatday"))
+    # Every ledger-adjustment / manual-flatten prefix the cleanup + resync scripts
+    # use: reconcile/heal (broker resync), and flat*/manual* (one-off position
+    # flattens done directly on Alpaca, e.g. "flatall-QCOM", "flat2-heal-…",
+    # "flatday-…", "manual-flatten-sh"). These close lots to match broker truth
+    # but must NOT surface as real round-trips with invented P&L.
+    return coid.startswith(("reconcile", "heal", "flat", "manual"))
 
 
 def _reason_map(sqlite) -> dict[int, str]:
@@ -90,6 +95,60 @@ def _reason_map(sqlite) -> dict[int, str]:
             reason = _reason_from_rationale(r["rationale"])
             if reason:
                 out[int(r["id"])] = reason
+        except Exception:
+            continue
+    return out
+
+
+def _bracket_from_rationale(raw) -> dict | None:
+    """Pull the protective-exit levels (stop-loss / take-profit / trailing) the
+    day bot computed for an ENTRY, out of a bot_proposals.rationale blob. The day
+    sleeve stores them per-leg under ``legs`` (the primary buy leg carries
+    sl_price/tp_price/trail_price/rr/exit_type); swing entries have none. Returns
+    a flat dict of the present levels, or None. Never raises."""
+    if not raw:
+        return None
+    try:
+        r = json.loads(raw) if isinstance(raw, str) else raw
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(r, dict):
+        return None
+    legs = r.get("legs")
+    leg = None
+    if isinstance(legs, list):
+        # The primary (entry) leg carries the brackets; fall back to the first.
+        leg = next((l for l in legs if isinstance(l, dict) and l.get("role") == "primary"), None)
+        if leg is None:
+            leg = next((l for l in legs if isinstance(l, dict)), None)
+    src = leg if isinstance(leg, dict) else r  # tolerate a flat (non-legged) shape
+    out = {
+        "sl_price": _to_float(src.get("sl_price")),
+        "tp_price": _to_float(src.get("tp_price")),
+        "trail_price": _to_float(src.get("trail_price")),
+        "rr": _to_float(src.get("rr")),
+        "exit_type": src.get("exit_type"),
+    }
+    if any(out[k] is not None for k in ("sl_price", "tp_price", "trail_price")):
+        return out
+    return None
+
+
+def _bracket_map(sqlite) -> dict[int, dict]:
+    """proposal_id -> {sl_price, tp_price, trail_price, rr, exit_type} for every
+    entry proposal that recorded protective levels."""
+    out: dict[int, dict] = {}
+    try:
+        rows = sqlite.fetchall(
+            "SELECT id, rationale FROM bot_proposals WHERE rationale IS NOT NULL"
+        )
+    except Exception:
+        return out
+    for r in rows:
+        try:
+            br = _bracket_from_rationale(r["rationale"])
+            if br:
+                out[int(r["id"])] = br
         except Exception:
             continue
     return out
@@ -163,7 +222,7 @@ def _latest_prices(duck, symbols: set[str]) -> dict[str, float]:
 
 
 def list_trades(sqlite, *, sleeve: str | None = None, status: str | None = None,
-                duck=None) -> list[dict]:
+                duck=None, marks: dict[str, float] | None = None) -> list[dict]:
     """Pair FILLED buys (entries) with subsequent FILLED sells (exits) per
     symbol+sleeve, FIFO, and return trade dicts.
 
@@ -173,7 +232,11 @@ def list_trades(sqlite, *, sleeve: str | None = None, status: str | None = None,
           status: "open"|"closed", pnl, pnl_pct, hold_minutes }
 
     ``sleeve`` filters to one of 'swing' | 'day'. ``status`` filters the result
-    to "open" or "closed". ``duck`` (optional) marks open lots to last price.
+    to "open" or "closed". Open lots are marked to a current price: the live
+    broker price in ``marks`` (norm_symbol -> price) when supplied takes
+    precedence; ``duck``'s ts_price close is the fallback. The broker price is the
+    accurate intraday mark — ts_price is a daily close and would show a stale,
+    sometimes wildly wrong, open P&L (e.g. yesterday's close on an intraday name).
     """
     params: list = []
     where = ["status = 'filled'", "filled_qty IS NOT NULL"]
@@ -192,12 +255,26 @@ def list_trades(sqlite, *, sleeve: str | None = None, status: str | None = None,
         return []
 
     reasons = _reason_map(sqlite)
+    brackets = _bracket_map(sqlite)
 
-    # Buckets per (sleeve, normalized-symbol). Each bucket keeps a FIFO queue of
-    # open buy lots; sells consume them oldest-first, splitting on quantity.
+    # Buckets per (sleeve, normalized-symbol). Each bucket holds a FIFO queue of
+    # open lots that are ALL the same direction (you're net long OR net short, not
+    # both). A same-side order opens/adds a lot; an opposite-side order closes them
+    # oldest-first (direction-aware P&L), and any leftover FLIPS the position by
+    # opening a lot the other way. This models LONG (buy→sell) and SHORT (sell→buy)
+    # round-trips uniformly.
     open_lots: dict[tuple[str, str], deque[dict]] = defaultdict(deque)
     trades: list[dict] = []
     raw_symbols: set[str] = set()
+
+    def _seed(lots, *, direction, slv, raw_sym, qty, price, ts, pid):
+        raw_symbols.add(raw_sym)
+        lots.append({
+            "sleeve": slv, "symbol": raw_sym, "direction": direction, "qty": qty,
+            "entry_price": price, "entry_time": ts,
+            "reason": reasons.get(int(pid)) if pid is not None else None,
+            "bracket": brackets.get(int(pid)) if pid is not None else None,
+        })
 
     for r in rows:
         try:
@@ -211,61 +288,52 @@ def list_trades(sqlite, *, sleeve: str | None = None, status: str | None = None,
             if qty <= 0:
                 continue
             synthetic = _is_synthetic(r["order_type"], r["client_order_id"])
-            key = (slv, nsym)
-            lots = open_lots[key]
+            lots = open_lots[(slv, nsym)]
+            cur_dir = lots[0]["direction"] if lots else None
+            open_dir = "long" if side == "buy" else "short"  # which a fresh lot would be
 
-            if side == "sell" and synthetic:
-                # Ledger-adjustment exit: consume open lots FIFO so the position
-                # reconciles to broker truth, but emit NO closed trade (no price,
-                # no real round-trip → no phantom P&L). Price is irrelevant here.
+            # CLOSE path: order is opposite the open lots → consume them FIFO.
+            if cur_dir is not None and cur_dir != open_dir:
                 remaining = qty
                 while remaining > _EPS and lots:
                     lot = lots[0]
                     matched = min(remaining, lot["qty"])
+                    # Synthetic (reconcile/heal/flatten) exits consume to reconcile
+                    # to broker truth but emit NO trade (no real round-trip P&L).
+                    if not synthetic and price is not None:
+                        trades.append(_closed_trade(lot, price, ts, matched))
                     lot["qty"] -= matched
                     remaining -= matched
                     if lot["qty"] <= _EPS:
                         lots.popleft()
+                # Leftover after fully closing → a real FLIP opens the other way.
+                if remaining > _EPS and not synthetic and price is not None:
+                    _seed(lots, direction=open_dir, slv=slv, raw_sym=raw_sym,
+                          qty=remaining, price=price, ts=ts, pid=r["proposal_id"])
                 continue
 
-            # Synthetic *buys* are not real entries — never seed a lot from them.
-            if synthetic:
+            # OPEN path: same direction (or flat). Synthetic opens aren't real
+            # entries (a heal/flatten buy/sell) → never seed a lot from them.
+            if synthetic or price is None:
                 continue
-            if price is None:
-                continue
-
-            if side == "buy":
-                raw_symbols.add(raw_sym)
-                pid = r["proposal_id"]
-                reason = reasons.get(int(pid)) if pid is not None else None
-                lots.append({
-                    "sleeve": slv, "symbol": raw_sym, "qty": qty,
-                    "entry_price": price, "entry_time": ts, "reason": reason,
-                })
-            elif side == "sell":
-                remaining = qty
-                while remaining > _EPS and lots:
-                    lot = lots[0]
-                    matched = min(remaining, lot["qty"])
-                    trades.append(_closed_trade(lot, price, ts, matched))
-                    lot["qty"] -= matched
-                    remaining -= matched
-                    if lot["qty"] <= _EPS:
-                        lots.popleft()
-                # A leftover real sell with no matching buy (short / out-of-band
-                # exit) is intentionally dropped — we only model long round-trips.
+            _seed(lots, direction=open_dir, slv=slv, raw_sym=raw_sym,
+                  qty=qty, price=price, ts=ts, pid=r["proposal_id"])
         except Exception:
             log.debug("tradebook: skipping bad order row", exc_info=True)
             continue
 
-    # Whatever buy quantity is still unmatched is an open position.
-    marks = _latest_prices(duck, raw_symbols)
+    # Whatever buy quantity is still unmatched is an open position. Mark it to a
+    # current price: ts_price close as the base, then OVERRIDE with the live
+    # broker price where we have it (accurate intraday mark).
+    mark_map = _latest_prices(duck, raw_symbols)
+    if marks:
+        mark_map.update({norm_symbol(k): v for k, v in marks.items() if v is not None})
     now = datetime.now(timezone.utc)
     for (slv, nsym), lots in open_lots.items():
         for lot in lots:
             if lot["qty"] <= _EPS:
                 continue
-            trades.append(_open_trade(lot, marks.get(nsym), now))
+            trades.append(_open_trade(lot, mark_map.get(nsym), now))
 
     if status in ("open", "closed"):
         trades = [t for t in trades if t["status"] == status]
@@ -279,13 +347,35 @@ def list_trades(sqlite, *, sleeve: str | None = None, status: str | None = None,
     return trades
 
 
+def _bracket_fields(lot: dict) -> dict:
+    """The entry's planned protective levels, flattened onto the trade dict
+    (all None when the entry had no recorded bracket — e.g. swing trades)."""
+    br = lot.get("bracket") or {}
+    return {
+        "sl_price": br.get("sl_price"),
+        "tp_price": br.get("tp_price"),
+        "trail_price": br.get("trail_price"),
+        "rr": br.get("rr"),
+        "exit_type": br.get("exit_type"),
+    }
+
+
+def _dir_pnl(direction: str, entry: float, exit_: float, qty: float):
+    """Direction-aware P&L: a long gains when price rises, a short when it falls."""
+    sign = -1.0 if direction == "short" else 1.0
+    pnl = round(sign * (exit_ - entry) * qty, 4)
+    pnl_pct = round(sign * (exit_ / entry - 1.0) * 100, 4) if entry else None
+    return pnl, pnl_pct
+
+
 def _closed_trade(lot: dict, exit_price: float, exit_time, qty: float) -> dict:
     ep = lot["entry_price"]
-    pnl = round((exit_price - ep) * qty, 4)
-    pnl_pct = round((exit_price / ep - 1.0) * 100, 4) if ep else None
+    direction = lot.get("direction", "long")
+    pnl, pnl_pct = _dir_pnl(direction, ep, exit_price, qty)
     return {
         "sleeve": lot["sleeve"],
         "symbol": lot["symbol"],
+        "direction": direction,
         "qty": round(qty, 8),
         "entry_price": ep,
         "entry_time": lot["entry_time"],
@@ -296,17 +386,19 @@ def _closed_trade(lot: dict, exit_price: float, exit_time, qty: float) -> dict:
         "pnl_pct": pnl_pct,
         "hold_minutes": _hold_minutes(_parse_dt(lot["entry_time"]), _parse_dt(exit_time)),
         "reason": lot.get("reason"),
+        **_bracket_fields(lot),
     }
 
 
 def _open_trade(lot: dict, mark: float | None, now: datetime) -> dict:
     ep = lot["entry_price"]
     qty = lot["qty"]
-    pnl = round((mark - ep) * qty, 4) if mark is not None else None
-    pnl_pct = round((mark / ep - 1.0) * 100, 4) if (mark is not None and ep) else None
+    direction = lot.get("direction", "long")
+    pnl, pnl_pct = (_dir_pnl(direction, ep, mark, qty) if mark is not None else (None, None))
     return {
         "sleeve": lot["sleeve"],
         "symbol": lot["symbol"],
+        "direction": direction,
         "qty": round(qty, 8),
         "entry_price": ep,
         "entry_time": lot["entry_time"],
@@ -317,4 +409,5 @@ def _open_trade(lot: dict, mark: float | None, now: datetime) -> dict:
         "pnl_pct": pnl_pct,
         "hold_minutes": _hold_minutes(_parse_dt(lot["entry_time"]), now),
         "reason": lot.get("reason"),
+        **_bracket_fields(lot),
     }

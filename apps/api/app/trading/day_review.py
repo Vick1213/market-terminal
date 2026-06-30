@@ -39,8 +39,17 @@ from app.trading.guardrails import norm_symbol
 
 log = logging.getLogger("market.trading.day_review")
 
-# Minimum closed trades before a per-setup / per-symbol signal is trusted.
+# Sample-size tiers. Tiny intraday samples are noise, and a grid-search over a
+# handful of net-move trades overfits (the same PBO/DSR trap the ML harness
+# guards against) — so we separate "worth showing" from "worth acting on":
+#   _MIN_TRADES        — show a per-setup/per-symbol STAT at all (informational).
+#   _MIN_FINDING_WARN  — escalate a negative finding from info → warn.
+#   _MIN_SUGGEST       — emit an ACTIONABLE parameter change (else advisory only).
+#   _MIN_GRID          — run the σ grid-search AND require out-of-sample confirmation.
 _MIN_TRADES = 3
+_MIN_FINDING_WARN = 12
+_MIN_SUGGEST = 30
+_MIN_GRID = 40
 # Flat band: |pnl| below this fraction of entry notional counts as a scratch.
 _FLAT_FRAC = 0.0005
 
@@ -222,6 +231,8 @@ def _compute_stats(rows: list) -> dict:
                                                       "pnl_sum": 0.0})
     by_symbol: dict[str, dict] = defaultdict(lambda: {"n": 0, "wins": 0, "losses": 0,
                                                       "pnl_sum": 0.0})
+    by_direction: dict[str, dict] = defaultdict(lambda: {"n": 0, "wins": 0, "losses": 0,
+                                                         "pnl_sum": 0.0})
     skip_reasons: dict[str, int] = defaultdict(int)
     block_reasons: dict[str, int] = defaultdict(int)
     conv_winners: list[float] = []
@@ -246,6 +257,9 @@ def _compute_stats(rows: list) -> dict:
         regime = (r["regime"] or "unknown")
         symbol = (r["symbol"] or "?").upper()
         conv = _to_float(r["conviction"])
+        # Long vs short: classify by the action taken. A short entry trades the
+        # 'short' side; everything else is the long lifecycle (buy open / sell close).
+        dirn = "short" if (r["side"] or "").lower() == "short" else "long"
 
         k = by_kind[kind]
         k["n"] += 1
@@ -256,13 +270,16 @@ def _compute_stats(rows: list) -> dict:
         sy = by_symbol[symbol]
         sy["n"] += 1
         sy["pnl_sum"] += pnl
+        dd = by_direction[dirn]
+        dd["n"] += 1
+        dd["pnl_sum"] += pnl
 
         if outcome == "win":
-            k["wins"] += 1; rg["wins"] += 1; sy["wins"] += 1
+            k["wins"] += 1; rg["wins"] += 1; sy["wins"] += 1; dd["wins"] += 1
             if conv is not None:
                 conv_winners.append(conv)
         elif outcome == "loss":
-            k["losses"] += 1; rg["losses"] += 1; sy["losses"] += 1
+            k["losses"] += 1; rg["losses"] += 1; sy["losses"] += 1; dd["losses"] += 1
             if conv is not None:
                 conv_losers.append(conv)
         elif outcome == "flat":
@@ -301,6 +318,7 @@ def _compute_stats(rows: list) -> dict:
         "trade_date_rows": total,
         "counts_by_decision": dict(counts_by_decision),
         "by_signal_kind": _finalize(by_kind),
+        "by_direction": _finalize(by_direction),
         "by_regime": _finalize(by_regime),
         "by_symbol": _finalize(by_symbol),
         "conviction": {
@@ -402,54 +420,109 @@ def _grid_search(trades: list[dict], settings) -> dict:
     pts = [t for t in trades
            if t.get("sigma") and t["sigma"] > 0 and t["outcome"] in ("win", "loss", "flat")]
     n = len(pts)
-    if n < _MIN_TRADES:
-        return {"ok": False, "n_trades": n,
-                "note": f"only {n} σ-tagged closed trades (need ≥{_MIN_TRADES}) — no grid search"}
-    moves = [(t["exit"] - t["entry"]) / t["sigma"] for t in pts]
-
-    def expectancy(s: float, tp: float) -> float:
-        return _mean([max(-s, min(tp, m)) for m in moves])
-
-    best = None
-    for s in _STOP_SIGMA_GRID:
-        for tp in _TP_SIGMA_GRID:
-            if tp / s < 1.0:
-                continue  # a target tighter than the stop is nonsensical
-            e = expectancy(s, tp)
-            if best is None or e > best["exp"]:
-                best = {"stop_sigma": s, "tp_sigma": tp, "exp": e}
-
     cur_stop = float(getattr(settings, "day_stop_sigma", 1.0))
     cur_tp = float(getattr(settings, "day_tp_sigma", 3.0))
+    if n < _MIN_GRID:
+        # Below this we don't even propose a direction: a grid max over a handful
+        # of net-move samples is overfit noise (PBO trap). Show the count only.
+        return {"ok": False, "actionable": False, "n_trades": n,
+                "note": (f"only {n} σ-tagged closed trades (need ≥{_MIN_GRID} for an "
+                         "out-of-sample-validated grid search) — not tuning stop/tp σ yet")}
+    moves = [(t["exit"] - t["entry"]) / t["sigma"] for t in pts]
+
+    def expectancy_over(ms: list[float], s: float, tp: float) -> float:
+        return _mean([max(-s, min(tp, m)) for m in ms]) or 0.0
+
+    def best_over(ms: list[float]) -> dict:
+        b = None
+        for s in _STOP_SIGMA_GRID:
+            for tp in _TP_SIGMA_GRID:
+                if tp / s < 1.0:
+                    continue  # a target tighter than the stop is nonsensical
+                e = expectancy_over(ms, s, tp)
+                if b is None or e > b["exp"]:
+                    b = {"stop_sigma": s, "tp_sigma": tp, "exp": e}
+        return b
+
+    # OUT-OF-SAMPLE guard against overfitting: optimize on the chronological first
+    # half (train), then require the winning (stop, tp) to ALSO beat the current
+    # setting on the held-out second half (test). A grid corner that only wins
+    # in-sample (the classic overfit) fails this and is NOT proposed as actionable.
+    half = n // 2
+    train, test = moves[:half], moves[half:]
+    b_train = best_over(train)
+    b_full = best_over(moves)
+    test_best = expectancy_over(test, b_train["stop_sigma"], b_train["tp_sigma"])
+    test_cur = expectancy_over(test, cur_stop, cur_tp)
+    oos_ok = (b_train["stop_sigma"] != cur_stop or b_train["tp_sigma"] != cur_tp) \
+        and (test_best > test_cur + 0.02)
     return {
-        "ok": True, "n_trades": n,
+        "ok": True,
+        "actionable": bool(oos_ok),
+        "n_trades": n,
         "current_stop_sigma": cur_stop, "current_tp_sigma": cur_tp,
-        "current_expectancy_sigma": round(expectancy(cur_stop, cur_tp), 3),
-        "best_stop_sigma": best["stop_sigma"], "best_tp_sigma": best["tp_sigma"],
-        "best_expectancy_sigma": round(best["exp"], 3),
-        "caveat": ("net entry→exit move used as a path proxy (no intrabar excursion); "
-                   f"only {n} trades — directional, not a backtest"),
+        "current_expectancy_sigma": round(expectancy_over(moves, cur_stop, cur_tp), 3),
+        # The OOS-validated (train-chosen) point is what we'd actually propose;
+        # the full-sample best is shown for transparency but never proposed alone.
+        "best_stop_sigma": b_train["stop_sigma"], "best_tp_sigma": b_train["tp_sigma"],
+        "best_expectancy_sigma": round(expectancy_over(moves, b_train["stop_sigma"], b_train["tp_sigma"]), 3),
+        "insample_best_stop_sigma": b_full["stop_sigma"], "insample_best_tp_sigma": b_full["tp_sigma"],
+        "oos_test_expectancy": round(test_best, 3), "oos_current_expectancy": round(test_cur, 3),
+        "oos_ok": bool(oos_ok),
+        "caveat": ("net entry→exit move used as a path proxy (NO intrabar excursion, so a tight "
+                   "stop's real whipsaw rate is understated); train/test split on "
+                   f"{n} trades — directional, not a true backtest"),
     }
 
 
 # --------------------------------------------------------------------------- #
 # Findings + suggestions
 # --------------------------------------------------------------------------- #
+def _confidence(n: int) -> str:
+    """Map a closed-trade count to a confidence label used across findings."""
+    if n >= _MIN_SUGGEST:
+        return "high"
+    if n >= _MIN_FINDING_WARN:
+        return "medium"
+    return "low"
+
+
 def _derive_findings(stats: dict) -> list[dict]:
     findings: list[dict] = []
 
-    # 1. A setup type with negative avg P&L over enough trades.
+    # 1. A setup type with negative avg P&L. Severity scales with sample size —
+    #    a 3-trade red flag is an observation (info), not a warning (warn).
     for kind, s in stats["by_signal_kind"].items():
         if kind == "none":
             continue
         closed = s["wins"] + s["losses"]
         if closed >= _MIN_TRADES and (s["avg_pnl"] or 0) < 0:
             findings.append({
-                "severity": "warn",
+                "severity": "warn" if closed >= _MIN_FINDING_WARN else "info",
                 "title": f"{kind} setups losing money",
                 "detail": (f"{kind} trades averaged {s['avg_pnl']:+.2f} P&L over "
-                           f"{closed} closed ({s['win_rate']:.0%} win-rate)."),
+                           f"{closed} closed ({s['win_rate']:.0%} win-rate)."
+                           + ("" if closed >= _MIN_SUGGEST
+                              else f" Sample is small (n={closed}) — observe, don't tune yet.")),
                 "tag": f"setup:{kind}",
+                "n": closed,
+                "confidence": _confidence(closed),
+            })
+
+    # 1b. A DIRECTION (long or short) systematically losing money.
+    for dirn, s in stats.get("by_direction", {}).items():
+        closed = s["wins"] + s["losses"]
+        if closed >= _MIN_TRADES and (s["avg_pnl"] or 0) < 0:
+            findings.append({
+                "severity": "warn" if closed >= _MIN_FINDING_WARN else "info",
+                "title": f"{dirn} trades losing money",
+                "detail": (f"{dirn} side averaged {s['avg_pnl']:+.2f} P&L over {closed} closed "
+                           f"({s['win_rate']:.0%} win-rate)."
+                           + ("" if closed >= _MIN_SUGGEST
+                              else f" Sample is small (n={closed}) — observe, don't tune yet.")),
+                "tag": f"direction:{dirn}",
+                "n": closed,
+                "confidence": _confidence(closed),
             })
 
     # 2. A symbol repeatedly losing.
@@ -458,11 +531,15 @@ def _derive_findings(stats: dict) -> list[dict]:
         if closed >= _MIN_TRADES and (s["win_rate"] is not None and s["win_rate"] < 0.34) \
                 and (s["avg_pnl"] or 0) < 0:
             findings.append({
-                "severity": "warn",
+                "severity": "warn" if closed >= _MIN_FINDING_WARN else "info",
                 "title": f"{sym} bleeds repeatedly",
                 "detail": (f"{sym} won {s['win_rate']:.0%} of {closed} closed trades, "
-                           f"avg {s['avg_pnl']:+.2f}."),
+                           f"avg {s['avg_pnl']:+.2f}."
+                           + ("" if closed >= _MIN_SUGGEST
+                              else f" Sample is small (n={closed}) — observe, don't tune yet.")),
                 "tag": f"symbol:{sym}",
+                "n": closed,
+                "confidence": _confidence(closed),
             })
 
     # 3. Heavy skipping for budget / sleeve-size reasons.
@@ -488,8 +565,11 @@ def _derive_findings(stats: dict) -> list[dict]:
         findings.append({
             "severity": "info",
             "title": "High net-beta hedge churn",
-            "detail": (f"{hedges} net-beta hedge rebalances in one session — the band may be "
-                       "too tight, generating round-trip cost."),
+            "detail": (f"{hedges} net-beta hedge rebalances in one session. This is usually a "
+                       "reconcile-lag OSCILLATION (the hedge can't see its own just-filled SH "
+                       "order so it overshoots the target and ping-pongs), NOT just a tight band "
+                       "— consider disarming the SH hedge (it's a weak unlevered hedge) rather "
+                       "than only widening the band."),
             "tag": "hedge_churn",
         })
 
@@ -499,11 +579,15 @@ def _derive_findings(stats: dict) -> list[dict]:
     if closed >= _MIN_TRADES and (mo.get("pnl_sum", 0) < 0):
         avg = mo["pnl_sum"] / mo["n"] if mo.get("n") else 0
         findings.append({
-            "severity": "warn",
+            "severity": "warn" if closed >= _MIN_FINDING_WARN else "info",
             "title": "Momentum chasing in defensive regimes",
             "detail": (f"momentum entries in non-risk-on regimes averaged {avg:+.2f} over "
-                       f"{closed} closed — buying breakouts against the tape."),
+                       f"{closed} closed — buying breakouts against the tape."
+                       + ("" if closed >= _MIN_SUGGEST
+                          else f" Sample is small (n={closed}) — observe, don't tune yet.")),
             "tag": "momentum_offrisk",
+            "n": closed,
+            "confidence": _confidence(closed),
         })
 
     # 6. Conviction inversion — losers had higher conviction than winners.
@@ -535,15 +619,28 @@ def _clamp(v: float, lo: float, hi: float) -> float:
 
 def _derive_suggestions(stats: dict, findings: list[dict], settings) -> list[dict]:
     tags = {f["tag"] for f in findings}
+    n_by_tag = {f["tag"]: f.get("n", 0) for f in findings}
     out: list[dict] = []
 
-    def add(param, current, proposed, rationale, finding):
+    def add(param, current, proposed, rationale, finding, n=None):
+        # A suggestion is only ACTIONABLE when it rests on a real sample. Below
+        # _MIN_SUGGEST it's still surfaced (so you can see what the bot is leaning
+        # toward) but flagged advisory — don't auto-apply it.
+        n = n_by_tag.get(finding, 0) if n is None else n
+        actionable = n >= _MIN_SUGGEST
+        conf = _confidence(n)
+        if not actionable:
+            rationale = (f"⚠ ADVISORY (n={n} < {_MIN_SUGGEST}, low confidence — observe, "
+                         f"don't apply): {rationale}")
         out.append({
             "param": param,
             "current": current,
             "proposed": proposed,
             "rationale": rationale,
             "finding": finding,
+            "n": n,
+            "confidence": conf,
+            "actionable": actionable,
         })
 
     # Reversion setups losing -> demand a more extreme stretch.
@@ -596,21 +693,23 @@ def _derive_suggestions(stats: dict, findings: list[dict], settings) -> list[dic
             f"A symbol bled repeatedly ({sym_finding.split(':', 1)[1]}): tighten the bracket "
             "stop so losers are cut faster.", sym_finding)
 
-    # σ-multiple grid-search: propose the stop_sigma / tp_sigma that maximized
-    # per-trade expectancy on the journaled trades (only when it beats current).
+    # σ-multiple grid-search: propose stop_sigma / tp_sigma ONLY when the winning
+    # point cleared the out-of-sample guard (it also beat the current setting on a
+    # held-out half). An in-sample-only max is overfit and is NOT proposed.
     gs = stats.get("grid_search") or {}
-    if gs.get("ok") and gs["best_expectancy_sigma"] > gs["current_expectancy_sigma"] + 1e-9:
+    if gs.get("ok") and gs.get("oos_ok"):
         rationale = (
-            f"σ grid-search over {gs['n_trades']} closed trades: stop {gs['best_stop_sigma']}σ / "
-            f"tp {gs['best_tp_sigma']}σ would have lifted per-trade expectancy "
-            f"{gs['current_expectancy_sigma']:+.2f}σ → {gs['best_expectancy_sigma']:+.2f}σ. "
-            f"CAVEAT: {gs['caveat']}.")
+            f"σ grid-search (OUT-OF-SAMPLE VALIDATED) over {gs['n_trades']} closed trades: stop "
+            f"{gs['best_stop_sigma']}σ / tp {gs['best_tp_sigma']}σ beat current both in-sample "
+            f"({gs['current_expectancy_sigma']:+.2f}σ → {gs['best_expectancy_sigma']:+.2f}σ) and "
+            f"on the held-out half ({gs['oos_current_expectancy']:+.2f}σ → "
+            f"{gs['oos_test_expectancy']:+.2f}σ). CAVEAT: {gs['caveat']}.")
         if gs["best_stop_sigma"] != gs["current_stop_sigma"]:
             add("day_stop_sigma", gs["current_stop_sigma"], gs["best_stop_sigma"],
-                rationale, "grid_search")
+                rationale, "grid_search", n=gs["n_trades"])
         if gs["best_tp_sigma"] != gs["current_tp_sigma"]:
             add("day_tp_sigma", gs["current_tp_sigma"], gs["best_tp_sigma"],
-                rationale, "grid_search")
+                rationale, "grid_search", n=gs["n_trades"])
 
     return out
 

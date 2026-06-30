@@ -844,6 +844,18 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         "ALTER TABLE bot_proposals ADD COLUMN sleeve TEXT NOT NULL DEFAULT 'swing'",
         "ALTER TABLE bot_orders ADD COLUMN sleeve TEXT NOT NULL DEFAULT 'swing'",
         "ALTER TABLE bot_config ADD COLUMN day_enabled INTEGER NOT NULL DEFAULT 0",
+        # Separate toggle for the day sleeve's net-beta SH hedge. Defaults OFF —
+        # an unlevered inverse ETF (SH, -1x) is a weak hedge without futures, and
+        # the rebalancer churns it; the user arms it from the panel when wanted.
+        "ALTER TABLE bot_config ADD COLUMN day_hedge_enabled INTEGER NOT NULL DEFAULT 0",
+        # Soft stop: when 1, the day bot keeps managing OPEN positions (exits,
+        # stops, reconcile) but opens NO new entries. A pause, not a kill switch.
+        "ALTER TABLE bot_config ADD COLUMN day_soft_stop INTEGER NOT NULL DEFAULT 0",
+        # Short selling: when 1 (and the env master allows), the day bot may OPEN
+        # short entries (equities only, mandatory upside stop). Default OFF.
+        "ALTER TABLE bot_config ADD COLUMN day_short_enabled INTEGER NOT NULL DEFAULT 0",
+        # Pairs (relative-strength market-neutral) mode. Needs shorts armed. OFF.
+        "ALTER TABLE bot_config ADD COLUMN day_pairs_enabled INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             sqlite.execute(stmt)

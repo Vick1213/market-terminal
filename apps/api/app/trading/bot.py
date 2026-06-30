@@ -382,6 +382,27 @@ class TradingBotService:
         )
 
     # ---- config / kill switch ---------------------------------------------
+    def _traded_by_sleeve(self) -> dict[tuple[str, str], float]:
+        """(sleeve, norm_symbol) -> total real shares the sleeve has traded (sum of
+        filled buy+sell magnitudes), EXCLUDING synthetic reconcile/heal/flatten
+        rows. Lets portfolio() attribute a broker-vs-ledger residual to the bot
+        that actually trades a name rather than calling it 'manual'."""
+        out: dict[tuple[str, str], float] = {}
+        for r in self._sqlite.fetchall(
+            "SELECT sleeve, symbol, filled_qty, order_type, client_order_id FROM bot_orders "
+            "WHERE status = 'filled' AND filled_qty IS NOT NULL"
+        ):
+            cid = (r["client_order_id"] or "").lower()
+            if (r["order_type"] or "").lower() == "reconcile" or \
+                    cid.startswith(("reconcile", "heal", "flat", "manual")):
+                continue
+            q = _to_float(r["filled_qty"]) or 0.0
+            if not q:
+                continue
+            key = (r["sleeve"] or "swing", norm_symbol(r["symbol"] or ""))
+            out[key] = out.get(key, 0.0) + abs(q)
+        return out
+
     def _config(self) -> dict:
         row = self._sqlite.fetchone(
             "SELECT enabled, mode, updated_at FROM bot_config WHERE id = 1"
@@ -844,6 +865,13 @@ class TradingBotService:
 
         day_book = sleeve_holdings(self._sqlite, "day")
         swing_book = sleeve_holdings(self._sqlite, "swing")
+        # Which sleeve has EVER traded each symbol (any real, non-synthetic order)
+        # and how much. Used to attribute a broker-vs-ledger residual to the bot
+        # that actually trades the name instead of dumping it in "manual": the
+        # local ledger lags the broker (a just-filled bracket entry sits 'new'
+        # until reconcile; old heals can over-count a sell), so a name the day bot
+        # is actively trading would otherwise flash as a phantom "manual" holding.
+        traded = self._traded_by_sleeve()
         # Latest swing proposal per symbol -> bucket / target / invalidation.
         swing_props: dict[str, dict] = {}
         for r in self._sqlite.fetchall(
@@ -867,8 +895,21 @@ class TradingBotService:
             avg_entry = _to_float(p.get("avg_entry_price"))
             day_qty = max(0.0, day_book.get(n, 0.0))
             swing_qty = max(0.0, swing_book.get(n, 0.0))
-            # Remainder beyond what either bot's filled book accounts for is manual.
-            manual_qty = max(0.0, qty - day_qty - swing_qty)
+            # Remainder beyond what either bot's filled book accounts for.
+            residual = max(0.0, qty - day_qty - swing_qty)
+            # Attribute that residual to whichever bot actually trades this name
+            # (ledger lag / heal over-counts, not a real manual buy). Only a name
+            # NEITHER bot has ever traded stays "manual / other".
+            day_vol = traded.get(("day", n), 0.0)
+            swing_vol = traded.get(("swing", n), 0.0)
+            if residual > 1e-9 and (day_vol or swing_vol):
+                if day_vol >= swing_vol:
+                    day_qty += residual
+                else:
+                    swing_qty += residual
+                manual_qty = 0.0
+            else:
+                manual_qty = residual
             # Dominant sleeve = whoever owns the most shares; 'mixed' only labels
             # the primary, the per-sleeve qty split is reported alongside.
             owners = {"day": day_qty, "swing": swing_qty, "manual": manual_qty}

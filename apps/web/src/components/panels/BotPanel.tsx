@@ -23,6 +23,10 @@ import {
   setBotEnabled,
   setBotMode,
   setDayEnabled,
+  setDayHedge,
+  setDaySoftStop,
+  setDayShorts,
+  setDayPairs,
 } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -390,9 +394,17 @@ function DaySection() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [last]);
   const toggle = useMutation({ mutationFn: setDayEnabled, onSuccess: inv });
+  const hedgeToggle = useMutation({ mutationFn: setDayHedge, onSuccess: inv });
+  const softStopToggle = useMutation({ mutationFn: setDaySoftStop, onSuccess: inv });
+  const shortsToggle = useMutation({ mutationFn: setDayShorts, onSuccess: inv });
+  const pairsToggle = useMutation({ mutationFn: setDayPairs, onSuccess: inv });
   const run = useMutation({ mutationFn: runDay, onSuccess: inv });
   const d = q.data;
   const enabled = !!d?.config.enabled;
+  const hedgeOn = !!d?.config.hedge_enabled;
+  const softStop = !!d?.config.soft_stop;
+  const shortsOn = !!d?.config.short_enabled;
+  const pairsOn = !!d?.config.pairs_enabled;
 
   return (
     <div style={{ marginTop: 10, borderTop: "1px solid var(--border, #2a2a2a)", paddingTop: 6 }}>
@@ -407,6 +419,69 @@ function DaySection() {
         <span style={{ marginLeft: "auto", display: "flex", gap: 6 }}>
           <button className="expand-btn" disabled={run.isPending} title="Run a day-trade tick now"
             onClick={() => run.mutate()}>{run.isPending ? "…" : "↻"}</button>
+          <button
+            onClick={() => shortsToggle.mutate(!shortsOn)}
+            disabled={shortsToggle.isPending}
+            title={shortsOn
+              ? "SHORTS ON — day bot may open short entries (equities only, mandatory upside stop). Click to disable."
+              : "Shorts OFF — day bot is long-only. Click to allow short entries (equities only)."}
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3, cursor: "pointer",
+              background: "transparent",
+              border: `1px solid ${shortsOn ? "var(--red)" : "var(--text-dim, #666)"}`,
+              color: shortsOn ? "var(--red)" : "var(--text-dim, #666)",
+            }}
+          >
+            {shortsOn ? "⇅ L/S" : "⇅ LONG"}
+          </button>
+          <button
+            onClick={() => pairsToggle.mutate(!pairsOn)}
+            disabled={pairsToggle.isPending || !shortsOn}
+            title={!shortsOn
+              ? "Pairs needs shorts armed first (the short leg)"
+              : pairsOn
+                ? "PAIRS ON — relative-strength market-neutral trades (long strong / short weak). Click to disable."
+                : "Pairs OFF — click to allow relative-strength market-neutral pair trades"}
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3,
+              cursor: shortsOn ? "pointer" : "not-allowed", background: "transparent",
+              border: `1px solid ${pairsOn ? "var(--accent, #7aa2f7)" : "var(--text-dim, #666)"}`,
+              color: pairsOn ? "var(--accent, #7aa2f7)" : "var(--text-dim, #666)",
+              opacity: shortsOn ? 1 : 0.5,
+            }}
+          >
+            {pairsOn ? "⤬ PAIRS" : "⤬ PAIRS"}
+          </button>
+          <button
+            onClick={() => softStopToggle.mutate(!softStop)}
+            disabled={softStopToggle.isPending}
+            title={softStop
+              ? "SOFT STOP ON — no new entries; open positions still managed (exits/stops run). Click to resume."
+              : "Soft stop — pause NEW entries but keep managing open positions"}
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3, cursor: "pointer",
+              background: "transparent",
+              border: `1px solid ${softStop ? "var(--yellow)" : "var(--text-dim, #666)"}`,
+              color: softStop ? "var(--yellow)" : "var(--text-dim, #666)",
+            }}
+          >
+            {softStop ? "⏸ PAUSED" : "⏸ SOFT STOP"}
+          </button>
+          <button
+            onClick={() => hedgeToggle.mutate(!hedgeOn)}
+            disabled={hedgeToggle.isPending}
+            title={hedgeOn
+              ? "Net-beta SH hedge ON — rebalances a single SH (-1x S&P) position to the day book's net beta"
+              : "Net-beta SH hedge OFF — SH is a weak unlevered hedge; click to arm"}
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3, cursor: "pointer",
+              background: "transparent",
+              border: `1px solid ${hedgeOn ? "var(--accent, #7aa2f7)" : "var(--text-dim, #666)"}`,
+              color: hedgeOn ? "var(--accent, #7aa2f7)" : "var(--text-dim, #666)",
+            }}
+          >
+            {hedgeOn ? "⛨ SH HEDGE" : "⛨ SH OFF"}
+          </button>
           <button
             onClick={() => toggle.mutate(!enabled)}
             disabled={toggle.isPending}
@@ -479,6 +554,16 @@ function DaySection() {
                       {r?.reason ?? r?.kind ?? ""}
                     </span>
                   </div>
+                  {/* Broker rejection reason — so a rejected proposal explains itself. */}
+                  {p.error && (
+                    <div
+                      style={{ paddingLeft: 24, fontSize: 10, color: "var(--red)", overflow: "hidden",
+                        textOverflow: "ellipsis", whiteSpace: "nowrap" }}
+                      title={p.error}
+                    >
+                      ✗ rejected: {p.error}
+                    </div>
+                  )}
                   {isOpen && (
                     <div style={{ padding: "2px 0 4px 15px" }}>
                       <TradeChart symbol={p.symbol} levels={levels} intraday />

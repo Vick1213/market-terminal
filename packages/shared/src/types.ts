@@ -1023,6 +1023,7 @@ export interface TradeLevels {
 export interface Trade {
   sleeve: string; // swing | day
   symbol: string;
+  direction?: "long" | "short" | string; // long (buy→sell) or short (sell→buy)
   qty: number;
   entry_price: number | null;
   entry_time: string | null;
@@ -1033,6 +1034,13 @@ export interface Trade {
   pnl_pct: number | null;
   hold_minutes: number | null;
   reason: string | null; // short "why" from the entry order's proposal rationale
+  // Planned protective-exit levels recorded at entry (day sleeve; null for swing
+  // or when no bracket was set). exit_type: "bracket" | "trailing" | "none".
+  sl_price?: number | null;
+  tp_price?: number | null;
+  trail_price?: number | null;
+  rr?: number | null;
+  exit_type?: string | null;
 }
 
 export interface TradesResponse {
@@ -1053,6 +1061,7 @@ export interface DayReviewStats {
   trade_date_rows?: number;
   counts_by_decision?: Record<string, number>;
   by_signal_kind?: Record<string, DayReviewStatLeg>;
+  by_direction?: Record<string, DayReviewStatLeg>; // long vs short
   by_regime?: Record<string, DayReviewStatLeg>;
   by_symbol?: Record<string, DayReviewStatLeg>;
   conviction?: {
@@ -1073,6 +1082,8 @@ export interface DayReviewFinding {
   title: string;
   detail: string;
   tag: string;
+  n?: number; // closed-trade sample behind the finding
+  confidence?: "low" | "medium" | "high" | string;
 }
 
 export interface DayReviewSuggestion {
@@ -1081,6 +1092,9 @@ export interface DayReviewSuggestion {
   proposed: number | boolean | string;
   rationale: string;
   finding?: string;
+  n?: number; // sample behind the suggestion
+  confidence?: "low" | "medium" | "high" | string;
+  actionable?: boolean; // false = advisory only (too small a sample to apply)
 }
 
 // {} (empty object) when no review has been persisted yet — every field optional.
@@ -1106,6 +1120,8 @@ export interface DayProposal {
   rationale?: Record<string, unknown> | null;
   status: string;
   created_at?: string;
+  // Broker rejection/error reason from the proposal's order (when rejected).
+  error?: string | null;
 }
 
 export interface IntradayPlan {
@@ -1167,7 +1183,10 @@ export interface PortfolioState {
 }
 
 export interface DayStatusResponse {
-  config: { enabled: boolean };
+  config: {
+    enabled: boolean; hedge_enabled?: boolean; soft_stop?: boolean;
+    short_enabled?: boolean; pairs_enabled?: boolean;
+  };
   universe: string[];
   intraday_plan?: IntradayPlan | null;
   optimizer?: BotOptimizer;

@@ -117,6 +117,14 @@ class AlpacaPaperBroker:
         )
         return data if isinstance(data, list) else []
 
+    async def get_order(self, order_id: str) -> dict:
+        """One order by its broker id — used to confirm an entry has FILLED before
+        attaching a follow-on exit (a trailing stop can't be opened while the long
+        buy is still working)."""
+        if not self.enabled:
+            raise BrokerError("Alpaca paper keys not configured", None)
+        return await self._get_json(f"/v2/orders/{order_id}")
+
     async def get_asset(self, symbol: str) -> dict:
         """Asset metadata (tradable, fractionable, ...). Crypto uses the slashed
         form ('BTC/USD'); equities the plain ticker."""

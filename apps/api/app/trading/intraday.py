@@ -47,6 +47,28 @@ DEFAULT_HEDGES: dict[str, tuple[str, float, float]] = {
 # Symbols that ARE the market factor — no beta hedge exists, trade unhedged.
 UNHEDGEABLE_INDEX = {"SPY", "QQQ", "DIA", "IWM", "VOO", "IVV"}
 
+# PREDEFINED relative-value pairs (decided beforehand, NOT discovered live — live
+# intraday correlation is noisy and overfits). Each pair is same-sector, highly
+# correlated, similar beta, both liquid and shortable. The pairs engine longs the
+# relatively STRONG leg and shorts the relatively WEAK leg when their intraday
+# return spread diverges → sector-neutral, isolating the idiosyncratic move.
+# (a, b): trade direction is decided by which leg is stronger that tick.
+PAIRS: list[tuple[str, str]] = [
+    # semis
+    ("NVDA", "AMD"), ("AVGO", "QCOM"), ("TSM", "NVDA"),
+    # megacap tech
+    ("MSFT", "GOOGL"), ("META", "GOOGL"), ("AMZN", "GOOGL"),
+    # financials
+    ("JPM", "BAC"), ("GS", "JPM"),
+    # energy
+    ("XOM", "CVX"),
+    # crypto-proxy equities
+    ("COIN", "MSTR"),
+]
+# The broad beta-hedge instruments to SHORT (instead of buying an inverse ETF):
+# SPY for a broad book, QQQ for a tech-heavy one. Sized to the day book's net beta.
+SHORT_HEDGE_INDEX = {"broad": "SPY", "tech": "QQQ"}
+
 
 def hedge_for(symbol: str) -> tuple[str, float, float] | None:
     return DEFAULT_HEDGES.get(symbol.upper())
@@ -149,12 +171,22 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
     vwap = signal.get("vwap")
     min_rr = float(plan.get("min_rr", 3.0))
     have_sigma = sigma is not None and sigma > 0 and entry and entry > 0
+    # Alpaca rejects a bracket whose stop_loss isn't strictly BELOW the order's
+    # base price ("stop_price must be <= base_price - 0.01"). A σ-tight intraday
+    # stop can collapse to within a cent of entry (BAC sl 58.11 vs entry 58.12),
+    # then any sub-second drift between the signal bar and the fill makes the live
+    # base price cross it → reject. Enforce a minimum gap (≥2¢ or 0.15%) on BOTH
+    # legs so the bracket is always valid with margin to spare; the R:R gate below
+    # then sees the real (clamped) stop and honestly skips trades that no longer
+    # clear min_rr rather than submitting a doomed order.
+    min_gap = max(0.02, (entry or 0.0) * 0.0015) if (entry and entry > 0) else 0.02
 
     if have_sigma and kind == "reversion":
         extreme = win_low if (win_low is not None and 0 < win_low <= entry) else entry
-        sl = extreme - plan["reversion_stop_sigma"] * sigma
+        sl = min(extreme - plan["reversion_stop_sigma"] * sigma, entry - min_gap)
         stop_dist = entry - sl
         tp = vwap if (vwap and vwap > entry) else entry + plan["tp_sigma"] * sigma
+        tp = max(tp, entry + min_gap)  # keep the target a valid gap above base too
         tp_dist = tp - entry
         if stop_dist <= 0 or tp_dist <= 0:
             return {"ok": False, "reason": "reversion: non-positive stop/target distance"}
@@ -171,6 +203,10 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
         structure_sl = (win_low * (1 - 0.0005)
                         if (win_low is not None and 0 < win_low < entry) else None)
         sl = max(sigma_sl, structure_sl) if structure_sl is not None else sigma_sl
+        # NB: no min_gap clamp here — momentum exits via a TRAILING stop (submitted
+        # separately), so this sl level is informational and never hits Alpaca's
+        # bracket validation. Clamping it would only shrink the R:R proxy and skip
+        # otherwise-valid momentum trades.
         stop_dist = entry - sl
         if stop_dist <= 0:
             return {"ok": False, "reason": "momentum: non-positive stop distance"}
@@ -188,13 +224,78 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
     # Fallback: no σ available — flat-% bracket, TP widened to honor min_rr.
     stop_pct = float(plan.get("stop_pct", 0.8))
     tp_pct = float(plan.get("tp_pct", 1.6))
-    stop_dist = entry * stop_pct / 100.0
+    stop_dist = max(entry * stop_pct / 100.0, min_gap)
     if stop_dist <= 0:
         return {"ok": False, "reason": "fallback: non-positive stop distance"}
-    tp_dist = max(entry * tp_pct / 100.0, min_rr * stop_dist)
+    tp_dist = max(entry * tp_pct / 100.0, min_rr * stop_dist, min_gap)
     sl = entry - stop_dist
     tp = entry + tp_dist
     rr = tp_dist / stop_dist
     return {"ok": True, "exit_type": "bracket", "sl": sl, "tp": tp, "trail_dist": None,
             "stop_dist": stop_dist, "tp_dist": tp_dist, "rr": rr, "have_sigma": False,
             "detail": f"fallback %-bracket: SL {sl:.2f}/−{stop_pct:.2f}%, TP {tp:.2f}, R:R {rr:.1f} (no σ)"}
+
+
+def compute_bracket_short(signal: dict, entry: float, plan: dict) -> dict:
+    """The MIRROR of ``compute_bracket`` for a SHORT entry — stop ABOVE, target
+    BELOW. Same σ logic, same ``min_rr`` gate, same min-gap clamp (flipped to
+    Alpaca's short rule: stop_loss ≥ base+0.01, take_profit ≤ base−0.01). A short's
+    loss is unbounded, so the stop is mandatory and the gate is identical.
+
+      * reversion(overbought) → SL = win_high + reversion_stop_sigma·σ (above),
+                                TP = VWAP (below) — OCO bracket.
+      * momentum(breakdown)   → SL above (σ/structure win_high), TRAILING cover.
+      * no σ                  → flat-% fallback.
+    """
+    kind = signal.get("kind")
+    sigma = signal.get("sigma")
+    win_high = signal.get("win_high")
+    vwap = signal.get("vwap")
+    min_rr = float(plan.get("min_rr", 3.0))
+    have_sigma = sigma is not None and sigma > 0 and entry and entry > 0
+    min_gap = max(0.02, (entry or 0.0) * 0.0015) if (entry and entry > 0) else 0.02
+
+    if have_sigma and kind == "reversion":
+        extreme = win_high if (win_high is not None and win_high >= entry > 0) else entry
+        sl = max(extreme + plan["reversion_stop_sigma"] * sigma, entry + min_gap)
+        stop_dist = sl - entry
+        tp = vwap if (vwap and vwap < entry) else entry - plan["tp_sigma"] * sigma
+        tp = min(tp, entry - min_gap)
+        tp_dist = entry - tp
+        if stop_dist <= 0 or tp_dist <= 0:
+            return {"ok": False, "reason": "reversion short: non-positive stop/target distance"}
+        rr = tp_dist / stop_dist
+        if rr < min_rr - 1e-9:
+            return {"ok": False, "reason": f"reversion short R:R {rr:.1f} < {min_rr:.1f} (VWAP too close)"}
+        return {"ok": True, "exit_type": "bracket", "sl": sl, "tp": tp, "trail_dist": None,
+                "stop_dist": stop_dist, "tp_dist": tp_dist, "rr": rr, "have_sigma": True,
+                "detail": (f"short reversion: SL {sl:.2f} (win_high+{plan['reversion_stop_sigma']}σ), "
+                           f"TP=VWAP {tp:.2f}, R:R {rr:.1f}")}
+
+    if have_sigma:  # breakdown / non-reversion short → trailing cover
+        sigma_sl = entry + plan["stop_sigma"] * sigma
+        structure_sl = (win_high * (1 + 0.0005)
+                        if (win_high is not None and win_high > entry) else None)
+        sl = min(sigma_sl, structure_sl) if structure_sl is not None else sigma_sl
+        stop_dist = sl - entry
+        if stop_dist <= 0:
+            return {"ok": False, "reason": "momentum short: non-positive stop distance"}
+        trail_dist = plan["trail_sigma"] * sigma
+        rr = (plan["tp_sigma"] * sigma) / stop_dist
+        if rr < min_rr - 1e-9:
+            return {"ok": False, "reason": f"momentum short R:R proxy {rr:.1f} < {min_rr:.1f} (stop too wide)"}
+        return {"ok": True, "exit_type": "trailing", "sl": sl, "tp": None, "trail_dist": trail_dist,
+                "stop_dist": stop_dist, "tp_dist": None, "rr": rr, "have_sigma": True,
+                "detail": (f"short momentum: SL {sl:.2f} ({plan['stop_sigma']}σ/struct), "
+                           f"trail {trail_dist:.2f} ({plan['trail_sigma']}σ), R:R proxy {rr:.1f}")}
+
+    stop_pct = float(plan.get("stop_pct", 0.8))
+    tp_pct = float(plan.get("tp_pct", 1.6))
+    stop_dist = max(entry * stop_pct / 100.0, min_gap)
+    tp_dist = max(entry * tp_pct / 100.0, min_rr * stop_dist, min_gap)
+    sl = entry + stop_dist
+    tp = entry - tp_dist
+    rr = tp_dist / stop_dist
+    return {"ok": True, "exit_type": "bracket", "sl": sl, "tp": tp, "trail_dist": None,
+            "stop_dist": stop_dist, "tp_dist": tp_dist, "rr": rr, "have_sigma": False,
+            "detail": f"short fallback %-bracket: SL {sl:.2f}/+{stop_pct:.2f}%, TP {tp:.2f}, R:R {rr:.1f}"}

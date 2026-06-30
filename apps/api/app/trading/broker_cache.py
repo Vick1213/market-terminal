@@ -87,6 +87,9 @@ class BrokerState:
     async def list_orders(self, status: str = "all", limit: int = 200) -> list[dict]:
         return await self._broker.list_orders(status, limit)
 
+    async def get_order(self, order_id: str) -> dict:
+        return await self._broker.get_order(order_id)
+
     async def fractionable(self, symbol: str) -> bool:
         """Whether the asset supports fractional / notional orders. Cached for the
         process lifetime (the flag never changes). Unknown / error -> True so the
@@ -104,6 +107,26 @@ class BrokerState:
             frac = True
         cache[key] = frac
         return frac
+
+    async def shortability(self, symbol: str) -> tuple[bool, bool]:
+        """(shortable, easy_to_borrow) for the asset, from Alpaca metadata. Cached
+        briefly (these can change intraday, unlike fractionable, so a short TTL).
+        On error -> (False, False): fail CLOSED for shorts (never short a name we
+        couldn't confirm is borrowable)."""
+        cache = getattr(self, "_short", None)
+        if cache is None:
+            cache = self._short = {}
+        key = (symbol or "").upper()
+        hit = cache.get(key)
+        if hit is not None:
+            return hit
+        try:
+            asset = await self._broker.get_asset(symbol)
+            out = (bool(asset.get("shortable", False)), bool(asset.get("easy_to_borrow", False)))
+        except Exception:
+            out = (False, False)
+        cache[key] = out
+        return out
 
     # writes: pass through, then drop the cache so the next read is fresh
     async def submit_order(self, *args, **kwargs) -> dict:

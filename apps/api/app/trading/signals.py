@@ -78,6 +78,128 @@ def intraday_signal(
             "detail": "no setup"}
 
 
+# All intraday entry strategies the day trader can run. Each is a self-contained
+# check over the SAME pre-computed metrics (one pass over the bars), so adding
+# strategies costs ~nothing — speed is preserved (the user's "don't lose the edge").
+ALL_STRATEGIES = ("momentum", "reversion", "vwap_trend", "orb")
+
+
+def evaluate_setups(
+    bars: list[dict],
+    *,
+    breakout_buffer_pct: float,
+    momentum_min_pct: float,
+    reversion_z: float,
+    vwap_trend_min_pct: float = 0.15,
+    orb_levels: tuple[float, float] | None = None,
+    enabled: tuple[str, ...] = ALL_STRATEGIES,
+    allow_short: bool = True,
+) -> dict:
+    """Best intraday ENTRY setup across the enabled strategies, from recent 1-min
+    bars. Returns ONE signal dict in the same shape as ``intraday_signal`` plus a
+    ``direction`` in {buy, short, none} — the directional BIAS (the day trader maps
+    a bearish bias to an exit when already long, or a short entry when flat).
+
+    Strategies (each direction-symmetric, long + short):
+      * momentum   — breakout above the window high / breakdown below the low.
+      * reversion  — fade a ≥ ``reversion_z`` VWAP stretch back toward the mean.
+      * vwap_trend — trade WITH a decisive VWAP reclaim (long) / loss (short).
+      * orb        — break of the opening-range high/low (needs ``orb_levels``).
+
+    Metrics are computed ONCE and shared across strategies; the highest-strength
+    actionable setup wins (ties prefer trend over fade). ``allow_short`` gates the
+    short side so the same evaluator serves a long-only or long/short sleeve."""
+    none = {"kind": "none", "direction": "none", "strength": 0.0,
+            "last": None, "vwap": None, "z": 0.0, "sigma": None,
+            "win_high": None, "win_low": None, "detail": "insufficient bars"}
+    if len(bars) < 5:
+        return none
+    closes = [b["c"] for b in bars]
+    last = closes[-1]
+    win_high = max(b["h"] for b in bars)
+    win_low = min(b["l"] for b in bars)
+    first = bars[0].get("o") or closes[0]
+    intraday_ret = (last - first) / first * 100.0 if first else 0.0
+    vwap = _vwap(bars) or last
+    mean = sum(closes) / len(closes)
+    std = (sum((c - mean) ** 2 for c in closes) / len(closes)) ** 0.5
+    z = (last - vwap) / std if std else 0.0
+    struct = {"sigma": round(std, 4), "win_high": round(win_high, 4), "win_low": round(win_low, 4)}
+    base = {"last": last, "vwap": round(vwap, 4), "z": round(z, 2), **struct}
+
+    cands: list[dict] = []
+
+    def emit(kind, direction, strength, detail):
+        if direction == "short" and not allow_short:
+            return
+        # Rank purely by (uncapped) strength so strategies compete on a common
+        # scale — "× thresholds beyond trigger". Insertion order breaks ties
+        # (momentum > reversion > vwap_trend > orb). The conviction layer then
+        # adds context (strategist favor/avoid, regime) on top.
+        cands.append({"kind": kind, "direction": direction, "_rank": strength,
+                      "strength": round(min(3.0, strength), 2), "detail": detail})
+
+    # --- momentum / breakout (long) · breakdown (short) ---------------------
+    if "momentum" in enabled:
+        near_high = last >= win_high * (1 - breakout_buffer_pct / 100.0)
+        near_low = last <= win_low * (1 + breakout_buffer_pct / 100.0)
+        if near_high and intraday_ret >= momentum_min_pct and last >= vwap:
+            emit("momentum", "buy", intraday_ret / max(momentum_min_pct, 1e-6),
+                 f"breakout +{intraday_ret:.2f}% intraday, pressing {win_high:.2f} high")
+        elif near_low and intraday_ret <= -momentum_min_pct and last <= vwap:
+            emit("momentum", "short", -intraday_ret / max(momentum_min_pct, 1e-6),
+                 f"breakdown {intraday_ret:.2f}% intraday, losing {win_low:.2f} low")
+
+    # --- mean reversion: fade a VWAP stretch -------------------------------
+    if "reversion" in enabled:
+        if z <= -reversion_z:
+            emit("reversion", "buy", abs(z) / reversion_z,
+                 f"oversold {z:.1f}σ below VWAP ({win_low:.2f} low) — fade up")
+        elif z >= reversion_z:
+            emit("reversion", "short", abs(z) / reversion_z,
+                 f"overbought {z:.1f}σ above VWAP ({win_high:.2f} high) — fade down")
+
+    # --- VWAP trend: trade WITH a decisive reclaim/loss. Only when the move is
+    #     NOT already a stretched extreme (|z| < reversion_z) — a vertical spike
+    #     is reversion territory, not a sustainable trend, so it must not fire here.
+    if "vwap_trend" in enabled and len(closes) >= 6 and abs(z) < reversion_z:
+        early = closes[: max(2, len(closes) // 3)]
+        early_mean = sum(early) / len(early)
+        up = vwap * (1 + vwap_trend_min_pct / 100.0)
+        dn = vwap * (1 - vwap_trend_min_pct / 100.0)
+        if last >= up and early_mean < vwap and intraday_ret > 0:
+            emit("vwap_trend", "buy", abs(intraday_ret) / max(momentum_min_pct, 1e-6),
+                 f"VWAP reclaim from below, +{intraday_ret:.2f}% — trend up")
+        elif last <= dn and early_mean > vwap and intraday_ret < 0:
+            emit("vwap_trend", "short", abs(intraday_ret) / max(momentum_min_pct, 1e-6),
+                 f"VWAP loss from above, {intraday_ret:.2f}% — trend down")
+
+    # --- opening-range breakout (needs the cached OR high/low) --------------
+    if "orb" in enabled and orb_levels:
+        oh, ol = orb_levels
+        rng = (oh - ol) or 1e-9
+        if last > oh:
+            emit("orb", "buy", 1.0 + (last - oh) / rng,
+                 f"opening-range breakout above {oh:.2f}")
+        elif last < ol:
+            emit("orb", "short", 1.0 + (ol - last) / rng,
+                 f"opening-range breakdown below {ol:.2f}")
+
+    if not cands:
+        return {**none, **base, "detail": "no setup"}
+    best = max(cands, key=lambda c: c["_rank"])
+    best.pop("_rank", None)
+    return {**best, **base}
+
+
+def opening_range(bars: list[dict]) -> tuple[float, float] | None:
+    """Opening-range (high, low) from a slice of session-open bars (caller passes
+    only the first N minutes). None when too few bars to be meaningful."""
+    if not bars or len(bars) < 3:
+        return None
+    return (round(max(b["h"] for b in bars), 4), round(min(b["l"] for b in bars), 4))
+
+
 def major_news(duck, symbol: str, *, max_age_min: int, min_abs_score: float,
                min_outlets: int) -> dict | None:
     """The single biggest fresh, corroborated headline for a symbol, or None.

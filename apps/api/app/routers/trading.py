@@ -164,6 +164,46 @@ async def day_disable(request: Request) -> dict:
     return await _day(request).set_enabled(False)
 
 
+@router.post("/day/hedge/enable")
+async def day_hedge_enable(request: Request) -> dict:
+    return await _day(request).set_hedge_enabled(True)
+
+
+@router.post("/day/hedge/disable")
+async def day_hedge_disable(request: Request) -> dict:
+    return await _day(request).set_hedge_enabled(False)
+
+
+@router.post("/day/soft-stop/enable")
+async def day_soft_stop_enable(request: Request) -> dict:
+    return await _day(request).set_soft_stop(True)
+
+
+@router.post("/day/soft-stop/disable")
+async def day_soft_stop_disable(request: Request) -> dict:
+    return await _day(request).set_soft_stop(False)
+
+
+@router.post("/day/shorts/enable")
+async def day_shorts_enable(request: Request) -> dict:
+    return await _day(request).set_short_enabled(True)
+
+
+@router.post("/day/shorts/disable")
+async def day_shorts_disable(request: Request) -> dict:
+    return await _day(request).set_short_enabled(False)
+
+
+@router.post("/day/pairs/enable")
+async def day_pairs_enable(request: Request) -> dict:
+    return await _day(request).set_pairs_enabled(True)
+
+
+@router.post("/day/pairs/disable")
+async def day_pairs_disable(request: Request) -> dict:
+    return await _day(request).set_pairs_enabled(False)
+
+
 @router.get("/day/review")
 async def day_review_get(request: Request, date: str | None = Query(None)) -> dict:
     """Latest end-of-day review (or ?date=YYYY-MM-DD). {} if none persisted."""
@@ -197,10 +237,24 @@ async def trades(request: Request, sleeve: str | None = Query(None),
     buys with subsequent filled sells per symbol+sleeve; open lots are marked to
     the latest ts_price close. ?sleeve=swing|day  ?status=open|closed."""
     from app.trading.tradebook import list_trades
+    from app.trading.guardrails import norm_symbol
 
     state = request.app.state
+    # Live broker prices for the open-lot mark (accurate intraday; ts_price is a
+    # stale daily close). Best-effort — fall back to ts_price if the broker is
+    # off or the call fails.
+    marks: dict[str, float] = {}
+    broker_state = getattr(state, "broker_state", None)
+    if broker_state is not None:
+        try:
+            for p in await broker_state.positions():
+                px = p.get("current_price")
+                if px is not None:
+                    marks[norm_symbol(p.get("symbol") or "")] = float(px)
+        except Exception:
+            marks = {}
     return {"trades": list_trades(state.sqlite, sleeve=sleeve, status=status,
-                                  duck=getattr(state, "duck", None))}
+                                  duck=getattr(state, "duck", None), marks=marks)}
 
 
 @router.get("/orders")
