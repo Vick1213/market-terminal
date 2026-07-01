@@ -221,6 +221,29 @@ class AlpacaPaperBroker:
             raise BrokerError(f"broker transport error: {exc}", None) from exc
         return resp.json()
 
+    async def cancel_order(self, order_id: str) -> bool:
+        """Cancel ONE resting order by its broker id (used when a manual trade
+        close needs to clear the position's resting bracket / stop legs before
+        flattening, so no orphan exit is left to fire against shares that are
+        gone). Tolerant of the already-gone case (404/422 -> treated as done)."""
+        self._assert_can_trade()
+        if not order_id:
+            return False
+        try:
+            await self._http.delete(
+                f"{self._base}/v2/orders/{order_id}", headers=self._headers(),
+                follow_redirects=False,
+            )
+            return True
+        except httpx.HTTPStatusError as exc:
+            # 404 (unknown) / 422 (not cancelable — already filled/canceled) mean
+            # there's nothing left to cancel; that's success for our purposes.
+            if exc.response.status_code in (404, 422):
+                return True
+            raise BrokerError(_alpaca_error(exc.response), exc.response.status_code) from exc
+        except httpx.HTTPError as exc:
+            raise BrokerError(f"broker transport error: {exc}", None) from exc
+
     async def cancel_all(self) -> int:
         """Cancel every open order (used by the kill switch). Returns the count
         Alpaca reported acting on; tolerant of the 'nothing to cancel' case."""

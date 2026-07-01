@@ -142,6 +142,15 @@ def build_proposals(
     """
     equity = _to_float(account.get("equity")) or 0.0
     buying_power = _to_float(account.get("buying_power")) or 0.0
+    # NO-MARGIN ceiling. Alpaca paper accounts are 2x margin accounts, so
+    # ``buying_power`` (~2x equity) is NOT money we have — spending it drives
+    # settled ``cash`` negative (the -$18k blow-up). The bot may only deploy
+    # cash it actually holds, so gate buys on ``cash`` clamped to buying_power
+    # and floored at 0 (a negative cash balance means we're already on margin
+    # and must not buy at all). This budget is drawn down across the batch below
+    # so many buys in one run can't collectively overspend it.
+    cash = _to_float(account.get("cash"))
+    avail_cash = max(0.0, min(cash, buying_power)) if cash is not None else buying_power
     halted = buys_halted(account, cfg)
 
     # broker positions -> {norm symbol: {value, qty, price}}
@@ -299,21 +308,29 @@ def build_proposals(
         extra_block: list[str] = []
         if side == "buy":
             proposal["notional"] = round(order_value, 2)
-        else:
-            # Only sell shares THIS sleeve owns (sleeve_qty already carved).
-            if not price or sleeve_qty <= 0:
-                extra_block.append("no current price/holding to size the sell")
-            else:
-                qty = min(sleeve_qty, order_value / float(price))
-                proposal["qty"] = round(qty, 6)
+            # Defer to the funding pass below so the cash budget is drawn down
+            # across the whole batch (not checked against the full balance per
+            # order). Stash what the guardrail needs.
+            proposal["_order_value"] = order_value
+            proposal["_current_value"] = current_value
+            proposals.append(proposal)
+            continue
 
+        # Only sell shares THIS sleeve owns (sleeve_qty already carved).
+        if not price or sleeve_qty <= 0:
+            extra_block.append("no current price/holding to size the sell")
+        else:
+            qty = min(sleeve_qty, order_value / float(price))
+            proposal["qty"] = round(qty, 6)
+
+        # Sells free capital, so they bypass the buying-power check entirely.
         blocks = evaluate_order(
             symbol=asym,
             side=side,
             order_value=order_value,
             current_position_value=current_value,
             equity=equity,
-            buying_power=buying_power,
+            buying_power=avail_cash,
             allowlist=allowlist,
             cfg=cfg,
             buys_halted_reason=halted,
@@ -321,6 +338,35 @@ def build_proposals(
         proposal["blocks"] = blocks
         proposal["status"] = "blocked" if blocks else "proposed"
         proposals.append(proposal)
+
+    # ---- funding pass: draw buys down a shared cash budget -----------------
+    # Highest-conviction (then largest-drift) buys get funded first; each
+    # accepted buy consumes its notional so later buys see only what's left.
+    # This is the fix for "keeps buying without checking if I have money": the
+    # per-order check saw the full balance every time, so N buys each passed
+    # while collectively overspending. sells are NOT credited here (proceeds
+    # aren't real until they fill) — a rebalance funds those buys next run.
+    remaining_cash = avail_cash
+    buys = [p for p in proposals if p.get("side") == "buy" and "_order_value" in p]
+    buys.sort(key=lambda p: (-(p.get("conviction") or 0.0), -abs(p["delta_value"])))
+    for proposal in buys:
+        order_value = proposal.pop("_order_value")
+        current_value = proposal.pop("_current_value")
+        blocks = evaluate_order(
+            symbol=proposal["symbol"],
+            side="buy",
+            order_value=order_value,
+            current_position_value=current_value,
+            equity=equity,
+            buying_power=remaining_cash,
+            allowlist=allowlist,
+            cfg=cfg,
+            buys_halted_reason=halted,
+        )
+        proposal["blocks"] = blocks
+        proposal["status"] = "blocked" if blocks else "proposed"
+        if not blocks:
+            remaining_cash = max(0.0, remaining_cash - order_value)
 
     target_norms = {norm_symbol(s) for s in targets}
     untracked = [
@@ -338,6 +384,8 @@ def build_proposals(
     return {
         "equity": round(equity, 2),
         "buying_power": round(buying_power, 2),
+        "cash": round(cash, 2) if cash is not None else None,
+        "available_cash": round(avail_cash, 2),
         "halted": halted,
         "proposals": proposals,
         "untracked_positions": untracked,
@@ -1122,6 +1170,143 @@ class TradingBotService:
                 )
             updated += 1
         return {"ok": True, "reconciled": updated}
+
+    # ---- manual close (user-initiated, de-risking) ------------------------
+    async def close_trade(self, sleeve: str, symbol: str, qty: float | None = None) -> dict:
+        """MANUALLY close an open bot trade: SELL a long / BUY-to-cover a short
+        for the given sleeve+symbol. This is DE-RISKING, so it ALWAYS runs
+        regardless of the kill switch / mode (only opening trades is gated).
+
+        Informs the owning system by (a) recording the fill under ``sleeve`` —
+        which is exactly how each bot tracks its own position (sleeve_holdings
+        reads the filled book), so the swing rebalancer / day trader both see the
+        name flattened on their next tick — and (b) canceling that sleeve's
+        resting protective legs on the symbol (bracket stop / take-profit /
+        trailing) so no orphan exit fires against shares that are gone. Recorded
+        as a REAL round-trip (non-synthetic client id) so the tradebook shows the
+        realized P&L and the learning loops pick it up."""
+        if not self._broker.enabled:
+            return {"ok": False, "detail": "Alpaca paper keys not configured"}
+        sleeve = (sleeve or "swing").lower()
+        if sleeve not in ("swing", "day"):
+            return {"ok": False, "detail": f"unknown sleeve {sleeve!r}"}
+        nsym = norm_symbol(symbol)
+        # This sleeve's SIGNED net position (long +, short -) from its filled book.
+        net = sleeve_holdings(self._sqlite, sleeve).get(nsym, 0.0)
+        if abs(net) <= 1e-6:
+            return {"ok": False,
+                    "detail": f"{sleeve} sleeve holds no open {symbol} position to close"}
+        direction = "long" if net > 0 else "short"
+        close_side = "sell" if direction == "long" else "buy"
+        want = abs(net) if qty is None else min(abs(float(qty)), abs(net))
+
+        # (a) cancel this sleeve's resting SAME-SIDE exit legs first, so the
+        # flatten frees the shares and leaves no orphan stop/TP behind.
+        canceled = await self._cancel_sleeve_orders(sleeve, nsym, close_side)
+
+        # Size against the broker's AVAILABLE qty (post-cancel) for a long so a
+        # reserved-shares desync can't reject the close; a short covers |net|.
+        close_qty = round(want, 6)
+        if direction == "long":
+            try:
+                for p in await self._broker.positions(fresh=True):
+                    if norm_symbol(p.get("symbol") or "") == nsym:
+                        avail = abs(_to_float(p.get("qty_available"))
+                                    or _to_float(p.get("qty")) or 0.0)
+                        close_qty = round(min(want, avail), 6)
+                        break
+            except BrokerError:
+                pass
+        if close_qty <= 0:
+            return {"ok": False, "canceled_orders": canceled,
+                    "detail": f"no sellable {symbol} qty at the broker "
+                              f"(canceled {canceled} resting order(s))"}
+
+        now = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        pid = self._sqlite.execute_returning_id(
+            "INSERT INTO bot_proposals (run_id, created_at, symbol, strategist_sym, bucket, "
+            "side, order_type, qty, conviction, max_loss_est, rationale, status, blocks, sleeve) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?, ?)",
+            [now[:10].replace("-", ""), now, symbol, None, None, close_side, "market", close_qty,
+             None, None, json.dumps({"kind": "manual_close",
+                                     "reason": f"manual {direction} close of {symbol}"}),
+             "proposed", json.dumps([]), sleeve],
+        )
+        cid = f"close-{sleeve}-{pid}"   # NON-synthetic prefix -> real round-trip
+        tif = "gtc" if "/" in symbol else "day"
+        self._sqlite.execute(
+            "INSERT OR IGNORE INTO bot_orders (proposal_id, client_order_id, symbol, side, "
+            "order_type, qty, status, submitted_at, sleeve) "
+            "VALUES (?,?,?,?,?,?, 'submitting', datetime('now'), ?)",
+            [pid, cid, symbol, close_side, "market", close_qty, sleeve],
+        )
+        try:
+            order = await self._broker.submit_order(
+                symbol, close_side, qty=close_qty, order_type="market",
+                time_in_force=tif, client_order_id=cid)
+        except BrokerError as exc:
+            definite = exc.status is not None and 400 <= exc.status < 500
+            self._sqlite.execute(
+                "UPDATE bot_orders SET status = ?, error = ? WHERE client_order_id = ?",
+                ["rejected" if definite else "unknown", exc.reason, cid])
+            self._sqlite.execute(
+                "UPDATE bot_proposals SET status = 'rejected', blocks = ?, "
+                "updated_at = datetime('now') WHERE id = ?",
+                [json.dumps([f"manual close {exc.reason}"]), pid])
+            log.warning("manual %s close %s rejected: %s", sleeve, symbol, exc.reason)
+            return {"ok": False, "detail": exc.reason, "canceled_orders": canceled}
+        self._sqlite.execute(
+            "UPDATE bot_orders SET broker_order_id = ?, status = ?, filled_qty = ?, "
+            "filled_avg_price = ?, raw = ? WHERE client_order_id = ?",
+            [order.get("id"), order.get("status"), _to_float(order.get("filled_qty")),
+             _to_float(order.get("filled_avg_price")), json.dumps(order), cid])
+        self._sqlite.execute(
+            "UPDATE bot_proposals SET status = 'submitted', updated_at = datetime('now') WHERE id = ?",
+            [pid])
+        log.info("manual %s close %s: %s %.6f (canceled %d resting)",
+                 sleeve, symbol, close_side, close_qty, canceled)
+        await self._broadcast("manual_close")
+        return {"ok": True, "sleeve": sleeve, "symbol": symbol, "direction": direction,
+                "side": close_side, "qty": close_qty, "canceled_orders": canceled,
+                "order": {"id": order.get("id"), "status": order.get("status"),
+                          "filled_qty": _to_float(order.get("filled_qty")),
+                          "filled_avg_price": _to_float(order.get("filled_avg_price"))}}
+
+    async def _cancel_sleeve_orders(self, sleeve: str, nsym: str, close_side: str) -> int:
+        """Cancel every RESTING broker order on ``nsym`` that is a SAME-SIDE exit
+        for ``sleeve`` (the protective legs that would orphan when we flatten).
+        Matches to our ledger by client_order_id; unattributed same-side legs
+        (Alpaca's auto-generated bracket children) are also cleared, but a KNOWN
+        other-sleeve order is left alone. Best-effort — never fatal."""
+        try:
+            open_orders = await self._broker.open_orders(fresh=True)
+        except BrokerError as exc:
+            log.warning("close: could not read open orders (%s)", exc.reason)
+            return 0
+        sleeve_by_cid = {r["client_order_id"]: r["sleeve"] for r in self._sqlite.fetchall(
+            "SELECT client_order_id, sleeve FROM bot_orders WHERE client_order_id IS NOT NULL")}
+        canceled = 0
+        for o in open_orders:
+            if norm_symbol(o.get("symbol") or "") != nsym:
+                continue
+            if (o.get("side") or "").lower() != close_side:
+                continue  # only same-side legs orphan when we flatten
+            oid = o.get("id")
+            if not oid:
+                continue
+            cid = o.get("client_order_id") or ""
+            slv = sleeve_by_cid.get(cid)
+            if slv is None:  # infer from the client-id prefix; None -> auto leg
+                slv = ("day" if cid.startswith("day-")
+                       else "swing" if cid.startswith(("bot-", "close-")) else None)
+            if slv is not None and slv != sleeve:
+                continue  # a KNOWN order from the other sleeve — don't touch it
+            try:
+                if await self._broker.cancel_order(oid):
+                    canceled += 1
+            except BrokerError as exc:
+                log.warning("close: cancel %s failed: %s", oid, exc.reason)
+        return canceled
 
     # ---- status ------------------------------------------------------------
     async def status(self) -> dict:

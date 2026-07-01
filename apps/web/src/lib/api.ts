@@ -49,6 +49,7 @@ import type {
   PolicyRiskResponse,
   FedSpeechesResponse,
   TradesResponse,
+  CloseTradeResponse,
   DayReview,
   SwingReview,
 } from "@market/shared";
@@ -427,6 +428,24 @@ export async function fetchTrades(sleeve?: string, status?: string): Promise<Tra
   const res = await fetch(`${API_URL}/api/bot/trades${q ? `?${q}` : ""}`, { cache: "no-store" });
   if (!res.ok) throw new Error(`trades request failed: ${res.status}`);
   return res.json();
+}
+
+// Manually close one open bot trade (SELL a long / BUY-to-cover a short). The
+// UI confirms before calling. De-risking, so the backend runs it regardless of
+// the kill switch and cancels the sleeve's resting protective legs first.
+export async function closeTrade(
+  sleeve: string,
+  symbol: string,
+  qty?: number,
+): Promise<CloseTradeResponse> {
+  const res = await fetch(`${API_URL}/api/bot/trades/close`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(qty != null ? { sleeve, symbol, qty } : { sleeve, symbol }),
+  });
+  const data = (await res.json().catch(() => ({}))) as CloseTradeResponse;
+  if (!res.ok) throw new Error(data?.detail || `close trade failed: ${res.status}`);
+  return data;
 }
 
 export async function fetchDayReview(): Promise<DayReview> {

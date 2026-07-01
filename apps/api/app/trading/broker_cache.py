@@ -135,6 +135,12 @@ class BrokerState:
         finally:
             self.invalidate()
 
+    async def cancel_order(self, order_id: str) -> bool:
+        try:
+            return await self._broker.cancel_order(order_id)
+        finally:
+            self.invalidate()
+
     async def cancel_all(self) -> int:
         try:
             return await self._broker.cancel_all()

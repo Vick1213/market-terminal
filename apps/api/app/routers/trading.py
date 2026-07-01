@@ -312,6 +312,21 @@ async def trades(request: Request, sleeve: str | None = Query(None),
                                   duck=getattr(state, "duck", None), marks=marks)}
 
 
+@router.post("/trades/close")
+async def close_trade(
+    request: Request,
+    sleeve: str = Body(..., embed=True),
+    symbol: str = Body(..., embed=True),
+    qty: float | None = Body(None, embed=True),
+) -> dict:
+    """Manually close an open bot trade (SELL a long / BUY-to-cover a short).
+    De-risking, so it runs regardless of the kill switch. Cancels the sleeve's
+    resting protective legs on the symbol first, then flattens ``qty`` (default:
+    the whole open position) and records it as a real round-trip. The front-end
+    confirms before calling this."""
+    return await _bot(request).close_trade(sleeve, symbol, qty)
+
+
 @router.get("/orders")
 async def orders(request: Request, limit: int = Query(100, le=500)) -> dict:
     sqlite = request.app.state.sqlite

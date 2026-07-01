@@ -133,9 +133,12 @@ def evaluate_order(
     if buys_halted_reason:
         blocks.append(buys_halted_reason)
 
+    # ``buying_power`` here is the NO-MARGIN cash budget the caller passes in
+    # (settled cash, drawn down across the batch), NOT Alpaca's margin buying
+    # power — buying on margin is what drove cash negative.
     if order_value > buying_power + 1e-6:
         blocks.append(
-            f"order ${order_value:,.0f} exceeds buying power ${buying_power:,.0f}"
+            f"order ${order_value:,.0f} exceeds available cash ${buying_power:,.0f} (no margin)"
         )
 
     # Safe/core assets (bonds, T-bills, gold) get the relaxed caps so a deliberate

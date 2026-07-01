@@ -1072,6 +1072,24 @@ export interface TradesResponse {
   trades: Trade[];
 }
 
+// POST /api/bot/trades/close — manual close of one open bot trade.
+export interface CloseTradeResponse {
+  ok: boolean;
+  detail?: string;
+  sleeve?: string;
+  symbol?: string;
+  direction?: "long" | "short" | string;
+  side?: "buy" | "sell" | string; // sell = close a long; buy = cover a short
+  qty?: number;
+  canceled_orders?: number; // resting protective legs canceled before flatten
+  order?: {
+    id: string | null;
+    status: string | null;
+    filled_qty: number | null;
+    filled_avg_price: number | null;
+  };
+}
+
 // --- Learning loop: GET /api/bot/day/review ({} when none persisted) ---
 export interface DayReviewStatLeg {
   n: number;

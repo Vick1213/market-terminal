@@ -12,6 +12,7 @@ import type {
 } from "@market/shared";
 import { TradeChart } from "@/components/charts/TradeChart";
 import {
+  closeTrade,
   fetchDayReview,
   fetchSwingReview,
   fetchTrades,
@@ -61,11 +62,12 @@ function fmtHold(mins: number | null): string {
 // One trade row: a compact column line + an inline-expanding detail (chart +
 // full timing + full rationale). Expansion is a plain row toggle — no modal,
 // no drag handler — so it behaves predictably like the Bot panel's rows.
-function TradeRow({ t, intraday, open, onToggle }: {
+function TradeRow({ t, intraday, open, onToggle, onRequestClose }: {
   t: Trade;
   intraday: boolean;
   open: boolean;
   onToggle: () => void;
+  onRequestClose?: () => void;
 }) {
   const closed = t.status === "closed";
   // Chart lines: entry + the PLANNED protective levels recorded at entry (real
@@ -123,6 +125,19 @@ function TradeRow({ t, intraday, open, onToggle }: {
             </>
           )}
         </span>
+        {!closed && onRequestClose && (
+          <button
+            className="expand-btn"
+            style={{ flex: "0 0 auto", fontSize: 10, padding: "0 6px", color: "var(--red)",
+              border: "1px solid var(--red)", borderRadius: 3 }}
+            title={t.direction === "short"
+              ? "Buy to cover — close this short position"
+              : "Sell — close this long position"}
+            onClick={(e) => { e.stopPropagation(); onRequestClose(); }}
+          >
+            {t.direction === "short" ? "Cover" : "Close"}
+          </button>
+        )}
       </div>
 
       {/* planned protective levels (SL / TP / trail), always visible under the row */}
@@ -199,13 +214,145 @@ function TradeRow({ t, intraday, open, onToggle }: {
   );
 }
 
+// Confirmation popup before a manual close. Shows exactly what will happen —
+// the market order side, qty, current mark/P&L, and that resting protective
+// legs get canceled first — so the user commits deliberately (no one-click
+// accidental flatten). Confirm fires the close; Cancel dismisses.
+function CloseConfirmModal({ trade, pending, error, onCancel, onConfirm }: {
+  trade: Trade;
+  pending: boolean;
+  error: string | null;
+  onCancel: () => void;
+  onConfirm: (qty: number) => void;
+}) {
+  const short = trade.direction === "short";
+  const action = short ? "Buy to cover" : "Sell to close";
+  const full = trade.qty ?? 0;
+  // Editable close size (default = full). Fractional sleeves (crypto/notional
+  // swing lots) can be non-integer, so keep it a free-text number bounded to
+  // (0, full]. Round display to 4dp; the backend re-caps at the open size.
+  const [qtyStr, setQtyStr] = useState<string>(String(full));
+  const qty = Number(qtyStr);
+  const valid = Number.isFinite(qty) && qty > 0 && qty <= full + 1e-9;
+  const partial = valid && qty < full - 1e-9;
+  const setPct = (p: number) =>
+    setQtyStr(String(Number((full * p).toFixed(6))));
+  return (
+    <div
+      style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.55)", zIndex: 1000,
+        display: "flex", alignItems: "center", justifyContent: "center" }}
+      onClick={onCancel}
+    >
+      <div
+        style={{ background: "var(--panel-bg, #141414)", border: "1px solid var(--border, #2a2a2a)",
+          borderRadius: 6, padding: 16, width: 360, maxWidth: "90vw", fontSize: 12 }}
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div style={{ fontWeight: 700, fontSize: 14, marginBottom: 8 }}>
+          Close {short ? "SHORT" : "LONG"} {trade.symbol}?
+        </div>
+        <div style={{ color: "var(--text-dim)", lineHeight: 1.5, marginBottom: 10 }}>
+          {trade.entry_price != null && (
+            <div>entry {trade.entry_price.toFixed(2)}{trade.pnl != null && (
+              <> · open P&L <span style={{ color: pnlColor(trade.pnl) }}>{signed(trade.pnl)}</span></>
+            )} · open size <span className="num" style={{ color: "var(--text)" }}>
+              {full.toLocaleString(undefined, { maximumFractionDigits: 4 })}</span> sh
+            </div>
+          )}
+        </div>
+
+        {/* how much to close — quick presets + free entry (partial close) */}
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 3 }}>
+            Shares to {short ? "cover" : "sell"}
+          </div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginBottom: 5 }}>
+            <input
+              className="num"
+              type="number"
+              min={0}
+              max={full}
+              step="any"
+              value={qtyStr}
+              disabled={pending}
+              onChange={(e) => setQtyStr(e.target.value)}
+              style={{ flex: 1, fontSize: 12, padding: "3px 6px", background: "var(--bg, #0d0d0d)",
+                border: `1px solid ${valid ? "var(--border, #2a2a2a)" : "var(--red)"}`,
+                borderRadius: 3, color: "var(--text)" }}
+            />
+            <span style={{ fontSize: 10, color: "var(--text-dim)" }}>
+              / {full.toLocaleString(undefined, { maximumFractionDigits: 4 })}
+            </span>
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {[0.25, 0.5, 0.75, 1].map((p) => (
+              <button key={p} className="expand-btn" style={{ fontSize: 10, flex: 1 }}
+                disabled={pending} onClick={() => setPct(p)}>
+                {p === 1 ? "All" : `${p * 100}%`}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        <div style={{ color: "var(--text-dim)", lineHeight: 1.5, marginBottom: 10, fontSize: 11 }}>
+          {action}{" "}
+          <span className="num" style={{ color: partial ? "var(--yellow)" : "var(--text)" }}>
+            {valid ? qty.toLocaleString(undefined, { maximumFractionDigits: 4 }) : "—"}
+          </span>{" "}
+          share{qty === 1 ? "" : "s"} at market ({trade.sleeve} sleeve)
+          {partial && <span style={{ color: "var(--yellow)" }}> · partial</span>}.
+          <div style={{ marginTop: 6 }}>
+            Any resting stop / take-profit legs on {trade.symbol} are canceled first.
+            {sleeveReopenNote(trade.sleeve)}
+          </div>
+        </div>
+
+        {error && (
+          <div style={{ color: "var(--red)", fontSize: 11, marginBottom: 8 }}>{error}</div>
+        )}
+        <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+          <button className="expand-btn" style={{ fontSize: 12 }} disabled={pending} onClick={onCancel}>
+            Cancel
+          </button>
+          <button
+            className="expand-btn"
+            style={{ fontSize: 12, color: "var(--red)", border: "1px solid var(--red)", borderRadius: 3 }}
+            disabled={pending || !valid}
+            onClick={() => valid && onConfirm(qty)}
+          >
+            {pending ? "closing…" : partial ? `${action} ${qty}` : action}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// The bot is free to re-open a name it still likes on its next cycle (no
+// suppression) — flag that so a close isn't mistaken for a permanent block.
+function sleeveReopenNote(sleeve: string): string {
+  return sleeve === "swing"
+    ? " The swing bot may re-buy it on its next rebalance if the strategist still targets it."
+    : " The day bot may re-enter it on a fresh signal.";
+}
+
 // Trade list for one sleeve — open trades first, then closed (newest first).
 function TradeList({ sleeve }: { sleeve: "swing" | "day" }) {
   const [openKey, setOpenKey] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<Trade | null>(null);
+  const qc = useQueryClient();
   const { data, isLoading, isError } = useQuery({
     queryKey: ["trades", sleeve],
     queryFn: () => fetchTrades(sleeve),
     refetchInterval: 15_000,
+  });
+  const closeMut = useMutation({
+    mutationFn: ({ t, qty }: { t: Trade; qty: number }) => closeTrade(t.sleeve, t.symbol, qty),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["trades", sleeve] });
+      qc.invalidateQueries({ queryKey: ["trades"] });
+      setConfirm(null);
+    },
   });
   const trades = data?.trades ?? [];
   const open = trades.filter((t) => t.status === "open");
@@ -227,7 +374,9 @@ function TradeList({ sleeve }: { sleeve: "swing" | "day" }) {
       {!!open.length && <div className="macro-detail-title">Open ({open.length})</div>}
       {open.map((t, i) => {
         const k = `o-${key(t, i)}`;
-        return <TradeRow key={k} t={t} intraday={intraday} open={openKey === k} onToggle={() => setOpenKey(openKey === k ? null : k)} />;
+        return <TradeRow key={k} t={t} intraday={intraday} open={openKey === k}
+          onToggle={() => setOpenKey(openKey === k ? null : k)}
+          onRequestClose={() => { closeMut.reset(); setConfirm(t); }} />;
       })}
       {!!closed.length && (
         <div className="macro-detail-title" style={{ marginTop: open.length ? 8 : 0 }}>
@@ -238,6 +387,16 @@ function TradeList({ sleeve }: { sleeve: "swing" | "day" }) {
         const k = `c-${key(t, i)}`;
         return <TradeRow key={k} t={t} intraday={intraday} open={openKey === k} onToggle={() => setOpenKey(openKey === k ? null : k)} />;
       })}
+      {confirm && (
+        <CloseConfirmModal
+          key={`${confirm.symbol}-${confirm.entry_time}`}
+          trade={confirm}
+          pending={closeMut.isPending}
+          error={closeMut.isError ? (closeMut.error as Error).message : null}
+          onCancel={() => { if (!closeMut.isPending) setConfirm(null); }}
+          onConfirm={(qty) => closeMut.mutate({ t: confirm, qty })}
+        />
+      )}
     </>
   );
 }
