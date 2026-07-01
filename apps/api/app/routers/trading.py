@@ -202,6 +202,18 @@ async def day_hedge_disable(request: Request) -> dict:
     return await _day(request).set_hedge_enabled(False)
 
 
+@router.post("/day/leverage/enable")
+async def day_leverage_enable(request: Request) -> dict:
+    """Arm conviction-gated leverage (panel toggle). Env master + validated-edge
+    gate still apply — this alone never levers on an unproven edge."""
+    return await _day(request).set_leverage_enabled(True)
+
+
+@router.post("/day/leverage/disable")
+async def day_leverage_disable(request: Request) -> dict:
+    return await _day(request).set_leverage_enabled(False)
+
+
 @router.post("/day/soft-stop/enable")
 async def day_soft_stop_enable(request: Request) -> dict:
     return await _day(request).set_soft_stop(True)
@@ -325,6 +337,56 @@ async def close_trade(
     the whole open position) and records it as a real round-trip. The front-end
     confirms before calling this."""
     return await _bot(request).close_trade(sleeve, symbol, qty)
+
+
+# --- Learning loop v2: suggestion ledger + runtime knobs ------------------- #
+@router.get("/suggestions")
+async def suggestions_list(request: Request, sleeve: str | None = Query(None),
+                           status: str | None = Query(None)) -> dict:
+    """The learning-loop suggestion ledger — proposals + their lifecycle/grades."""
+    from app.trading import knobs
+    return {"suggestions": knobs.list_suggestions(
+        request.app.state.sqlite, sleeve=sleeve, status=status)}
+
+
+@router.post("/suggestions/{sid}/accept")
+async def suggestion_accept(request: Request, sid: int) -> dict:
+    """Accept a pending suggestion: apply the (bounded) knob override — the change
+    is live on the next day-trader tick — and mark it accepted."""
+    from app.trading import knobs
+    st = request.app.state
+    return knobs.accept_suggestion(st.sqlite, st.settings, sid)
+
+
+@router.post("/suggestions/{sid}/reject")
+async def suggestion_reject(request: Request, sid: int) -> dict:
+    from app.trading import knobs
+    return knobs.reject_suggestion(request.app.state.sqlite, sid)
+
+
+@router.post("/suggestions/{sid}/revert")
+async def suggestion_revert(request: Request, sid: int) -> dict:
+    """Undo an accepted suggestion: clear its override (revert to default)."""
+    from app.trading import knobs
+    return knobs.revert_accepted(request.app.state.sqlite, sid)
+
+
+@router.get("/knobs")
+async def knobs_list(request: Request) -> dict:
+    """Every runtime-tunable knob with its default, live value, bounds, source."""
+    from app.trading import knobs
+    st = request.app.state
+    return {"knobs": knobs.knobs_view(st.sqlite, st.settings)}
+
+
+@router.post("/knobs/{param}/reset")
+async def knob_reset(request: Request, param: str) -> dict:
+    """Clear an override — revert the knob to its env default."""
+    from app.trading import knobs
+    if param not in knobs.PARAM_SPEC:
+        return {"ok": False, "detail": f"{param} is not a runtime-tunable knob"}
+    knobs.clear_override(request.app.state.sqlite, param)
+    return {"ok": True, "detail": f"{param} reverted to default"}
 
 
 @router.get("/orders")

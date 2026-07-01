@@ -270,6 +270,33 @@ class Settings(BaseSettings):
     # research is unambiguous: never wire an autonomous LLM loop to a live key.
     bot_allow_live_trading: bool = False
 
+    # --- Broker backend selection (Alpaca paper vs Interactive Brokers) ---
+    # "alpaca" (default) keeps the Phase-12 paper broker above. "ibkr" swaps in
+    # the Interactive Brokers Client Portal Web API adapter (trading/ibkr.py),
+    # which reads a REAL funded account through a locally-run Client Portal
+    # Gateway. There are NO IBKR "API keys": auth is your normal IBKR login held
+    # by the gateway session, so the only config is where the gateway lives.
+    #
+    # Reads (portfolio/positions/account/orders) always work. Order WRITES are
+    # implemented but gated: an IBKR paper account (id "DU...") trades freely, a
+    # live account (id "U...") refuses every write unless ibkr_allow_live is
+    # explicitly True. So by default IBKR is effectively reads-only against a real
+    # account — a real margin account is nothing like Alpaca paper.
+    broker_backend: str = "alpaca"   # "alpaca" | "ibkr"
+    # Base URL of the Client Portal Gateway REST API. Default is the gateway's
+    # standard local listener (self-signed TLS on localhost; the adapter uses its
+    # own httpx client with verification off for this host only).
+    ibkr_base_url: str = "https://localhost:5000/v1/api"
+    # Account id to read (e.g. "U1234567" for live, "DU1234567" for IBKR paper).
+    # Empty -> auto-detect the first account the gateway session exposes.
+    ibkr_account_id: str = ""
+    # HARD SAFETY GATE for the REAL (live "U...") account. Order writes
+    # (submit/cancel) refuse unless this is explicitly True. Paper ("DU...")
+    # accounts ignore this gate so you can test the write path first. Even when
+    # True, writes still require the normal per-bot enable toggle — a live order
+    # needs BOTH. Left False, a live IBKR account is effectively reads-only.
+    ibkr_allow_live: bool = False
+
     # Kill switch — the bot starts DISABLED. propose() (read-only) always works;
     # execute()/auto-run refuse while disabled. Persisted in bot_config and
     # toggled from the API; this is only the first-boot default.
@@ -415,6 +442,35 @@ class Settings(BaseSettings):
     day_max_position_pct: float = 40.0      # one name <= this % of the day sleeve
     day_min_order_notional: float = 50.0
     day_daily_loss_limit_pct: float = 2.0   # halt day BUYS if the day sleeve is down this % today
+    # Minimum stop / trail DISTANCE as a % of price. The σ-based bracket collapses
+    # to a few-cents stop in quiet windows (median 0.09% in the trade audit), which
+    # sits inside the bid/ask bounce → instant noise stop-outs. Floor every stop
+    # and trailing give-back here so no exit is tighter than intraday microstructure.
+    # A trade whose reward:risk no longer clears min_rr after flooring is SKIPPED
+    # (it was a doomed whipsaw). Tunable via the learning loop.
+    day_stop_floor_pct: float = 0.4
+    # --- CONVICTION-GATED LEVERAGE (all default OFF/safe) -------------------
+    # Amplify ONLY the highest-quality intraday setups with margin, never blind.
+    # Requires the env master AND the panel toggle AND (by default) a VALIDATED
+    # edge before any position exceeds 1x. Leverage multiplies losses too, so the
+    # gate is strict and the caps are hard. Equities only, flat by close, PDT
+    # means this is a >=$25k feature.
+    day_leverage_enabled: bool = False           # env master switch
+    day_max_leverage: float = 2.0                # per-position leverage cap
+    day_max_gross_leverage: float = 2.0          # total day gross / day-sleeve budget cap
+    day_leverage_conviction_min: float = 1.5     # only top-tier conviction qualifies
+    day_leverage_min_strength: float = 2.5       # signal-strength (confluence proxy) bar
+    day_leverage_vol_pctile_max: float = 0.5     # only when forecast vol is calm (<= this)
+    day_leverage_setups: list[str] = ["breakout", "momentum"]  # only setups that actually work
+    # Hard safety gate: keep leverage at 1x until the learning loop shows a
+    # COST-ADJUSTED positive expectancy over a real sample. Leverage on an
+    # unproven edge just multiplies the losses.
+    day_leverage_require_validated: bool = True
+    day_leverage_min_validation_trades: int = 100
+    # Cost model used for validation + realistic expectancy (paper fills are free,
+    # live is not): round-trip slippage in bps of notional + per-trade commission.
+    day_slippage_bps: float = 5.0
+    day_commission_per_trade: float = 0.0
     # Major-news override: only act on news this fresh / strong / corroborated.
     day_news_max_age_min: int = 30
     day_news_min_abs_score: float = 0.6

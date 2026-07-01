@@ -52,6 +52,9 @@ import type {
   CloseTradeResponse,
   DayReview,
   SwingReview,
+  SuggestionsResponse,
+  SuggestionActionResponse,
+  KnobsResponse,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -392,6 +395,16 @@ export async function setDayHedge(enabled: boolean): Promise<{ hedge_enabled: bo
   return res.json();
 }
 
+// Conviction-gated leverage: arm/disarm the panel toggle. Env master + the
+// validated-edge gate still apply on top, so this alone never levers blind.
+export async function setDayLeverage(enabled: boolean): Promise<{ leverage: boolean }> {
+  const res = await fetch(`${API_URL}/api/bot/day/leverage/${enabled ? "enable" : "disable"}`, {
+    method: "POST",
+  });
+  if (!res.ok) throw new Error(`day leverage ${enabled ? "enable" : "disable"} failed: ${res.status}`);
+  return res.json();
+}
+
 // Soft stop: pause NEW day entries but keep managing open positions (true = paused).
 export async function setDaySoftStop(paused: boolean): Promise<{ soft_stop: boolean }> {
   const res = await fetch(`${API_URL}/api/bot/day/soft-stop/${paused ? "enable" : "disable"}`, {
@@ -446,6 +459,36 @@ export async function closeTrade(
   const data = (await res.json().catch(() => ({}))) as CloseTradeResponse;
   if (!res.ok) throw new Error(data?.detail || `close trade failed: ${res.status}`);
   return data;
+}
+
+// --- Learning loop v2: suggestion ledger + runtime knobs ---
+export async function fetchSuggestions(
+  sleeve?: string,
+  status?: string,
+): Promise<SuggestionsResponse> {
+  const qs = new URLSearchParams();
+  if (sleeve) qs.set("sleeve", sleeve);
+  if (status) qs.set("status", status);
+  const q = qs.toString();
+  const res = await fetch(`${API_URL}/api/bot/suggestions${q ? `?${q}` : ""}`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`suggestions request failed: ${res.status}`);
+  return res.json();
+}
+
+async function suggestionAction(id: number, action: "accept" | "reject" | "revert") {
+  const res = await fetch(`${API_URL}/api/bot/suggestions/${id}/${action}`, { method: "POST" });
+  const data = (await res.json().catch(() => ({}))) as SuggestionActionResponse;
+  if (!res.ok || data.ok === false) throw new Error(data?.detail || `suggestion ${action} failed`);
+  return data;
+}
+export const acceptSuggestion = (id: number) => suggestionAction(id, "accept");
+export const rejectSuggestion = (id: number) => suggestionAction(id, "reject");
+export const revertSuggestion = (id: number) => suggestionAction(id, "revert");
+
+export async function fetchKnobs(): Promise<KnobsResponse> {
+  const res = await fetch(`${API_URL}/api/bot/knobs`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`knobs request failed: ${res.status}`);
+  return res.json();
 }
 
 export async function fetchDayReview(): Promise<DayReview> {

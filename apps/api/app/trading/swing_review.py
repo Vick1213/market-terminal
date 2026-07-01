@@ -450,6 +450,15 @@ def review_swing(sqlite, duck, settings, *, review_date: str | None = None,
     except Exception:
         log.warning("swing_review persist failed for %s", review_date, exc_info=True)
 
+    # Also drop a human-readable learnings file (best-effort, never fatal).
+    try:
+        from app.trading.learnings import write_learnings_file
+        path = write_learnings_file(result, sleeve="swing", data_dir=settings.data_dir)
+        if path is not None:
+            result["learnings_file"] = str(path)
+    except Exception:
+        log.debug("swing learnings file skipped", exc_info=True)
+
     log.info("swing review %s: %d closed, %d open, %d findings, %d suggestions (model %s)",
              review_date, stats["n_closed"], stats["n_open"],
              len([f for f in findings if f["tag"] != "none"]), len(suggestions), model)

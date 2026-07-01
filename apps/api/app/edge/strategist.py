@@ -118,6 +118,14 @@ def _signal(key: str, label: str, value, detail: str,
 
 # ------------------------------------------------------------- picks layer
 
+# Confluence gate for single-name picks. A pick must clear the score bar AND
+# either have >= _PICK_MIN_FAMILIES distinct positive signal families, or a solo
+# score strong enough to stand alone. Stops one weak signal from becoming a
+# tradeable position (the swing-quality fix).
+_PICK_MIN_SCORE = 1.5
+_PICK_MIN_FAMILIES = 2
+_PICK_SOLO_SCORE = 3.0
+
 # 13F holdings carry CUSIPs + issuer names, not tickers. Resolution is
 # best-effort: exact match against watchlist display names first, then this
 # static large-cap map (famous-fund top-10s are overwhelmingly mega-caps);
@@ -233,20 +241,26 @@ def _equity_stock_picks(
     the evidence lines that produced its score. Blocking."""
     cands: dict[str, dict] = {}
 
-    def add(sym: str | None, pts: float, why: str) -> None:
+    def add(sym: str | None, pts: float, why: str, family: str = "other") -> None:
         sym = (sym or "").upper().strip()
         if not sym or not _TICKER_OK.match(sym):
             return
-        c = cands.setdefault(sym, {"symbol": sym, "score": 0.0, "evidence": []})
+        c = cands.setdefault(sym, {"symbol": sym, "score": 0.0, "evidence": [],
+                                   "families": set()})
         c["score"] += pts
         c["evidence"].append(why)
+        # Count DISTINCT positive signal families for the confluence gate — one
+        # soft signal shouldn't alone make a tradeable pick (the swing-quality fix).
+        if pts > 0:
+            c["families"].add(family)
 
     # Fundamental factor screen (value/quality/small composite from EDGAR XBRL).
     # A mild descriptive + — the composite has no deflation-cleared alpha (size
     # carries it, fails DSR), so it nudges conviction, never drives it alone.
     for r in factor_leaders or []:
         add(r.get("symbol"), 1.0,
-            f"screens cheap/quality/small (factor composite {r.get('score', 0):+.1f})")
+            f"screens cheap/quality/small (factor composite {r.get('score', 0):+.1f})",
+            family="factor")
 
     # Insider Form 4 open-market buys (14d) — the strongest informed signal.
     for sym, buyers, value, ceo in duck.fetchall(
@@ -262,7 +276,7 @@ def _equity_stock_picks(
         if ceo:
             pts += 1.0
             why += ", incl. CEO/CFO"
-        add(sym, pts, why)
+        add(sym, pts, why, family="insider")
 
     # Senate PTR flow (30d), net of sells.
     for sym, buys, sells, amt in duck.fetchall(
@@ -278,9 +292,10 @@ def _equity_stock_picks(
         if net > 0:
             add(sym, min(2.0, float(net)),
                 f"{buys} Senate PTR buy(s) vs {sells or 0} sell(s) in 30d "
-                f"(>= ${amt:,.0f} disclosed)")
+                f"(>= ${amt:,.0f} disclosed)", family="congress")
         elif net <= -2:
-            add(sym, -1.0, f"{sells} Senate PTR sell(s) vs {buys or 0} buy(s) in 30d")
+            add(sym, -1.0, f"{sells} Senate PTR sell(s) vs {buys or 0} buy(s) in 30d",
+                family="congress")
 
     # 13F whale new top-10 positions (120d window — filings lag up to 45d).
     watch_names: dict[str, str] = {}
@@ -294,7 +309,8 @@ def _equity_stock_picks(
     for w in whale_new_positions(duck, days=120, top_rank=10):
         sym = _resolve_issuer(w["issuer"] or "", watch_names, edgar_names)
         if sym:
-            add(sym, 2.0, f"{w['fund']} opened a top-10 13F position ({w['issuer']})")
+            add(sym, 2.0, f"{w['fund']} opened a top-10 13F position ({w['issuer']})",
+                family="whale")
 
     # 7d aggregated FinBERT news sentiment, >=3 scored stories.
     for sym, avg, n_items in duck.fetchall(
@@ -307,10 +323,10 @@ def _equity_stock_picks(
             continue
         if avg >= 0.2:
             add(sym, min(2.0, float(avg) * 4),
-                f"news sentiment {avg:+.2f} across {n_items} stories (7d)")
+                f"news sentiment {avg:+.2f} across {n_items} stories (7d)", family="news")
         elif avg <= -0.2:
             add(sym, max(-2.0, float(avg) * 4),
-                f"news sentiment {avg:+.2f} across {n_items} stories (7d)")
+                f"news sentiment {avg:+.2f} across {n_items} stories (7d)", family="news")
 
     # Lazy Prices: a recent risk-factor rewrite is negative evidence (and a
     # quiet re-file is mildly reassuring for names already in play).
@@ -324,7 +340,7 @@ def _equity_stock_picks(
                            f"({sim:.0%} similar) — Lazy Prices red flag")
         elif sim > 0.95 and sym in cands:
             add(sym, +0.5, f"{form} risk factors unchanged ({sim:.0%}) — "
-                           "no new skeletons disclosed")
+                           "no new skeletons disclosed", family="filings")
 
     # Retail mention spikes read as froth, not conviction.
     for (sym,) in duck.fetchall(
@@ -347,9 +363,9 @@ def _equity_stock_picks(
                 continue
             rel = r - bench_r
             if rel >= 3:
-                add(sym, 0.5, f"{rel:+.1f}pp vs {benchmark} over 1m — tape confirms")
+                add(sym, 0.5, f"{rel:+.1f}pp vs {benchmark} over 1m — tape confirms", family="tape")
             elif rel <= -5:
-                add(sym, -1.0, f"{rel:+.1f}pp vs {benchmark} over 1m — tape disagrees")
+                add(sym, -1.0, f"{rel:+.1f}pp vs {benchmark} over 1m — tape disagrees", family="tape")
 
     # Short-volume pressure + earnings proximity, survivors only.
     for sym in list(cands):
@@ -370,7 +386,19 @@ def _equity_stock_picks(
             add(sym, 0.0, f"earnings {str(ev[0])[:10]} — binary event inside "
                           "the holding window")
 
-    picks = [c for c in cands.values() if c["score"] >= 1.5]
+    # CONFLUENCE GATE (swing-quality fix): a single soft signal (one insider buy
+    # at 1.5, one 13F whale at 2.0) used to clear the bar ALONE and the swing bot
+    # would buy it. Now a tradeable pick needs the score bar AND either ≥2 distinct
+    # positive signal families OR a genuinely strong solo score (e.g. 2+ insiders
+    # incl. CEO = 3.0). One weak signal makes a WATCH, not a position.
+    picks = []
+    for c in cands.values():
+        n_fam = len(c.get("families") or ())
+        c["confluence"] = n_fam
+        c["families"] = sorted(c.get("families") or ())  # JSON-serializable
+        if c["score"] >= _PICK_MIN_SCORE and (n_fam >= _PICK_MIN_FAMILIES
+                                              or c["score"] >= _PICK_SOLO_SCORE):
+            picks.append(c)
     picks.sort(key=lambda c: c["score"], reverse=True)
     return picks[:max_picks]
 

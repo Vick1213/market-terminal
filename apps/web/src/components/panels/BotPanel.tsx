@@ -29,6 +29,7 @@ import {
   setDaySoftStop,
   setDayShorts,
   setDayPairs,
+  setDayLeverage,
 } from "@/lib/api";
 import { useWebSocket } from "@/hooks/useWebSocket";
 
@@ -400,6 +401,7 @@ function DaySection() {
   const softStopToggle = useMutation({ mutationFn: setDaySoftStop, onSuccess: inv });
   const shortsToggle = useMutation({ mutationFn: setDayShorts, onSuccess: inv });
   const pairsToggle = useMutation({ mutationFn: setDayPairs, onSuccess: inv });
+  const leverageToggle = useMutation({ mutationFn: setDayLeverage, onSuccess: inv });
   const run = useMutation({ mutationFn: runDay, onSuccess: inv });
   const d = q.data;
   const enabled = !!d?.config.enabled;
@@ -407,6 +409,8 @@ function DaySection() {
   const softStop = !!d?.config.soft_stop;
   const shortsOn = !!d?.config.short_enabled;
   const pairsOn = !!d?.config.pairs_enabled;
+  const levOn = !!d?.config.leverage;
+  const lev = d?.leverage;
 
   return (
     <div style={{ marginTop: 10, borderTop: "1px solid var(--border, #2a2a2a)", paddingTop: 6 }}>
@@ -485,6 +489,25 @@ function DaySection() {
             {hedgeOn ? "⛨ SH HEDGE" : "⛨ SH OFF"}
           </button>
           <button
+            onClick={() => leverageToggle.mutate(!levOn)}
+            disabled={leverageToggle.isPending}
+            title={
+              lev?.armed
+                ? `Leverage ARMED — up to ${lev.max_leverage}x on high-signal setups (${lev.reason})`
+                : levOn
+                  ? `Leverage toggle ON but DORMANT (1x): ${lev?.reason ?? "gate not met"}`
+                  : "Conviction-gated leverage OFF — click to arm the toggle (env master + validated-edge gate still apply)"
+            }
+            style={{
+              fontSize: 11, fontWeight: 700, padding: "1px 7px", borderRadius: 3, cursor: "pointer",
+              background: "transparent",
+              border: `1px solid ${lev?.armed ? "var(--red)" : levOn ? "var(--yellow)" : "var(--text-dim, #666)"}`,
+              color: lev?.armed ? "var(--red)" : levOn ? "var(--yellow)" : "var(--text-dim, #666)",
+            }}
+          >
+            {lev?.armed ? `⚡ ${lev.max_leverage}x LIVE` : levOn ? "⚡ LEV DORMANT" : "⚡ LEV OFF"}
+          </button>
+          <button
             onClick={() => toggle.mutate(!enabled)}
             disabled={toggle.isPending}
             title={enabled ? "Day bot ARMED — auto-trading the day sleeve (paper)" : "Day bot halted — click to arm"}
@@ -501,6 +524,24 @@ function DaySection() {
       </div>
       {d && (
         <>
+          {levOn && lev && !lev.armed && (
+            <div style={{ fontSize: 10, color: "var(--yellow)", marginBottom: 4 }}
+              title={lev.reason}>
+              ⚡ leverage dormant (1x): {lev.reason}
+              {lev.require_validated && (
+                <> · validation {lev.validation_trades}/{lev.validation_trades_needed} trades
+                {lev.cost_adj_expectancy != null && (
+                  <> · cost-adj expectancy {lev.cost_adj_expectancy >= 0 ? "+" : ""}
+                    ${lev.cost_adj_expectancy.toFixed(2)}/trade</>
+                )}</>
+              )}
+            </div>
+          )}
+          {lev?.armed && (
+            <div style={{ fontSize: 10, color: "var(--red)", marginBottom: 4 }} title={lev.reason}>
+              ⚡ LEVERAGE LIVE — up to {lev.max_leverage}x on high-signal setups, gross ≤{lev.max_gross_leverage}x
+            </div>
+          )}
           <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 4 }}>
             {d.universe.join(", ")} · cap {d.guardrails?.max_position_pct}% of day sleeve · daily-loss
             {" "}-{d.guardrails?.daily_loss_limit_pct}%

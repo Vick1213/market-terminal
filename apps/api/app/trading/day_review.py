@@ -36,6 +36,13 @@ except Exception:  # pragma: no cover - zoneinfo always present on 3.9+
     _ET = None
 
 from app.trading.guardrails import norm_symbol
+from app.trading import knobs
+
+# How many trailing SESSIONS the finding/suggestion engine aggregates over. A
+# single intraday session is too small to tune on; pooling the last N sessions'
+# journal rows turns per-setup/per-symbol stats into a real sample (the "learn
+# from history, not just today" fix). The daily narrative still describes today.
+_REVIEW_WINDOW_SESSIONS = 20
 
 log = logging.getLogger("market.trading.day_review")
 
@@ -767,11 +774,17 @@ def _template_summary(trade_date: str, stats: dict, findings: list[dict],
 
 
 _LLM_PROMPT = """You are the post-session coach for a paper day-trading bot.
-Below is a JSON end-of-day review: decision counts, win-rates and average P&L by
-setup/regime/symbol, detected findings, and proposed config tweaks. Write a tight
-3-5 sentence narrative for the trader: what happened, the single clearest
-systematic mistake, and which one or two parameter tweaks matter most. Plain
-prose, no markdown headers, no preamble, only facts from the JSON.
+Below is a JSON review: today's stats, a trailing-window aggregate
+(``window_stats``) the findings/suggestions are actually derived from, detected
+findings, proposed config tweaks, and ``memory`` — prior reviews plus the
+suggestion ledger with before/after expectancy for tweaks that were accepted.
+
+Write a tight 4-6 sentence narrative for the trader: what happened today, the
+single clearest systematic mistake (cite the window sample, not just today), and
+which one or two parameter tweaks matter most. CRUCIALLY, look at ``memory``: if a
+previously accepted tweak has metric_after vs metric_before, say whether it
+helped or hurt; if you're re-recommending something already rejected, acknowledge
+it. Plain prose, no markdown headers, no preamble, only facts from the JSON.
 
 DATA:
 {data}
@@ -797,6 +810,98 @@ def _llm_summary(llm, payload: dict) -> tuple[str, str] | None:
 
 # --------------------------------------------------------------------------- #
 # Entry point
+# --------------------------------------------------------------------------- #
+# Learning-loop v2 helpers: trailing window, override-aware "current" values,
+# expectancy grading, and the memory the LLM payload carries.
+# --------------------------------------------------------------------------- #
+_JOURNAL_COLS = (
+    "id, ts, symbol, asset_class, sector, signal_kind, direction, strength, "
+    "z, last_price, vwap, regime, vol_pctile, market_bias, decision, side, notional, "
+    "qty, conviction, reason, context, proposal_id, outcome, pnl"
+)
+
+
+class _EffSettings:
+    """Settings proxy that returns the LIVE (override-aware) value for tunable
+    knobs, so a suggestion's 'current' is what the bot is actually running — not
+    the env default. Everything else delegates to the real settings."""
+
+    def __init__(self, settings, eff: dict):
+        object.__setattr__(self, "_s", settings)
+        object.__setattr__(self, "_eff", eff)
+
+    def __getattr__(self, name):
+        eff = object.__getattribute__(self, "_eff")
+        if name in eff:
+            return eff[name]
+        return getattr(object.__getattribute__(self, "_s"), name)
+
+
+def _session_dates(sqlite, trade_date: str, n: int) -> list[str]:
+    """The last ``n`` distinct journal session dates on or before ``trade_date``."""
+    rows = sqlite.fetchall(
+        "SELECT DISTINCT trade_date FROM day_signal_journal WHERE trade_date <= ? "
+        "ORDER BY trade_date DESC LIMIT ?", [trade_date, n])
+    return [r["trade_date"] for r in rows]
+
+
+def _windowed_rows(sqlite, dates: list[str]) -> list[dict]:
+    if not dates:
+        return []
+    ph = ",".join("?" for _ in dates)
+    return sqlite.fetchall(
+        f"SELECT {_JOURNAL_COLS} FROM day_signal_journal WHERE trade_date IN ({ph}) "
+        "ORDER BY ts ASC", list(dates))
+
+
+def _expectancy(sqlite, *, on_or_before: str | None = None, after: str | None = None):
+    """(avg $ P&L per closed acted trade, n) over the journal, optionally bounded
+    by session date. Used for metric_before / metric_after grading."""
+    where = ["decision = 'acted'", "outcome IN ('win','loss','flat')", "pnl IS NOT NULL"]
+    params: list = []
+    if on_or_before:
+        where.append("trade_date <= ?"); params.append(on_or_before)
+    if after:
+        where.append("trade_date > ?"); params.append(after)
+    row = sqlite.fetchone(
+        "SELECT avg(pnl) AS a, count(*) AS n FROM day_signal_journal WHERE "
+        + " AND ".join(where), params)
+    if not row or not row["n"] or row["a"] is None:
+        return None, 0
+    return round(float(row["a"]), 4), int(row["n"])
+
+
+def _stop_noise_diagnostic(trades: list[dict]) -> dict:
+    """Data-backed proxy for 'stops too tight' WITHOUT intrabar path: of closed
+    LOSING trades, how many exited within ~0.15% of entry (a loss so small it's a
+    microstructure stop-out, not a real adverse move). High share => the σ-stop is
+    inside the noise band (the finding from the trade analysis)."""
+    losers = [t for t in trades if t.get("outcome") == "loss" and t.get("entry") and t.get("exit")]
+    if not losers:
+        return {"n_losers": 0, "noise_stop_share": None}
+    noise = sum(1 for t in losers
+                if abs(t["exit"] - t["entry"]) / t["entry"] <= 0.0015)
+    return {"n_losers": len(losers), "noise_stops": noise,
+            "noise_stop_share": round(noise / len(losers), 3)}
+
+
+def _review_memory(sqlite, sleeve: str, trade_date: str) -> dict:
+    """Prior-review summaries + the suggestion ledger (with grades) — the memory
+    fed to the LLM so it has continuity and can critique its own past advice."""
+    hist = sqlite.fetchall(
+        "SELECT trade_date, summary FROM day_review WHERE trade_date < ? "
+        "ORDER BY trade_date DESC LIMIT 5", [trade_date])
+    ledger = knobs.list_suggestions(sqlite, sleeve=sleeve, limit=20)
+    return {
+        "recent_reviews": [{"date": r["trade_date"], "summary": r["summary"]} for r in hist],
+        "suggestion_ledger": [
+            {"param": s["param"], "proposed": s["proposed_value"], "status": s["status"],
+             "metric_before": s["metric_before"], "metric_after": s["metric_after"],
+             "review_date": s["review_date"]}
+            for s in ledger],
+    }
+
+
 # --------------------------------------------------------------------------- #
 def review_day(sqlite, duck, settings, *, trade_date: str | None = None,
                llm=None) -> dict:
@@ -834,18 +939,56 @@ def review_day(sqlite, duck, settings, *, trade_date: str | None = None,
         [trade_date],
     )
 
+    # Override-aware settings so a suggestion's "current" is the LIVE knob value.
+    eff = _EffSettings(settings, knobs.effective_params(sqlite, settings))
+
+    # TODAY's snapshot — drives the narrative, the persisted stats, the UI/file.
     stats = _compute_stats(rows)
-    # Reward:risk, Sharpe, and the σ-multiple grid-search (need entry/exit/σ).
     stats["risk_reward"] = _risk_reward(trades)
     stats["sharpe"] = _sharpe(trades, sqlite)
-    stats["grid_search"] = _grid_search(trades, settings)
-    findings = _derive_findings(stats)
-    suggestions = _derive_suggestions(stats, findings, settings)
-    stats.pop("_mom_offrisk", None)  # internal only
+    stats["grid_search"] = _grid_search(trades, eff)
+    stats["stop_noise"] = _stop_noise_diagnostic(trades)
 
-    # Narrative — LLM if wired, deterministic template otherwise.
+    # TRAILING WINDOW — the finding/suggestion engine tunes on a real sample, not
+    # a single session. Setup/symbol/direction/regime stats pool the last N
+    # sessions; the σ grid-search (needs entry/exit pairing) stays today-scoped
+    # with its own out-of-sample guard.
+    window_dates = _session_dates(sqlite, trade_date, _REVIEW_WINDOW_SESSIONS)
+    wrows = _windowed_rows(sqlite, window_dates)
+    wstats = _compute_stats(wrows)
+    wstats["risk_reward"] = stats["risk_reward"]
+    wstats["sharpe"] = stats["sharpe"]
+    wstats["grid_search"] = stats["grid_search"]
+    findings = _derive_findings(wstats)
+    suggestions = _derive_suggestions(wstats, findings, eff)
+    stats["window"] = {"n_sessions": len(window_dates), "n_rows": len(wrows),
+                       "start": window_dates[-1] if window_dates else None,
+                       "end": window_dates[0] if window_dates else None}
+    stats.pop("_mom_offrisk", None)  # internal only
+    wstats.pop("_mom_offrisk", None)
+
+    # Persist suggestions to the ledger (only whitelisted knobs; dedup pending),
+    # and GRADE past accepted ones (before → after expectancy) so the loop learns
+    # whether its advice helped.
+    metric_before, _ = _expectancy(sqlite, on_or_before=trade_date)
+    try:
+        knobs.record_suggestions(sqlite, "day", trade_date, suggestions,
+                                 metric_before=metric_before)
+
+        def _after(decided_at):
+            exp, n = _expectancy(sqlite, after=str(decided_at)[:10])
+            return exp if n >= _MIN_TRADES else None
+
+        knobs.grade_accepted(sqlite, "day", _after)
+    except Exception:
+        log.warning("suggestion ledger update failed for %s", trade_date, exc_info=True)
+
+    # Narrative — LLM if wired, deterministic template otherwise. The payload now
+    # carries MEMORY: prior reviews + the graded suggestion ledger, so the LLM has
+    # continuity and can judge whether accepted tweaks actually helped.
     payload = {"trade_date": trade_date, "stats": stats,
-               "findings": findings, "suggestions": suggestions}
+               "window_stats": wstats, "findings": findings, "suggestions": suggestions,
+               "memory": _review_memory(sqlite, "day", trade_date)}
     llm_out = _llm_summary(llm, payload)
     if llm_out is not None:
         summary, model = llm_out
@@ -873,6 +1016,15 @@ def review_day(sqlite, duck, settings, *, trade_date: str | None = None,
         )
     except Exception:
         log.warning("day_review persist failed for %s", trade_date, exc_info=True)
+
+    # Also drop a human-readable learnings file (best-effort, never fatal).
+    try:
+        from app.trading.learnings import write_learnings_file
+        path = write_learnings_file(result, sleeve="day", data_dir=settings.data_dir)
+        if path is not None:
+            result["learnings_file"] = str(path)
+    except Exception:
+        log.debug("day learnings file skipped", exc_info=True)
 
     log.info("day review %s: %d signals, %d acted, %d findings, %d suggestions (model %s)",
              trade_date, stats["trade_date_rows"], stats["n_acted"],

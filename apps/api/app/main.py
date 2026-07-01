@@ -76,6 +76,7 @@ from app.sentiment import SentimentService
 from app.trading.bot import TradingBotService
 from app.trading.broker import AlpacaPaperBroker
 from app.trading.broker_cache import BrokerState
+from app.trading.ibkr import IbkrBroker
 from app.trading.daytrader import DayTraderService
 from app.trading.guardrails import GuardrailConfig
 from app.trading.optimizer import PortfolioOptimizer
@@ -263,13 +264,25 @@ async def lifespan(app: FastAPI):
     # Phase 12: paper trading bot — a guarded execution surface for the
     # strategist's suggestions. Paper-only by default; live trading is blocked
     # in the broker; the kill switch starts OFF. Not on the scheduler.
-    broker = AlpacaPaperBroker(
-        http,
-        key_id=settings.paper_trading_key_id,
-        secret=settings.paper_trading_secret_key,
-        base_url=settings.alpaca_trading_base_url,
-        allow_live=settings.bot_allow_live_trading,
-    )
+    # Broker backend: Alpaca paper (default) or Interactive Brokers (a REAL
+    # funded account read through a locally-run Client Portal Gateway; reads-only,
+    # order writes stubbed to refuse). Both expose the same surface, so BrokerState
+    # and every downstream reader are backend-agnostic.
+    if settings.broker_backend.lower() == "ibkr":
+        broker = IbkrBroker(
+            base_url=settings.ibkr_base_url,
+            account_id=settings.ibkr_account_id,
+            allow_live=settings.ibkr_allow_live,
+        )
+        log.info("trading backend: IBKR (reads-only) base=%s", settings.ibkr_base_url)
+    else:
+        broker = AlpacaPaperBroker(
+            http,
+            key_id=settings.paper_trading_key_id,
+            secret=settings.paper_trading_secret_key,
+            base_url=settings.alpaca_trading_base_url,
+            allow_live=settings.bot_allow_live_trading,
+        )
     # One shared, TTL-cached broker view for every reader (status polls + both
     # bots + optimizer) — collapses bursts to a single paper-api call.
     broker_state = BrokerState(broker, ttl=settings.broker_cache_ttl_seconds)

@@ -1090,6 +1090,51 @@ export interface CloseTradeResponse {
   };
 }
 
+// --- Learning loop v2: suggestion ledger + runtime knobs ---
+export interface BotSuggestion {
+  id: number;
+  created_at: string;
+  sleeve: string;
+  review_date: string | null;
+  param: string;
+  current_value: string | null;
+  proposed_value: string | null;
+  rationale: string | null;
+  confidence: string | null;
+  n_sample: number | null;
+  actionable: number; // 0/1
+  status: "proposed" | "accepted" | "rejected" | "reverted" | "superseded" | string;
+  decided_at: string | null;
+  applied_value: string | null;
+  metric_before: number | null;
+  metric_after: number | null;
+  graded_at: string | null;
+}
+export interface SuggestionsResponse {
+  suggestions: BotSuggestion[];
+}
+export interface BotKnob {
+  param: string;
+  label: string;
+  type: "float" | "int" | "bool" | string;
+  min: number | null;
+  max: number | null;
+  default: number | boolean | null;
+  value: number | boolean | null;
+  overridden: boolean;
+  source: string | null;
+  updated_at: string | null;
+}
+export interface KnobsResponse {
+  knobs: BotKnob[];
+}
+export interface SuggestionActionResponse {
+  ok: boolean;
+  detail?: string;
+  param?: string;
+  applied_value?: number | boolean;
+}
+
 // --- Learning loop: GET /api/bot/day/review ({} when none persisted) ---
 export interface DayReviewStatLeg {
   n: number;
@@ -1250,14 +1295,28 @@ export interface PortfolioState {
   positions: PortfolioStatePosition[];
 }
 
+export interface DayLeverageStatus {
+  armed: boolean;
+  reason: string;
+  env_enabled: boolean;
+  panel_enabled: boolean;
+  require_validated: boolean;
+  max_leverage: number;
+  max_gross_leverage: number;
+  cost_adj_expectancy: number | null;
+  validation_trades: number;
+  validation_trades_needed: number;
+}
+
 export interface DayStatusResponse {
   config: {
     enabled: boolean; hedge_enabled?: boolean; soft_stop?: boolean;
-    short_enabled?: boolean; pairs_enabled?: boolean;
+    short_enabled?: boolean; pairs_enabled?: boolean; leverage?: boolean;
   };
   universe: string[];
   intraday_plan?: IntradayPlan | null;
   optimizer?: BotOptimizer;
+  leverage?: DayLeverageStatus;
   guardrails?: {
     max_position_pct: number;
     min_order_notional: number;

@@ -1191,36 +1191,45 @@ class TradingBotService:
         if sleeve not in ("swing", "day"):
             return {"ok": False, "detail": f"unknown sleeve {sleeve!r}"}
         nsym = norm_symbol(symbol)
-        # This sleeve's SIGNED net position (long +, short -) from its filled book.
-        net = sleeve_holdings(self._sqlite, sleeve).get(nsym, 0.0)
-        if abs(net) <= 1e-6:
+        # Derive the open position from the SAME source the tradebook UI shows —
+        # FIFO-paired open lots — NOT sleeve_holdings. The two can disagree when
+        # the symbol has synthetic reconcile/heal/flatten rows (sleeve_holdings
+        # counts them; the tradebook excludes synthetic opens), which made the
+        # Close button on a visible open lot fail with "no open position". Using
+        # the tradebook lots guarantees: if the UI shows it open, we can close it.
+        from app.trading.tradebook import list_trades
+        open_lots = [t for t in list_trades(self._sqlite, sleeve=sleeve, status="open")
+                     if norm_symbol(t.get("symbol") or "") == nsym]
+        open_qty = sum(float(t.get("qty") or 0.0) for t in open_lots)
+        if open_qty <= 1e-6:
             return {"ok": False,
-                    "detail": f"{sleeve} sleeve holds no open {symbol} position to close"}
-        direction = "long" if net > 0 else "short"
+                    "detail": f"{sleeve} sleeve has no open {symbol} lot in the tradebook to close"}
+        direction = open_lots[0].get("direction") or "long"
         close_side = "sell" if direction == "long" else "buy"
-        want = abs(net) if qty is None else min(abs(float(qty)), abs(net))
+        want = open_qty if qty is None else min(abs(float(qty)), open_qty)
 
         # (a) cancel this sleeve's resting SAME-SIDE exit legs first, so the
         # flatten frees the shares and leaves no orphan stop/TP behind.
         canceled = await self._cancel_sleeve_orders(sleeve, nsym, close_side)
 
-        # Size against the broker's AVAILABLE qty (post-cancel) for a long so a
-        # reserved-shares desync can't reject the close; a short covers |net|.
+        # Size against the broker's AVAILABLE qty (post-cancel) so a reserved-share
+        # desync can't reject the close, and we never try to sell/cover more than
+        # the broker actually holds for the name.
         close_qty = round(want, 6)
-        if direction == "long":
-            try:
-                for p in await self._broker.positions(fresh=True):
-                    if norm_symbol(p.get("symbol") or "") == nsym:
-                        avail = abs(_to_float(p.get("qty_available"))
-                                    or _to_float(p.get("qty")) or 0.0)
-                        close_qty = round(min(want, avail), 6)
-                        break
-            except BrokerError:
-                pass
+        try:
+            for p in await self._broker.positions(fresh=True):
+                if norm_symbol(p.get("symbol") or "") == nsym:
+                    avail = abs(_to_float(p.get("qty_available"))
+                                or _to_float(p.get("qty")) or 0.0)
+                    close_qty = round(min(want, avail), 6) if avail > 0 else 0.0
+                    break
+        except BrokerError:
+            pass
         if close_qty <= 0:
             return {"ok": False, "canceled_orders": canceled,
-                    "detail": f"no sellable {symbol} qty at the broker "
-                              f"(canceled {canceled} resting order(s))"}
+                    "detail": f"the broker holds no {symbol} shares to {close_side} "
+                              f"(tradebook lot may be stale — reconcile; canceled "
+                              f"{canceled} resting order(s))"}
 
         now = datetime.now(timezone.utc).isoformat(timespec="seconds")
         pid = self._sqlite.execute_returning_id(

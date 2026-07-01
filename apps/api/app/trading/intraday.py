@@ -86,6 +86,7 @@ def build_plan(
     trail_sigma: float = 1.5,
     reversion_stop_sigma: float = 0.5,
     min_rr: float = 3.0,
+    stop_floor_pct: float = 0.4,
 ) -> dict:
     """Deterministic intraday risk envelope from regime + the vol-overlay forecast.
 
@@ -139,6 +140,9 @@ def build_plan(
         "trail_sigma": round(trail_sigma, 3),
         "reversion_stop_sigma": rev_stop_sigma_eff,
         "min_rr": round(min_rr, 3),
+        # Minimum stop/trail distance ($) so a σ-tight exit can't sit inside the
+        # noise band. Widened in stress alongside the σ stop.
+        "stop_floor_pct": round(stop_floor_pct * stress_mult, 4),
         "hedge_ratio": round(base_hedge_ratio, 2),
         # outside a clean risk-on tape, only take trades that can be hedged.
         "require_hedge": bias != "risk-on",
@@ -180,11 +184,18 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
     # then sees the real (clamped) stop and honestly skips trades that no longer
     # clear min_rr rather than submitting a doomed order.
     min_gap = max(0.02, (entry or 0.0) * 0.0015) if (entry and entry > 0) else 0.02
+    # Floor the stop/trail distance so a σ-tight exit can't sit inside the bid/ask
+    # bounce (the 0.09%-stop noise-whipsaw the trade audit found). Never below the
+    # broker min_gap.
+    floor_dist = max(min_gap, (entry or 0.0) * float(plan.get("stop_floor_pct", 0.4)) / 100.0)
 
     if have_sigma and kind == "reversion":
         extreme = win_low if (win_low is not None and 0 < win_low <= entry) else entry
         sl = min(extreme - plan["reversion_stop_sigma"] * sigma, entry - min_gap)
         stop_dist = entry - sl
+        if stop_dist < floor_dist:  # widen a too-tight stop to the noise floor
+            stop_dist = floor_dist
+            sl = entry - stop_dist
         tp = vwap if (vwap and vwap > entry) else entry + plan["tp_sigma"] * sigma
         tp = max(tp, entry + min_gap)  # keep the target a valid gap above base too
         tp_dist = tp - entry
@@ -208,9 +219,13 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
         # bracket validation. Clamping it would only shrink the R:R proxy and skip
         # otherwise-valid momentum trades.
         stop_dist = entry - sl
+        if stop_dist < floor_dist:  # a too-tight stop is a noise whipsaw — floor it
+            stop_dist = floor_dist
+            sl = entry - stop_dist
         if stop_dist <= 0:
             return {"ok": False, "reason": "momentum: non-positive stop distance"}
-        trail_dist = plan["trail_sigma"] * sigma
+        # Trailing give-back floored too — a sub-noise trail gets stopped on the bounce.
+        trail_dist = max(plan["trail_sigma"] * sigma, floor_dist)
         # No fixed TP for a trailing exit, so gate on a tp_sigma·σ reach proxy: the
         # winner must be able to plausibly travel min_rr × the risk before reversing.
         rr = (plan["tp_sigma"] * sigma) / stop_dist
@@ -224,7 +239,7 @@ def compute_bracket(signal: dict, entry: float, plan: dict) -> dict:
     # Fallback: no σ available — flat-% bracket, TP widened to honor min_rr.
     stop_pct = float(plan.get("stop_pct", 0.8))
     tp_pct = float(plan.get("tp_pct", 1.6))
-    stop_dist = max(entry * stop_pct / 100.0, min_gap)
+    stop_dist = max(entry * stop_pct / 100.0, floor_dist)
     if stop_dist <= 0:
         return {"ok": False, "reason": "fallback: non-positive stop distance"}
     tp_dist = max(entry * tp_pct / 100.0, min_rr * stop_dist, min_gap)
@@ -254,11 +269,15 @@ def compute_bracket_short(signal: dict, entry: float, plan: dict) -> dict:
     min_rr = float(plan.get("min_rr", 3.0))
     have_sigma = sigma is not None and sigma > 0 and entry and entry > 0
     min_gap = max(0.02, (entry or 0.0) * 0.0015) if (entry and entry > 0) else 0.02
+    floor_dist = max(min_gap, (entry or 0.0) * float(plan.get("stop_floor_pct", 0.4)) / 100.0)
 
     if have_sigma and kind == "reversion":
         extreme = win_high if (win_high is not None and win_high >= entry > 0) else entry
         sl = max(extreme + plan["reversion_stop_sigma"] * sigma, entry + min_gap)
         stop_dist = sl - entry
+        if stop_dist < floor_dist:
+            stop_dist = floor_dist
+            sl = entry + stop_dist
         tp = vwap if (vwap and vwap < entry) else entry - plan["tp_sigma"] * sigma
         tp = min(tp, entry - min_gap)
         tp_dist = entry - tp
@@ -278,9 +297,12 @@ def compute_bracket_short(signal: dict, entry: float, plan: dict) -> dict:
                         if (win_high is not None and win_high > entry) else None)
         sl = min(sigma_sl, structure_sl) if structure_sl is not None else sigma_sl
         stop_dist = sl - entry
+        if stop_dist < floor_dist:
+            stop_dist = floor_dist
+            sl = entry + stop_dist
         if stop_dist <= 0:
             return {"ok": False, "reason": "momentum short: non-positive stop distance"}
-        trail_dist = plan["trail_sigma"] * sigma
+        trail_dist = max(plan["trail_sigma"] * sigma, floor_dist)
         rr = (plan["tp_sigma"] * sigma) / stop_dist
         if rr < min_rr - 1e-9:
             return {"ok": False, "reason": f"momentum short R:R proxy {rr:.1f} < {min_rr:.1f} (stop too wide)"}
@@ -291,7 +313,7 @@ def compute_bracket_short(signal: dict, entry: float, plan: dict) -> dict:
 
     stop_pct = float(plan.get("stop_pct", 0.8))
     tp_pct = float(plan.get("tp_pct", 1.6))
-    stop_dist = max(entry * stop_pct / 100.0, min_gap)
+    stop_dist = max(entry * stop_pct / 100.0, floor_dist)
     tp_dist = max(entry * tp_pct / 100.0, min_rr * stop_dist, min_gap)
     sl = entry + stop_dist
     tp = entry - tp_dist

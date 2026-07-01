@@ -3,6 +3,8 @@
 import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import type {
+  BotKnob,
+  BotSuggestion,
   DayReview,
   DayReviewFinding,
   DayReviewStatLeg,
@@ -12,10 +14,15 @@ import type {
 } from "@market/shared";
 import { TradeChart } from "@/components/charts/TradeChart";
 import {
+  acceptSuggestion,
   closeTrade,
   fetchDayReview,
+  fetchKnobs,
+  fetchSuggestions,
   fetchSwingReview,
   fetchTrades,
+  rejectSuggestion,
+  revertSuggestion,
   runDayReview,
   runSwingReview,
 } from "@/lib/api";
@@ -513,6 +520,128 @@ function ReviewHeader({ label, model, runLabel, running, onRun }: {
   );
 }
 
+// Learning controls: the bot proposes bounded knob changes, the USER accepts
+// (or rejects). Accepted tweaks apply as a runtime override — live next tick —
+// and can be reverted. Also shows before/after expectancy once graded, and the
+// live overrides in force.
+function LearningControls() {
+  const qc = useQueryClient();
+  const sug = useQuery({
+    queryKey: ["suggestions", "day"],
+    queryFn: () => fetchSuggestions("day"),
+    refetchInterval: 20_000,
+  });
+  const knobs = useQuery({ queryKey: ["knobs"], queryFn: fetchKnobs, refetchInterval: 20_000 });
+  const refresh = () => {
+    qc.invalidateQueries({ queryKey: ["suggestions", "day"] });
+    qc.invalidateQueries({ queryKey: ["knobs"] });
+  };
+  const accept = useMutation({ mutationFn: acceptSuggestion, onSuccess: refresh });
+  const reject = useMutation({ mutationFn: rejectSuggestion, onSuccess: refresh });
+  const revert = useMutation({ mutationFn: revertSuggestion, onSuccess: refresh });
+  const busy = accept.isPending || reject.isPending || revert.isPending;
+
+  const all = sug.data?.suggestions ?? [];
+  const pending = all.filter((s) => s.status === "proposed");
+  const accepted = all.filter((s) => s.status === "accepted");
+  const liveKnobs = (knobs.data?.knobs ?? []).filter((k) => k.overridden);
+  const err = accept.error || reject.error || revert.error;
+
+  if (!pending.length && !accepted.length && !liveKnobs.length) return null;
+
+  return (
+    <div style={{ border: "1px solid var(--accent, #7aa2f7)", borderRadius: 5, padding: "6px 8px",
+      marginBottom: 10 }}>
+      <div className="macro-detail-title" style={{ marginTop: 0 }}>
+        Learning controls — the bot proposes, you decide
+      </div>
+      {err && <div style={{ color: "var(--red)", fontSize: 11, marginBottom: 4 }}>{(err as Error).message}</div>}
+
+      {!!pending.length && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 3 }}>Pending suggestions</div>
+          {pending.map((s) => <SuggestionCardV2 key={s.id} s={s} busy={busy}
+            onAccept={() => accept.mutate(s.id)} onReject={() => reject.mutate(s.id)} />)}
+        </div>
+      )}
+
+      {!!accepted.length && (
+        <div style={{ marginBottom: 6 }}>
+          <div style={{ fontSize: 10, color: "var(--text-dim)", marginBottom: 3 }}>Accepted (live)</div>
+          {accepted.map((s) => {
+            const delta = s.metric_after != null && s.metric_before != null
+              ? s.metric_after - s.metric_before : null;
+            return (
+              <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 11, marginBottom: 2 }}>
+                <span className="num" style={{ fontWeight: 600 }}>{s.param}</span>
+                <span className="num" style={{ color: "var(--green)" }}>→ {s.applied_value}</span>
+                {delta != null ? (
+                  <span style={{ color: delta >= 0 ? "var(--green)" : "var(--red)", fontSize: 10 }}
+                    title="expectancy $/trade after accepting vs before">
+                    graded: {signed(s.metric_before)} → {signed(s.metric_after)}
+                  </span>
+                ) : (
+                  <span style={{ color: "var(--text-dim)", fontSize: 10 }}>grading…</span>
+                )}
+                <button className="expand-btn" style={{ marginLeft: "auto", fontSize: 10 }}
+                  disabled={busy} onClick={() => revert.mutate(s.id)}>revert</button>
+              </div>
+            );
+          })}
+        </div>
+      )}
+
+      {!!liveKnobs.length && (
+        <div style={{ fontSize: 10, color: "var(--text-dim)" }}>
+          Live overrides:{" "}
+          {liveKnobs.map((k: BotKnob, i) => (
+            <span key={k.param} className="num">
+              {i ? " · " : ""}{k.param}={String(k.value)}
+              <span style={{ opacity: 0.6 }}> (def {String(k.default)})</span>
+            </span>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function SuggestionCardV2({ s, busy, onAccept, onReject }: {
+  s: BotSuggestion; busy: boolean; onAccept: () => void; onReject: () => void;
+}) {
+  const advisory = !s.actionable;
+  return (
+    <div style={{ border: `1px solid ${advisory ? "var(--border, #2a2a2a)" : "var(--accent, #7aa2f7)"}`,
+      borderRadius: 4, padding: "4px 6px", marginBottom: 4, fontSize: 11, opacity: advisory ? 0.8 : 1 }}>
+      <div style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+        <span className="num" style={{ fontWeight: 600 }}>{s.param}</span>
+        <span className="num">
+          <span style={{ color: "var(--text-dim)" }}>{s.current_value}</span>
+          <span style={{ color: "var(--accent, #7aa2f7)" }}> → {s.proposed_value}</span>
+        </span>
+        <span style={{ fontSize: 9, padding: "0 4px", borderRadius: 3, textTransform: "uppercase",
+          color: advisory ? "var(--text-dim)" : "var(--green)",
+          border: `1px solid ${advisory ? "var(--text-dim)" : "var(--green)"}` }}
+          title={s.n_sample != null ? `${s.n_sample} closed trades` : undefined}>
+          {advisory ? "advisory" : "ready"}{s.confidence ? ` · ${s.confidence}` : ""}
+          {s.n_sample != null ? ` · n=${s.n_sample}` : ""}
+        </span>
+        <span style={{ marginLeft: "auto", display: "flex", gap: 4 }}>
+          <button className="expand-btn" style={{ fontSize: 10, color: "var(--green)",
+            border: "1px solid var(--green)", borderRadius: 3 }}
+            disabled={busy}
+            title={advisory ? "Low sample — accepting is allowed but not advised" : "Apply this knob change (live next tick)"}
+            onClick={onAccept}>Accept</button>
+          <button className="expand-btn" style={{ fontSize: 10 }} disabled={busy} onClick={onReject}>
+            Reject
+          </button>
+        </span>
+      </div>
+      {s.rationale && <div style={{ color: "var(--text-dim)", marginTop: 2 }}>{s.rationale}</div>}
+    </div>
+  );
+}
+
 function DayLearningView() {
   const qc = useQueryClient();
   const { data, isLoading, isError } = useQuery({
@@ -542,6 +671,8 @@ function DayLearningView() {
         running={run.isPending}
         onRun={() => run.mutate()}
       />
+
+      <LearningControls />
 
       {isLoading && <div style={{ color: "var(--text-dim)" }}>loading…</div>}
 
@@ -723,6 +854,8 @@ export function TradebookPanel() {
       qc.invalidateQueries({ queryKey: ["trades"] });
       qc.invalidateQueries({ queryKey: ["day-review"] });
       qc.invalidateQueries({ queryKey: ["swing-review"] });
+      qc.invalidateQueries({ queryKey: ["suggestions", "day"] });
+      qc.invalidateQueries({ queryKey: ["knobs"] });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [last]);

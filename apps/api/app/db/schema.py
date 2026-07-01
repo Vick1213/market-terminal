@@ -864,6 +864,10 @@ def init_sqlite(sqlite: SqliteStore) -> None:
         # Posture-scaled gross + per-sector cap when building swing proposals.
         # Panel toggle on top of settings.swing_posture_sizing. Default OFF.
         "ALTER TABLE bot_config ADD COLUMN swing_posture_sizing INTEGER NOT NULL DEFAULT 0",
+        # Conviction-gated leverage for the day sleeve. Panel toggle ON TOP of the
+        # env master (settings.day_leverage_enabled) AND the validated-edge gate.
+        # Default OFF — leverage amplifies losses, so it never arms by accident.
+        "ALTER TABLE bot_config ADD COLUMN day_leverage INTEGER NOT NULL DEFAULT 0",
     ):
         try:
             sqlite.execute(stmt)
@@ -969,6 +973,52 @@ def init_sqlite(sqlite: SqliteStore) -> None:
             model       TEXT
         );
         """
+    )
+
+    # --- Learning loop v2: runtime knob overrides + suggestion ledger ---
+    # Accepted parameter changes the learning loop proposes and the USER accepts.
+    # The day trader reads these on top of its env defaults (see trading/knobs.py),
+    # so a tweak takes effect at runtime without an env edit / restart — but ONLY
+    # for whitelisted params, clamped to safe bounds. One row per overridden param
+    # (the live value); reset = delete the row (revert to the env default).
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_param_overrides (
+            param      TEXT PRIMARY KEY,     -- e.g. day_stop_sigma (whitelisted only)
+            value      TEXT NOT NULL,        -- stored as text, coerced by the spec type
+            updated_at TEXT NOT NULL,
+            source     TEXT                  -- suggestion:<id> | manual
+        );
+        """
+    )
+    # Suggestion ledger: every parameter tweak the review loop proposes, its
+    # lifecycle (proposed -> accepted/rejected -> reverted), and the before/after
+    # metric so the loop can GRADE its own past advice (did accepting it help?).
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS bot_suggestions (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            created_at    TEXT NOT NULL,
+            sleeve        TEXT NOT NULL DEFAULT 'day',
+            review_date   TEXT,                 -- the review pass that raised it
+            param         TEXT NOT NULL,        -- whitelisted knob name
+            current_value TEXT,                 -- live value when proposed
+            proposed_value TEXT,                -- what to change it to
+            rationale     TEXT,
+            confidence    TEXT,                 -- low | medium | high
+            n_sample      INTEGER,              -- closed trades behind it
+            actionable    INTEGER DEFAULT 0,    -- cleared the min-sample bar
+            status        TEXT NOT NULL DEFAULT 'proposed',  -- proposed|accepted|rejected|reverted|superseded
+            decided_at    TEXT,
+            applied_value TEXT,                 -- value written to overrides on accept
+            metric_before REAL,                 -- expectancy $/trade before accept
+            metric_after  REAL,                 -- expectancy $/trade after accept (graded later)
+            graded_at     TEXT
+        );
+        """
+    )
+    sqlite.execute(
+        "CREATE INDEX IF NOT EXISTS idx_bot_suggestions_status ON bot_suggestions (status, sleeve);"
     )
 
     # Seed the default watchlist once (idempotent).

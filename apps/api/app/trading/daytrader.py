@@ -115,6 +115,27 @@ class DayTraderService:
         # Opening-range cache for ORB: {symbol: (high, low)}, rebuilt each session.
         self._orb_cache: dict[str, tuple[float, float] | None] = {}
         self._orb_date: str | None = None
+        # Live tunable-knob values (override ?? env default), refreshed once per
+        # run/plan so an accepted learning-loop suggestion takes effect next tick.
+        self._knobs: dict[str, object] = {}
+        # Whether conviction-gated leverage may deploy (set each run()); dormant
+        # until the env master + panel toggle + validated-edge gate all pass.
+        self._lev_armed: bool = False
+        self._lev_reason: str = "leverage off"
+
+    def _refresh_knobs(self) -> None:
+        from app.trading.knobs import effective_params
+        try:
+            self._knobs = effective_params(self._sqlite, self._s)
+        except Exception:
+            self._knobs = {}
+
+    def _knob(self, name: str):
+        """A tunable parameter's LIVE value — an accepted runtime override if one
+        exists, else the env default. Falls back to settings for anything not in
+        the knob cache (non-tunable params)."""
+        v = self._knobs.get(name)
+        return v if v is not None else getattr(self._s, name)
 
     def _orb_for(self, sym: str) -> tuple[float, float] | None:
         """Cached opening-range (high, low) for ORB — populated by ``_ensure_orb``."""
@@ -164,7 +185,7 @@ class DayTraderService:
     def _config(self) -> dict:
         row = self._sqlite.fetchone(
             "SELECT day_enabled, day_hedge_enabled, day_soft_stop, day_short_enabled, "
-            "day_pairs_enabled FROM bot_config WHERE id = 1"
+            "day_pairs_enabled, day_leverage FROM bot_config WHERE id = 1"
         )
         return {
             "enabled": bool(row["day_enabled"]) if row else False,
@@ -177,6 +198,9 @@ class DayTraderService:
             "short_enabled": bool(row["day_short_enabled"]) if row else False,
             # Pairs (market-neutral) mode — needs shorts armed too.
             "pairs_enabled": bool(row["day_pairs_enabled"]) if row else False,
+            # Conviction-gated leverage: panel toggle. Env master + validated-edge
+            # gate still apply on top (see leverage.leverage_armed).
+            "leverage": bool(row["day_leverage"]) if row and "day_leverage" in row.keys() else False,
         }
 
     async def set_enabled(self, enabled: bool) -> dict:
@@ -221,6 +245,18 @@ class DayTraderService:
         await self._broadcast("day_config")
         return self._config()
 
+    async def set_leverage_enabled(self, enabled: bool) -> dict:
+        """Arm/disarm conviction-gated leverage (panel toggle). The env master
+        ``day_leverage_enabled`` AND the validated-edge gate must ALSO pass before
+        any position actually exceeds 1x — this toggle alone never levers blind."""
+        self._sqlite.execute(
+            "UPDATE bot_config SET day_leverage = ?, updated_at = datetime('now') WHERE id = 1",
+            [1 if enabled else 0],
+        )
+        log.info("day CONVICTION LEVERAGE -> %s", "ENABLED" if enabled else "DISABLED")
+        await self._broadcast("day_config")
+        return self._config()
+
     async def set_hedge_enabled(self, enabled: bool) -> dict:
         """Arm/disarm the net-beta SH hedge. OFF leaves any existing SH position
         untouched but stops the rebalancer from opening or trimming it."""
@@ -231,6 +267,25 @@ class DayTraderService:
         log.info("day net-beta SH hedge -> %s", "ENABLED" if enabled else "DISABLED")
         await self._broadcast("day_config")
         return self._config()
+
+    def _leverage_status(self, cfg: dict) -> dict:
+        """Leverage readout for the UI: whether it's armed right now and why/why
+        not (env master, panel toggle, and the validated-edge gate)."""
+        from app.trading.leverage import leverage_armed, cost_adjusted_expectancy
+        armed, reason = leverage_armed(self._sqlite, self._s, cfg)
+        exp, n = cost_adjusted_expectancy(self._sqlite, self._s)
+        return {
+            "armed": armed,
+            "reason": reason,
+            "env_enabled": bool(getattr(self._s, "day_leverage_enabled", False)),
+            "panel_enabled": bool(cfg.get("leverage")),
+            "require_validated": bool(getattr(self._s, "day_leverage_require_validated", True)),
+            "max_leverage": float(getattr(self._s, "day_max_leverage", 2.0)),
+            "max_gross_leverage": float(getattr(self._s, "day_max_gross_leverage", 2.0)),
+            "cost_adj_expectancy": exp,
+            "validation_trades": n,
+            "validation_trades_needed": int(getattr(self._s, "day_leverage_min_validation_trades", 100)),
+        }
 
     def _universe(self) -> list[tuple[str, str]]:
         out: list[tuple[str, str]] = []
@@ -250,6 +305,12 @@ class DayTraderService:
             # Halted — make NO data/broker calls (rate-limit hygiene).
             return {"ok": True, "config": cfg, "note": "day bot halted — enable to trade",
                     "actions": []}
+        self._refresh_knobs()  # pick up any accepted learning-loop overrides
+        # Whether conviction-gated leverage may deploy this tick (env master +
+        # panel toggle + validated-edge gate). Stays False — so every position is
+        # 1x — until the edge is proven; see leverage.leverage_armed.
+        from app.trading.leverage import leverage_armed
+        self._lev_armed, self._lev_reason = leverage_armed(self._sqlite, self._s, cfg)
         market_open = await self._broker.is_market_open()
 
         items = self._universe()
@@ -297,12 +358,13 @@ class DayTraderService:
         # NO LLM in the fast loop (the user's ask).
         regime = self._latest_regime()
         vol_signal = await self._vol_signal()
-        plan = build_plan(regime, vol_signal, base_stop_pct=self._s.day_stop_pct,
+        plan = build_plan(regime, vol_signal, base_stop_pct=self._knob("day_stop_pct"),
                           base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio,
-                          stop_sigma=self._s.day_stop_sigma, tp_sigma=self._s.day_tp_sigma,
+                          stop_sigma=self._knob("day_stop_sigma"), tp_sigma=self._knob("day_tp_sigma"),
                           trail_sigma=self._s.day_trail_sigma,
                           reversion_stop_sigma=self._s.day_reversion_stop_sigma,
-                          min_rr=self._s.day_min_rr)
+                          min_rr=self._s.day_min_rr,
+                          stop_floor_pct=self._knob("day_stop_floor_pct"))
         hedge_price = {h: _last_close(bars, h) for h in hedge_syms}
 
         equity = _to_float(account.get("equity")) or 0.0
@@ -362,8 +424,8 @@ class DayTraderService:
             sig = evaluate_setups(
                 sym_bars,
                 breakout_buffer_pct=self._s.day_breakout_buffer_pct,
-                momentum_min_pct=self._s.day_momentum_min_pct,
-                reversion_z=self._s.day_reversion_z,
+                momentum_min_pct=self._knob("day_momentum_min_pct"),
+                reversion_z=self._knob("day_reversion_z"),
                 vwap_trend_min_pct=self._s.day_vwap_trend_min_pct,
                 orb_levels=orb_levels,
                 enabled=strats,
@@ -393,7 +455,7 @@ class DayTraderService:
 
         # --- 2) segmentation: rank longs+shorts by conviction, fill within the
         #        day budget ∩ AVAILABLE FUNDS (buying power), per-tick/sector caps -
-        self._segment(candidates, portfolio, account)
+        self._segment(candidates, portfolio, account, plan)
 
         # --- 3) execute: exits/sells always go; selected longs go BRACKETED
         #        (no per-trade hedge — the net-beta hedge below carries the risk) -
@@ -498,7 +560,7 @@ class DayTraderService:
             return {**base, "act": True, "side": "buy", "qty": cover_qty, "exit": True,
                     "reason": f"favorable news ({news['score']:+.2f}) — cover short"}
 
-        if direction == "none" or strength < self._s.day_min_signal:
+        if direction == "none" or strength < self._knob("day_min_signal"):
             return {**base, "reason": sig.get("detail", "no actionable setup")}
 
         # ---- bearish bias -------------------------------------------------
@@ -580,7 +642,7 @@ class DayTraderService:
                     return True
             return False
 
-        if self._s.day_respect_strategist and _hit(mc.strategist_avoid):
+        if self._knob("day_respect_strategist") and _hit(mc.strategist_avoid):
             if is_short:
                 score *= 1.25  # strategist dislikes it → confirms the short
             else:
@@ -606,43 +668,60 @@ class DayTraderService:
                     score *= 0.4
         return round(score, 3)
 
-    def _segment(self, candidates: list[dict], portfolio, account: dict) -> None:
+    def _segment(self, candidates: list[dict], portfolio, account: dict, plan: dict) -> None:
         """Pick which OPENING candidates (longs AND shorts) actually run this tick.
         Ranks every opener by conviction and greedily fills the highest-ranked ones
         that fit the AVAILABLE FUNDS — the day-sleeve budget headroom ∩ the broker's
         buying power — so we never blow the budget on lower-ranked setups and never
         exceed what the account can actually fund. Per-tick count + per-sector caps
-        still apply. Exits never pass through here (they always run). Pure + fast."""
+        still apply. Exits never pass through here (they always run). Pure + fast.
+
+        CONVICTION-GATED LEVERAGE: when armed, a high-signal candidate's notional is
+        scaled by ``leverage_for`` (≤ day_max_leverage), and the funds ceiling rises
+        to day_max_gross_leverage × the sleeve budget (still ∩ buying power). When
+        NOT armed, leverage_for returns 1.0 and the gross cap collapses to the plain
+        day budget — i.e. behaviour is identical to the un-levered path."""
+        from app.trading.leverage import leverage_for
+        armed = getattr(self, "_lev_armed", False)
         for c in candidates:
             c.setdefault("selected", False)
         opens = sorted(
             (c for c in candidates
              if c.get("act") and c.get("side") in ("buy", "short") and not c.get("exit")),
             key=lambda c: c.get("conviction", 0.0), reverse=True)
-        # Available funds = min(day-sleeve headroom, broker buying power). The day
-        # budget is the usual binding constraint; buying power guards against ever
-        # ordering more than the (margin) account can fund — longs AND shorts both
-        # consume it, so they compete for the same pool.
+        # Available funds = min(day-sleeve GROSS ceiling headroom, broker buying
+        # power). Gross ceiling = day budget × max_gross_leverage when armed, else
+        # just the day budget (unchanged). buying power still hard-caps everything —
+        # we can never order more than the (margin) account can actually fund.
         bp = (_to_float(account.get("daytrading_buying_power"))
               or _to_float(account.get("buying_power")) or 0.0)
-        funds = max(0.0, min(portfolio.day_remaining, bp))
+        gross_mult = float(getattr(self._s, "day_max_gross_leverage", 2.0)) if armed else 1.0
+        gross_ceiling = portfolio.day_budget * gross_mult
+        funds = max(0.0, min(gross_ceiling - portfolio.day_value, bp))
         per_sector: dict[str, int] = {}
         picked = 0
         for c in opens:
             if c.get("conviction", 0.0) <= 0:
                 continue  # reason already annotated by _conviction
-            if picked >= self._s.day_max_new_positions:
+            if picked >= self._knob("day_max_new_positions"):
                 c["reason"] += " | skipped: hit max new positions this tick"
                 continue
             sec = c.get("sector", "other")
             if per_sector.get(sec, 0) >= self._s.day_max_per_sector:
                 c["reason"] += f" | skipped: {sec} sector cap this tick"
                 continue
-            notional = c.get("notional") or 0.0
+            base_notional = c.get("notional") or 0.0
+            # Leverage the highest-quality setups only (1.0 = no leverage / not armed).
+            lev, lev_reason = leverage_for(c, plan, self._s, armed)
+            notional = base_notional * lev
             if notional > funds + 1e-6:
                 c["reason"] += (f" | skipped: ${notional:,.0f} over ${funds:,.0f} available "
-                                "(day budget ∩ buying power) — lower-ranked, deferred")
+                                "(gross ceiling ∩ buying power) — lower-ranked, deferred")
                 continue
+            if lev > 1.0:
+                c["notional"] = round(notional, 2)
+                c["leverage"] = lev
+                c["reason"] += f" | {lev}x leverage ({lev_reason})"
             c["selected"] = True
             picked += 1
             per_sector[sec] = per_sector.get(sec, 0) + 1
@@ -770,7 +849,7 @@ class DayTraderService:
         a momentum/trailing exit so the relative-strength winner can run."""
         struct = evaluate_setups(
             sym_bars, breakout_buffer_pct=self._s.day_breakout_buffer_pct,
-            momentum_min_pct=self._s.day_momentum_min_pct, reversion_z=self._s.day_reversion_z,
+            momentum_min_pct=self._knob("day_momentum_min_pct"), reversion_z=self._knob("day_reversion_z"),
             enabled=("momentum",))
         sig = {**struct, "kind": "momentum",
                "direction": "buy" if side == "buy" else "short", "strength": 2.0}
@@ -860,7 +939,7 @@ class DayTraderService:
             px = pos_price.get(n) or 0.0
             net_beta_usd += q * px * beta_for(n)
         equity = _to_float(account.get("equity")) or 0.0
-        band = max(self._s.day_net_beta_band_pct / 100.0 * equity, self._s.day_min_order_notional)
+        band = max(self._knob("day_net_beta_band_pct") / 100.0 * equity, self._s.day_min_order_notional)
         px = pos_price.get(hn) or _last_close(bars, hedge_sym) or 0.0
         if px <= 0:
             return None
@@ -1312,6 +1391,7 @@ class DayTraderService:
             },
             "recent_orders": self._recent_orders(),
             "recent_proposals": self._recent_proposals(),
+            "leverage": self._leverage_status(cfg),
             "disclaimer": DISCLAIMER,
         }
         try:
@@ -1409,12 +1489,14 @@ class DayTraderService:
         """The deterministic intraday plan (regime + vol-overlay → risk envelope +
         hedge requirement). No LLM, no broker call — safe to poll for the UI."""
         vol_signal = await self._vol_signal()
-        plan = build_plan(self._latest_regime(), vol_signal, base_stop_pct=self._s.day_stop_pct,
+        self._refresh_knobs()  # reflect accepted overrides in the previewed plan
+        plan = build_plan(self._latest_regime(), vol_signal, base_stop_pct=self._knob("day_stop_pct"),
                           base_tp_pct=self._s.day_tp_pct, base_hedge_ratio=self._s.day_hedge_ratio,
-                          stop_sigma=self._s.day_stop_sigma, tp_sigma=self._s.day_tp_sigma,
+                          stop_sigma=self._knob("day_stop_sigma"), tp_sigma=self._knob("day_tp_sigma"),
                           trail_sigma=self._s.day_trail_sigma,
                           reversion_stop_sigma=self._s.day_reversion_stop_sigma,
-                          min_rr=self._s.day_min_rr)
+                          min_rr=self._s.day_min_rr,
+                          stop_floor_pct=self._knob("day_stop_floor_pct"))
         plan["hedged_enabled"] = self._s.day_hedged_enabled
         plan["vol_signal"] = vol_signal
         return plan
