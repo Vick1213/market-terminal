@@ -449,6 +449,25 @@ class Settings(BaseSettings):
     # A trade whose reward:risk no longer clears min_rr after flooring is SKIPPED
     # (it was a doomed whipsaw). Tunable via the learning loop.
     day_stop_floor_pct: float = 0.4
+    # Minimum DOLLAR risk per trade (stop distance × qty). The trade audit showed
+    # 67% of round-trips grossed under $2 — pure fee donations on a real account
+    # (IBKR-style $1/order commissions alone turned +$91 gross into −$197 net).
+    # A trade risking < this can't pay round-trip friction even at min_rr, so it
+    # is SKIPPED. Trades that pass are structurally "fewer but bigger": the ≥$1k
+    # notional slice of the audit was net-POSITIVE after full friction. Tunable
+    # via the learning loop.
+    day_min_risk_dollars: float = 5.0
+    # After a day-sleeve exit/flip on a symbol, block NEW entries on it for this
+    # many minutes. Kills the opposing-strategy ping-pong (LRCX went long→short→
+    # long in 10 minutes because vwap_trend and ORB disagreed, each flip realizing
+    # bid/ask noise). Exits are never blocked. 0 disables.
+    day_flip_cooldown_min: int = 15
+    # Flatten every day-sleeve EQUITY position this many minutes before the close.
+    # Day protective orders are day-TIF — they die at the bell, leaving positions
+    # naked overnight (a "day" QCOM trade rode 2 days to −2.9%, the book's worst
+    # loss). Crypto trades 24h and keeps its synthetic stop, so it is exempt.
+    day_flatten_at_close: bool = True
+    day_flatten_before_close_min: int = 10
     # --- CONVICTION-GATED LEVERAGE (all default OFF/safe) -------------------
     # Amplify ONLY the highest-quality intraday setups with margin, never blind.
     # Requires the env master AND the panel toggle AND (by default) a VALIDATED
@@ -479,7 +498,11 @@ class Settings(BaseSettings):
     # Which intraday entry strategies the day trader runs (ranked together; the
     # allocator takes only the top setups that fit available funds). All four are
     # symmetric (long + short). ORB needs the opening-range cache (equities only).
-    day_strategies: list[str] = ["momentum", "reversion", "vwap_trend", "orb"]
+    # Default = the two with positive realized expectancy in the 144-trade audit
+    # (orb +$3.35/trade @42% win, momentum +$1.20 @35%); reversion (12% win) and
+    # vwap_trend (net −$22, and the main flip-churn source) graded NEGATIVE and
+    # must be re-enabled via env to trade again.
+    day_strategies: list[str] = ["momentum", "orb"]
     day_orb_minutes: int = 30               # opening-range window for ORB
     day_vwap_trend_min_pct: float = 0.15    # min % beyond VWAP to call a reclaim/loss
     # SHORTS: master switch (env). A runtime panel toggle (bot_config.day_short_

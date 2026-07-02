@@ -45,6 +45,8 @@ PARAM_SPEC: dict[str, dict] = {
     "day_min_signal":       {"type": "float", "lo": 0.5, "hi": 3.0,  "label": "Min signal strength"},
     "day_stop_pct":         {"type": "float", "lo": 0.3, "hi": 2.0,  "label": "Fallback stop %"},
     "day_stop_floor_pct":   {"type": "float", "lo": 0.1, "hi": 1.5,  "label": "Min stop/trail distance %"},
+    "day_min_risk_dollars": {"type": "float", "lo": 0.0, "hi": 50.0, "label": "Min $ risk per trade"},
+    "day_flip_cooldown_min": {"type": "int",  "lo": 0,   "hi": 120,  "label": "Re-entry cooldown (min)"},
     # NB: day_alloc_max_pct is intentionally NOT here — it's read once at startup
     # by the optimizer, so a runtime override would be a no-op. It stays a
     # display-only suggestion (needs an env change + restart to take effect).

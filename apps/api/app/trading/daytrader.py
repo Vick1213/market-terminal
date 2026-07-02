@@ -122,6 +122,28 @@ class DayTraderService:
         # until the env master + panel toggle + validated-edge gate all pass.
         self._lev_armed: bool = False
         self._lev_reason: str = "leverage off"
+        # Per-symbol re-entry cooldown after an exit/flip (norm symbol -> UTC
+        # expiry). In-memory only: a restart clears it, which at a 15-minute
+        # horizon is an acceptable miss, not a safety hole (exits never wait).
+        self._cooldown_until: dict[str, datetime] = {}
+
+    def _cooldown_left_min(self, asym: str) -> float | None:
+        """Minutes left in the post-exit re-entry cooldown for a symbol, else None."""
+        until = self._cooldown_until.get(norm_symbol(asym))
+        if until is None:
+            return None
+        left = (until - datetime.now(timezone.utc)).total_seconds() / 60.0
+        return left if left > 0 else None
+
+    def _stamp_cooldown(self, asym: str) -> None:
+        """Start the re-entry cooldown for a symbol after a submitted exit/flip."""
+        try:
+            cd = float(self._knob("day_flip_cooldown_min") or 0)
+        except (TypeError, ValueError):
+            cd = 0.0
+        if cd > 0:
+            self._cooldown_until[norm_symbol(asym)] = (
+                datetime.now(timezone.utc) + timedelta(minutes=cd))
 
     def _refresh_knobs(self) -> None:
         from app.trading.knobs import effective_params
@@ -313,6 +335,21 @@ class DayTraderService:
         self._lev_armed, self._lev_reason = leverage_armed(self._sqlite, self._s, cfg)
         market_open = await self._broker.is_market_open()
 
+        # --- EOD flatten window: no new entries, close day EQUITY positions ------
+        # Day-TIF protective orders die at the bell; anything still open would ride
+        # overnight naked (the 2-day −2.9% QCOM hold). Inside the window the tick
+        # does nothing BUT flatten — entries can't reopen what we just closed.
+        if market_open and self._s.day_flatten_at_close:
+            mins_left = await self._minutes_to_close()
+            if (mins_left is not None
+                    and mins_left <= self._s.day_flatten_before_close_min):
+                actions = await self._eod_flatten(mins_left)
+                await self.reconcile()
+                return {"ok": True, "config": cfg, "market_open": True,
+                        "note": (f"EOD flatten window ({mins_left:.0f}m to close) — "
+                                 "no new entries; day equity positions closed"),
+                        "actions": actions, "disclaimer": DISCLAIMER}
+
         items = self._universe()
         crypto = [(s, a) for s, a in items if a == "crypto"]
         equities = [(s, a) for s, a in items if a == "equity"]
@@ -467,6 +504,10 @@ class DayTraderService:
                 # soft stop manages open positions, it never traps them.
                 if cfg["enabled"]:
                     d["submitted"] = await self._submit(d, d["asset_class"])
+                    if d.get("submitted"):
+                        # Block an immediate re-entry/flip on this name — the
+                        # opposing-strategy ping-pong just realizes bid/ask noise.
+                        self._stamp_cooldown(d["symbol"])
             elif d.get("selected") and cfg["soft_stop"]:
                 # Soft stop: a qualifying NEW entry (long or short) is held back.
                 out = {**d, "act": False, "mode": None,
@@ -523,6 +564,97 @@ class DayTraderService:
             "portfolio_state": portfolio.to_dict(),
             "disclaimer": DISCLAIMER,
         }
+
+    async def _minutes_to_close(self) -> float | None:
+        """Minutes until today's market close per the broker clock, else None
+        (a clock failure must never block the trading tick)."""
+        try:
+            clock = await self._broker.clock()
+            nc = clock.get("next_close")
+            if not nc:
+                return None
+            close_dt = datetime.fromisoformat(str(nc).replace("Z", "+00:00"))
+            return (close_dt - datetime.now(timezone.utc)).total_seconds() / 60.0
+        except Exception:
+            log.debug("minutes-to-close lookup failed", exc_info=True)
+            return None
+
+    async def _eod_flatten(self, mins_left: float) -> list[dict]:
+        """Close every day-sleeve EQUITY position (long or short) into the bell.
+
+        Cancels the sleeve's resting protective orders on those names first —
+        a trailing stop holds the shares, so ``qty_available`` would be 0 until
+        it's cancelled — then market-closes each position through the normal
+        exit path (proposal + order recorded, reconcile tracks the fill). Crypto
+        is exempt: it trades 24h and keeps its synthetic stop."""
+        day_hold = sleeve_holdings(self._sqlite, "day")
+        try:
+            positions = await self._broker.positions(fresh=True)
+        except BrokerError as exc:
+            log.warning("EOD flatten: positions fetch failed: %s", exc.reason)
+            return []
+        targets: list[tuple[str, str, float]] = []
+        for p in positions:
+            sym = p.get("symbol") or ""
+            n = norm_symbol(sym)
+            dq = day_hold.get(n, 0.0)
+            if abs(dq) < 1e-6:
+                continue
+            if (p.get("asset_class") or "us_equity") == "crypto":
+                continue
+            targets.append((sym, n, dq))
+        if not targets:
+            return []
+        try:
+            open_orders = await self._broker.open_orders(fresh=True)
+        except BrokerError:
+            open_orders = []
+        syms = {sym for sym, _n, _dq in targets}
+        cancelled = 0
+        for o in open_orders:
+            if (o.get("symbol") in syms
+                    and str(o.get("client_order_id") or "").startswith("day-")):
+                try:
+                    if await self._broker.cancel_order(o.get("id")):
+                        cancelled += 1
+                except BrokerError:
+                    continue
+        if cancelled:
+            await asyncio.sleep(0.5)  # let the cancels release the held qty
+            try:
+                positions = await self._broker.positions(fresh=True)
+            except BrokerError:
+                pass
+        avail = {norm_symbol(p.get("symbol", "")):
+                 _to_float(p.get("qty_available") or p.get("qty"))
+                 for p in positions}
+        actions: list[dict] = []
+        for sym, n, dq in targets:
+            long_side = dq > 0
+            broker_q = avail.get(n)
+            if broker_q is not None and not long_side:
+                broker_q = -broker_q  # short positions report negative qty
+            qty = _sellable_qty(abs(dq), broker_q)
+            if qty <= 0:
+                actions.append({"symbol": sym, "act": False, "side": None,
+                                "reason": ("EOD flatten: no available qty "
+                                           "(an open order may still hold the shares)")})
+                continue
+            side = "sell" if long_side else "buy"
+            decision = {
+                "symbol": sym, "strategist_sym": sym, "asset_class": "equity",
+                "signal": {"kind": "eod_flatten", "direction": side, "strength": None,
+                           "detail": f"end-of-day flatten ({mins_left:.0f}m to close)"},
+                "news": None, "act": True, "exit": True,
+                "side": side, "qty": qty, "notional": None,
+                "reason": (f"EOD flatten — day sleeve holds nothing overnight "
+                           f"({mins_left:.0f}m to close)"),
+            }
+            decision["submitted"] = await self._submit(decision, "equity")
+            actions.append(decision)
+        log.info("EOD flatten: %d/%d day position(s) closed into the bell (%d order(s) cancelled)",
+                 sum(1 for a in actions if a.get("submitted")), len(targets), cancelled)
+        return actions
 
     def _decide(self, *, sym, asym, asset_class, sig, price, held_qty, broker_qty,
                 day_budget, deployed, swing_val, equity, halted, news, shorts_on=False) -> dict:
@@ -582,6 +714,10 @@ class DayTraderService:
                 return {**base, "reason": halted}
             if day_budget <= 0:
                 return {**base, "reason": "day budget is zero under current conditions"}
+            cd_left = self._cooldown_left_min(asym)
+            if cd_left is not None:
+                return {**base, "reason": (f"{sig['detail']} — re-entry cooldown after a "
+                                           f"recent exit/flip ({cd_left:.0f}m left)")}
             notional = _size()
             if notional < self._s.day_min_order_notional:
                 return {**base, "reason": (f"short sized ${notional:,.0f} below "
@@ -608,6 +744,10 @@ class DayTraderService:
             return {**base, "reason": halted}
         if day_budget <= 0:
             return {**base, "reason": "day budget is zero under current conditions"}
+        cd_left = self._cooldown_left_min(asym)
+        if cd_left is not None:
+            return {**base, "reason": (f"{sig['detail']} — re-entry cooldown after a "
+                                       f"recent exit/flip ({cd_left:.0f}m left)")}
         notional = _size()
         if notional < self._s.day_min_order_notional:
             return {**base, "reason": (f"sized ${notional:,.0f} below ${self._s.day_min_order_notional:,.0f} "
@@ -758,6 +898,16 @@ class DayTraderService:
                 # Can't structure the required reward:risk — don't take the trade.
                 return {**decision, "act": False, "mode": None,
                         "reason": decision["reason"] + f" | skip: {br['reason']}"}
+            # Fee-aware size gate: a trade risking less than day_min_risk_dollars
+            # can't gross enough (even at min_rr) to clear real-account round-trip
+            # friction — the sub-$2 churn that turned the audit net-negative.
+            min_risk = float(self._knob("day_min_risk_dollars") or 0.0)
+            risk_d = br["stop_dist"] * qty
+            if risk_d < min_risk:
+                return {**decision, "act": False, "mode": None,
+                        "reason": decision["reason"] +
+                        f" | skip: ${risk_d:.2f} at risk < ${min_risk:.0f} min "
+                        "(sub-fee trade on a real account)"}
             primary_notional = qty * price
             leg = {"symbol": decision["symbol"], "side": "buy", "qty": qty,
                    "asset_class": "equity", "role": "primary", "entry": round(price, 2),
@@ -786,6 +936,14 @@ class DayTraderService:
             else:
                 sl_price = round(price * (1 - plan["stop_pct"] / 100.0), 2)
             sl_price = max(0.0, sl_price)
+            # Same fee-aware gate as the equity path (synthetic-stop distance × qty).
+            min_risk = float(self._knob("day_min_risk_dollars") or 0.0)
+            risk_d = (price - sl_price) * (notional / price) if price else 0.0
+            if 0 < risk_d < min_risk:
+                return {**decision, "act": False, "mode": None,
+                        "reason": decision["reason"] +
+                        f" | skip: ${risk_d:.2f} at risk < ${min_risk:.0f} min "
+                        "(sub-fee trade on a real account)"}
             primary_notional = notional
             leg = {"symbol": decision["symbol"], "side": "buy", "notional": round(notional, 2),
                    "asset_class": "crypto", "role": "primary", "entry": round(price, 2),
@@ -821,6 +979,14 @@ class DayTraderService:
         if not br["ok"]:
             return {**decision, "act": False, "mode": None,
                     "reason": decision["reason"] + f" | skip: {br['reason']}"}
+        # Fee-aware size gate — mirror of the long path.
+        min_risk = float(self._knob("day_min_risk_dollars") or 0.0)
+        risk_d = br["stop_dist"] * qty
+        if risk_d < min_risk:
+            return {**decision, "act": False, "mode": None,
+                    "reason": decision["reason"] +
+                    f" | skip: ${risk_d:.2f} at risk < ${min_risk:.0f} min "
+                    "(sub-fee trade on a real account)"}
         primary_notional = qty * price
         leg = {"symbol": decision["symbol"], "side": "sell", "qty": qty, "direction": "short",
                "asset_class": "equity", "role": "primary", "entry": round(price, 2),

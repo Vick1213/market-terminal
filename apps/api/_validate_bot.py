@@ -113,7 +113,7 @@ def test_guardrails():
     b = evaluate_order(symbol="AAPL", side="buy", order_value=2000,
                        current_position_value=0, equity=10000, buying_power=1000,
                        allowlist=allow, cfg=CFG)
-    ok(any("buying power" in x for x in b), "order over buying power blocked")
+    ok(any("available cash" in x for x in b), "order over available cash blocked (no margin)")
     # sells bypass caps + buying power
     b = evaluate_order(symbol="AAPL", side="sell", order_value=99999,
                        current_position_value=0, equity=10000, buying_power=0,
