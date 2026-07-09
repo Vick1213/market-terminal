@@ -85,6 +85,7 @@ _HOST_RATES: dict[str, tuple[int, float]] = {
     "www.federalreserve.gov": (1, 2.0),
     "data.alpaca.markets": (150, 60.0),  # free tier allows 200/min
     "paper-api.alpaca.markets": (150, 60.0),  # paper trading API, 200/min
+    "api.tiingo.com": (2, 1.0),  # free tier ~50 req/hr, be polite regardless
 }
 
 

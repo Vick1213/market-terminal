@@ -752,10 +752,21 @@ def init_sqlite(sqlite: SqliteStore) -> None:
             last_error           TEXT,
             consecutive_failures INTEGER NOT NULL DEFAULT 0,
             success_count        INTEGER NOT NULL DEFAULT 0,
-            failure_count        INTEGER NOT NULL DEFAULT 0
+            failure_count        INTEGER NOT NULL DEFAULT 0,
+            disabled_status      TEXT,   -- M2.5: manual override, e.g. "disabled (profile)" / "needs key"
+            disabled_detail      TEXT    -- reason shown alongside disabled_status
         );
         """
     )
+    # Pre-M2.5 databases won't have these columns yet.
+    for stmt in (
+        "ALTER TABLE source_health ADD COLUMN disabled_status TEXT",
+        "ALTER TABLE source_health ADD COLUMN disabled_detail TEXT",
+    ):
+        try:
+            sqlite.execute(stmt)
+        except sqlite3.OperationalError:
+            pass  # already migrated
 
     # --- Phase 12: paper trading bot ---
     # Single-row mutable config (kill switch + mode). id is always 1. Caps live

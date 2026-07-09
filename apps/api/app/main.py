@@ -58,6 +58,7 @@ from app.ingest.news import NewsPipeline
 from app.ingest.polymarket import PolymarketPipeline
 from app.ingest.retail import RetailPipeline
 from app.ingest.source_health import SourceHealthRegistry
+from app.profile import apply_profile_gates
 from app.routers import corr as corr_router
 from app.routers import edge as edge_router
 from app.routers import health as health_router
@@ -101,6 +102,11 @@ async def lifespan(app: FastAPI):
     log.info("schema ready — duckdb tables: %s", list(duck.table_counts().keys()))
 
     source_health = SourceHealthRegistry(sqlite)
+    # M2.5: MARKET_PROFILE=commercial pre-flags every RED source in
+    # source_health as "disabled (profile)" (+ Tiingo as "needs key" if
+    # unset) so /api/health/sources explains empty panels immediately. No-op
+    # in the default "personal" profile.
+    apply_profile_gates(settings, source_health)
     http = HttpClient(
         user_agent=settings.user_agent,
         cache_dir=str(settings.http_cache_dir),

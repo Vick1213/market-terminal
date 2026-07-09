@@ -44,6 +44,7 @@ import feedparser
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.http import HttpClient
+from app.profile import gated
 from app.sentiment import SentimentService
 from app.ws.hub import ConnectionManager
 
@@ -180,22 +181,36 @@ async def fetch_rss(
     return _entries_to_raw(feed, source, symbol)
 
 
+@gated("yfinance", default=list)
 async def fetch_yahoo(http: HttpClient, symbols: list[str]) -> list[RawNews]:
+    """Yahoo Finance per-ticker RSS — same RED vendor as the primary
+    yfinance price provider (data-licensing-audit.md #Yahoo Finance /
+    yfinance: ToS bars automated scraping). Gated off in
+    MARKET_PROFILE=commercial; Finnhub + EDGAR + GDELT remain the
+    commercial-safe news path (see module docstring above)."""
     items: list[RawNews] = []
     for sym in symbols:
         items.extend(await fetch_rss(http, YAHOO_RSS.format(symbol=sym), "yahoo", sym))
     return items
 
 
+@gated("broad_news_rss", default=list)
 async def fetch_broad_rss(http: HttpClient) -> list[RawNews]:
-    """CNBC / MarketWatch / Investing.com topic feeds — market-wide breadth."""
+    """CNBC / MarketWatch / Investing.com topic feeds — market-wide breadth.
+
+    All three are RED (personal/non-commercial ToS, or Investing.com's
+    explicit app-embedding ban) — gated off in MARKET_PROFILE=commercial.
+    GDELT + EDGAR + Finnhub remain the commercial-safe news path."""
     items: list[RawNews] = []
     for source, url in BROAD_FEEDS:
         items.extend(await fetch_rss(http, url, source, headers=BROWSER_HEADERS))
     return items
 
 
+@gated("seekingalpha", default=list)
 async def fetch_seekingalpha(http: HttpClient, symbols: list[str]) -> list[RawNews]:
+    """Seeking Alpha ToS limits RSS to personal, non-commercial use — gated
+    off in MARKET_PROFILE=commercial."""
     items: list[RawNews] = []
     for sym in symbols:
         items.extend(

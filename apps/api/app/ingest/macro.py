@@ -19,6 +19,7 @@ from app.db.duck import DuckStore
 from app.ingest.http import HttpClient
 from app.ingest.news import BROWSER_HEADERS
 from app.macro.composite import CompositeResult, compute_composite
+from app.profile import gated
 from app.ws.hub import ConnectionManager
 
 log = logging.getLogger("market.ingest.macro")
@@ -514,7 +515,12 @@ class MacroPipeline:
             total, len(ALFRED_VINTAGE_SERIES),
         )
 
+    @gated("cboe")
     async def run_cboe(self) -> None:
+        """Cboe Market Data Policy bars auto-extraction/redistribution
+        without a signed Data Agreement — gated off in
+        MARKET_PROFILE=commercial. FRED's VIXCLS (run_fred) survives as the
+        commercial-safe VIX substitute."""
         loop = asyncio.get_running_loop()
         total = 0
         for sid, url in CBOE_HISTORY.items():
@@ -529,7 +535,13 @@ class MacroPipeline:
         log.info("cboe ingest: %s points (%s put/call days)", total, len(pc_days))
         await self.recompute_composite()
 
+    @gated("yfinance")
     async def run_move(self) -> None:
+        """^MOVE (ICE BofA MOVE index) via yfinance — same RED Yahoo vendor as
+        the primary daily-bar provider (data-licensing-audit.md #Yahoo Finance
+        / yfinance). Gated off in MARKET_PROFILE=commercial; there is no free
+        substitute, so commercial builds simply go without MOVE (accepted —
+        nothing downstream assumes it is present)."""
         loop = asyncio.get_running_loop()
         start = await loop.run_in_executor(None, self._series_start, "MOVE")
         rows = await loop.run_in_executor(None, _fetch_move_blocking, start)
@@ -559,7 +571,10 @@ class MacroPipeline:
         if n:
             await self.recompute_composite()
 
+    @gated("aaii")
     async def run_aaii(self) -> None:
+        """AAII ToS: 'no part of the contents...may be copied or forwarded
+        to anyone else' — gated off in MARKET_PROFILE=commercial."""
         n = await self._store(await fetch_aaii(self._http))
         log.info("aaii ingest: %s points", n)
         if n:

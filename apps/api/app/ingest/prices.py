@@ -1,23 +1,36 @@
 """On-demand daily price history (Phase 3 slice, pulled forward for charts).
 
-Source pecking order, re-verified 2026-06-11 (PLAN §10 #2):
-  * Stooq CSV (the plan's primary) now serves a JavaScript browser-verification
-    challenge to headless clients — unusable here.
-  * Yahoo's v8 chart endpoint 429s plain httpx/curl by TLS fingerprint, but
-    yfinance ships curl_cffi browser impersonation and still returns free
-    history — so yfinance IS the daily-bar fetcher, used gently: cache-first
-    in ts_price, refetched only when the stored history is missing the most
-    recent expected close (≤ watchlist-size calls per day).
-  * Alpaca (when MARKET_ALPACA_* keys are set) is the redundancy leg: primary
-    for live quotes (one batched IEX snapshot call vs one Yahoo hit per
-    symbol) and fallback for daily bars when yfinance comes up empty.
+Source pecking order, re-verified 2026-07-09 (M2.5 — see docs/data-licensing-
+audit.md and app/profile.py):
+  * Stooq CSV (an earlier plan's primary) serves a JavaScript browser-
+    verification challenge to headless clients — unusable here.
+  * yfinance is RED (Yahoo's ToS bars automated scraping; yfinance is an
+    unofficial TLS-impersonation workaround) — fine for the owner's personal
+    use, gated off entirely in MARKET_PROFILE=commercial (app.profile.
+    is_commercial()). Personal profile: unchanged, still the primary daily-
+    bar fetcher (cache-first in ts_price, refetched only when the stored
+    history is missing the most recent expected close).
+  * Tiingo (app/ingest/tiingo.py) is the yfinance replacement — BYO-key, and
+    Tiingo's own ToS explicitly permits the BYO-key pattern in writing.
+    Personal profile: opt-in fallback, only consulted when yfinance leaves a
+    symbol stale AND a MARKET_TIINGO_API_KEY is set. Commercial profile:
+    PRIMARY provider. Tiingo can't serve crypto, COMEX metals futures
+    (XAU/XAG -> GC=F/SI=F), or index tickers (^MOVE/^VIX) — those degrade
+    gracefully (stale/missing series, never a crash) unless Alpaca covers
+    them instead.
+  * Alpaca (when MARKET_ALPACA_* keys are set) is the last-resort redundancy
+    leg in both profiles: primary for live quotes (one batched IEX snapshot
+    call vs one Yahoo hit per symbol) and fallback for daily bars when the
+    legs above come up empty.
 
 Note on ts_price.source: every chart/cookbook/strategist reader filters on
 ``source = 'yahoo'`` — that value is the *daily-bars series namespace* (the
 way multiasset uses 'gold-api' as a separate namespace), not provenance, so
-the Alpaca fallback deliberately writes into it to keep the series whole.
+both the Tiingo and Alpaca fallbacks deliberately write into it to keep the
+series whole.
 
-yfinance is blocking; its calls run in the default executor.
+yfinance is blocking; its calls run in the default executor. Tiingo/Alpaca
+are async (httpx via the shared HttpClient).
 """
 
 from __future__ import annotations
@@ -30,7 +43,8 @@ from datetime import date, datetime, timedelta, timezone
 
 from app.config import get_settings
 from app.db.duck import DuckStore
-from app.ingest import alpaca
+from app.ingest import alpaca, tiingo
+from app.profile import is_commercial
 
 log = logging.getLogger("market.ingest.prices")
 
@@ -197,18 +211,28 @@ async def fetch_live_quotes(http, items: list[tuple[str, str]]) -> list[dict]:
             pending = [(s, ac) for s, ac in pending if s not in got]
 
     if pending:
-        loop = asyncio.get_running_loop()
+        if is_commercial():
+            # yfinance is RED and gated off in commercial profile (see
+            # app/profile.py) — Tiingo has no free live-quote product, so
+            # anything Alpaca didn't already cover above simply has no live
+            # quote here. Degrades gracefully (fewer rows out), never crashes.
+            log.debug(
+                "live-quote yfinance fallback skipped (commercial profile) for %s symbol(s)",
+                len(pending),
+            )
+        else:
+            loop = asyncio.get_running_loop()
 
-        def _rest() -> list[dict]:
-            quotes = []
-            for symbol, asset_class in pending:
-                q = fetch_live_quote(symbol, asset_class)
-                if q is not None:
-                    quotes.append(q)
-            return quotes
+            def _rest() -> list[dict]:
+                quotes = []
+                for symbol, asset_class in pending:
+                    q = fetch_live_quote(symbol, asset_class)
+                    if q is not None:
+                        quotes.append(q)
+                return quotes
 
-        for q in await loop.run_in_executor(None, _rest):
-            out[q["symbol"]] = q
+            for q in await loop.run_in_executor(None, _rest):
+                out[q["symbol"]] = q
 
     return [out[s] for s, _ in items if s in out]
 
@@ -218,22 +242,69 @@ async def ensure_daily_history(
 ) -> None:
     """Fetch + store daily bars for `symbol` unless already fresh.
 
-    yfinance does the work; if it leaves the series stale (Yahoo broken or
-    thin) and Alpaca keys are configured, Alpaca backfills the gap into the
-    same 'yahoo' namespace (see module docstring).
+    Provider order (see module docstring + app/profile.py):
+      * personal (default): yfinance primary, run unchanged; Tiingo is an
+        opt-in fallback that only fires if MARKET_TIINGO_API_KEY is set AND
+        yfinance left the series stale.
+      * commercial: yfinance is GATED OFF (RED, no ToS carve-out) — Tiingo is
+        primary instead. Without a key, or for a symbol Tiingo structurally
+        can't serve (crypto, metals futures, indices — see
+        tiingo.tiingo_symbol), the series just stays whatever's cached;
+        degrades, never crashes.
+      * Alpaca (either profile, when keys are configured) is the last-resort
+        fallback, same as before.
+    Every leg writes into the SAME 'yahoo' ts_price namespace (see module
+    docstring) so downstream readers are unaffected by the provider swap.
     """
     loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, _fetch_and_store, duck, symbol, asset_class)
-
     settings = get_settings()
-    if not (settings.alpaca_key_id and settings.alpaca_secret_key):
+    commercial = is_commercial()
+
+    if not commercial:
+        await loop.run_in_executor(None, _fetch_and_store, duck, symbol, asset_class)
+    else:
+        log.debug("yfinance gated off (commercial profile) for %s — Tiingo is primary", symbol)
+
+    have_tiingo = bool(settings.tiingo_api_key)
+    have_alpaca = bool(settings.alpaca_key_id and settings.alpaca_secret_key)
+    if commercial and not have_tiingo:
+        log.debug(
+            "tiingo primary unavailable for %s: no MARKET_TIINGO_API_KEY "
+            "(commercial profile; startup already logged + marked source_health 'needs key')",
+            symbol,
+        )
+    if not have_tiingo and not have_alpaca:
         return
+
     latest = await loop.run_in_executor(None, _stored_latest, duck, symbol)
     if latest is not None and latest >= _last_expected_close():
         return
     start = (
         latest - timedelta(days=7) if latest else date.today() - timedelta(days=5 * 365)
     )
+
+    if have_tiingo:
+        try:
+            rows = await tiingo.fetch_daily_bars(
+                http, settings.tiingo_api_key, symbol, asset_class, start
+            )
+        except Exception as exc:
+            log.warning("tiingo bars %s failed: %s", symbol, exc)
+            rows = []
+        if rows:
+            await loop.run_in_executor(None, duck.executemany, _INSERT_SQL, rows)
+            log.info("tiingo %s: stored %s daily bars", symbol, len(rows))
+        if not have_alpaca:
+            return
+        latest = await loop.run_in_executor(None, _stored_latest, duck, symbol)
+        if latest is not None and latest >= _last_expected_close():
+            return
+        start = (
+            latest - timedelta(days=7) if latest else date.today() - timedelta(days=5 * 365)
+        )
+
+    if not have_alpaca:
+        return
     try:
         bars = await alpaca.fetch_daily_bars(
             http, settings.alpaca_key_id, settings.alpaca_secret_key,

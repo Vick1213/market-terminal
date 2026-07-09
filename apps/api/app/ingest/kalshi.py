@@ -22,6 +22,7 @@ from datetime import date, datetime, timezone
 from app.db.duck import DuckStore
 from app.ingest.http import HttpClient
 from app.ingest.macro import MacroRow, _parse_date
+from app.profile import gated
 
 log = logging.getLogger("market.ingest.kalshi")
 
@@ -178,7 +179,11 @@ class KalshiPipeline:
             [row.series_id, row.ts, row.value, row.source],
         )
 
+    @gated("kalshi")
     async def run(self) -> None:
+        """Kalshi Data ToS: personal/non-business use only, bans AI/ML use,
+        forbids sharing without written permission — gated off in
+        MARKET_PROFILE=commercial."""
         total = 0
         for st in self._series:
             markets = await fetch_series_markets(self._http, st)

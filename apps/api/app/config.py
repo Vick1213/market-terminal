@@ -32,6 +32,19 @@ class Settings(BaseSettings):
     # descriptive UA or it returns 403; we use the same UA everywhere.
     contact_email: str = "saatvik1213@gmail.com"
 
+    # --- M2.5: data-source licensing profile ---
+    # See docs/data-licensing-audit.md (per-source ToS/statute ratings) and
+    # app/profile.py (the central RED-source gate registry). NOTE: the field
+    # is named `profile` (not `market_profile`) because env_prefix already
+    # adds "MARKET_" — a `market_profile` field would require the env var
+    # MARKET_MARKET_PROFILE instead of the intended MARKET_PROFILE.
+    #   "personal" (default): every ingestor runs unchanged — RED-rated
+    #     sources are fine for the owner's own personal, non-commercial use.
+    #   "commercial": RED sources (Kalshi, CBOE VIX-complex/GEX, StockTwits,
+    #     AAII, Senate eFD, Seeking Alpha + Dow Jones/MarketWatch/Investing.com/
+    #     CNBC RSS, FMP earnings, yfinance) are gated off — see app/profile.py.
+    profile: str = "personal"
+
     # Where DuckDB / SQLite / the HTTP cache live. Defaults to <repo>/data.
     data_dir: Path = Field(default=REPO_ROOT / "data")
 
@@ -250,6 +263,15 @@ class Settings(BaseSettings):
     # Alpaca fallback for when Yahoo breaks the way Stooq did.
     alpaca_key_id: str = ""
     alpaca_secret_key: str = ""
+    # Tiingo daily EOD bars (M2.5 yfinance replacement — BYO-key, and Tiingo's
+    # own ToS explicitly permits the BYO-key desktop pattern in writing; see
+    # docs/data-licensing-audit.md's "key finding" + app/ingest/tiingo.py).
+    # personal profile: opt-in fallback, only consulted when yfinance leaves a
+    # symbol stale. commercial profile: PRIMARY daily-bar provider (yfinance is
+    # gated off in app/profile.py) — empty here means daily-bar history/live
+    # quotes degrade (stale/missing) for anything Alpaca can't cover either,
+    # never crash. Free tier key at tiingo.com.
+    tiingo_api_key: str = ""
 
     # --- Phase 12: paper trading bot (strategist proposal surface) ---
     # The bot turns the strategist's suggested allocation into Alpaca PAPER

@@ -29,6 +29,7 @@ from datetime import datetime, timedelta, timezone
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.http import HttpClient
+from app.profile import gated
 from app.retail.score import compute_gauge, compute_leaderboard
 from app.sentiment.service import SentimentService
 from app.ws.hub import ConnectionManager
@@ -204,7 +205,11 @@ class RetailPipeline:
         )
         log.info("%s %s: %s new msgs, sentiment %.2f", source, sym, len(items), sent)
 
+    @gated("stocktwits")
     async def _stocktwits_symbol(self, sym: str) -> None:
+        """StockTwits ToS: personal/non-commercial use only, and not
+        currently accepting new developer API registrations — gated off in
+        MARKET_PROFILE=commercial."""
         loop = asyncio.get_running_loop()
         last_id = await loop.run_in_executor(None, self._cursor_get, "stocktwits", sym)
         url = STOCKTWITS_URL.format(sym=sym)

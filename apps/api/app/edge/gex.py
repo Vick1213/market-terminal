@@ -22,6 +22,7 @@ from datetime import datetime, timedelta, timezone
 
 from app.db.duck import DuckStore
 from app.ingest.http import HttpClient
+from app.profile import gated
 
 log = logging.getLogger("market.edge.gex")
 
@@ -106,7 +107,11 @@ class GexAdapter:
         self._http = http
         self._symbols = symbols
 
+    @gated("cboe", default=lambda: 0)
     async def run(self) -> int:
+        """Cboe Market Data Policy bars auto-extraction/redistribution of the
+        delayed-options-chain endpoint this whole panel depends on — gated
+        off in MARKET_PROFILE=commercial (no free substitute for GEX)."""
         stored = 0
         for symbol in self._symbols:
             try:

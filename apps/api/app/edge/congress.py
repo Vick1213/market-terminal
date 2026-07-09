@@ -27,6 +27,7 @@ from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.http import HttpClient
 from app.ingest.news import BROWSER_HEADERS
+from app.profile import gated
 
 log = logging.getLogger("market.edge.congress")
 
@@ -139,7 +140,11 @@ class CongressPipeline:
             [CURSOR_SOURCE, ptr_id, filed],
         )
 
+    @gated("congress_efd", default=lambda: 0)
     async def run(self) -> int:
+        """Ethics in Government Act bars commercial use of Financial
+        Disclosure Reports (statute, not just ToS) — gated off entirely in
+        MARKET_PROFILE=commercial. See docs/data-licensing-audit.md."""
         token = await self._handshake()
         if not token:
             return 0

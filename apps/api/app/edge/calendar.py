@@ -20,11 +20,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.http import HttpClient
+from app.profile import gated
 
 log = logging.getLogger("market.edge.calendar")
 
@@ -264,10 +265,17 @@ class CalendarPipeline:
                 pass
         return syms
 
+    @gated("fmp", default=list)
     async def _fmp_earnings_events(self) -> list[tuple]:
         """Market-wide earnings calendar (PLAN §9 #7) — one request covers the
         whole horizon; filtered locally to the symbols we track. Returns []
-        without a key (the yfinance leg then covers the watchlist)."""
+        without a key (the yfinance leg in ``run()`` then covers the
+        watchlist in personal profile). FMP's free tier bars 'Commercial Use'
+        and requires a Data Display & Licensing Agreement — gated off
+        entirely in MARKET_PROFILE=commercial. The yfinance fallback
+        (``_yfinance_earnings_events``, same RED vendor) is gated off there
+        too, so commercial profile simply has no watchlist earnings-date
+        source — see docs/data-licensing-audit.md 'Implementation status'."""
         if not self._fmp_key:
             return []
         today = date.today()
@@ -302,6 +310,16 @@ class CalendarPipeline:
                 first_date[sym] = d
         return [(f"earnings:{d}:{sym}", d, "earnings", f"{sym} earnings", sym, "fmp")
                 for sym, d in first_date.items()]
+
+    @gated("yfinance", default=list)
+    async def _yfinance_earnings_events(self) -> list[tuple]:
+        """yfinance earnings-date fallback for watchlist equities — same RED
+        Yahoo vendor as app/ingest/prices.py's primary daily-bar provider
+        (data-licensing-audit.md #Yahoo Finance / yfinance). Gated off in
+        MARKET_PROFILE=commercial; ``run()`` then simply keeps whatever FMP
+        already covered that horizon instead of crashing."""
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(None, self._earnings_events)
 
     def _earnings_events(self) -> list[tuple]:
         """Blocking (yfinance) — run in executor."""
@@ -342,7 +360,7 @@ class CalendarPipeline:
         events += fmp_events
         if not fmp_events:
             try:
-                events += await loop.run_in_executor(None, self._earnings_events)
+                events += await self._yfinance_earnings_events()
             except Exception as exc:
                 log.warning("earnings leg failed: %s", exc)
         # Every leg is fully regenerated each run, so drop all future rows

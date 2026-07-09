@@ -12,8 +12,15 @@ import json
 from fastapi import APIRouter, Query, Request
 
 from app.ingest.cftc_tff import CONTRACTS as _TFF_CONTRACTS
+from app.profile import is_commercial
 
 router = APIRouter(prefix="/api", tags=["edge"])
+
+# M2.5: short label merged into the payload of routes that exclusively serve
+# a RED source gated off in MARKET_PROFILE=commercial (congress, kalshi, gex)
+# — existing DB reads already degrade to an empty list gracefully (never a
+# 500), this just makes the "why is this empty" reason explicit for clients.
+_COMMERCIAL_DISABLED = "commercial profile"
 
 
 @router.get("/alerts")
@@ -141,7 +148,10 @@ async def gex(request: Request) -> dict:
             "profile": detail.get("profile", []),
             "contracts": detail.get("contracts"),
         })
-    return {"snapshots": out}
+    resp: dict = {"snapshots": out}
+    if is_commercial():
+        resp["disabled"] = _COMMERCIAL_DISABLED
+    return resp
 
 
 @router.get("/insider")
@@ -211,7 +221,7 @@ async def congress(request: Request, days: int = Query(90, le=365), limit: int =
         return trades, watch
 
     trades, watch = await loop.run_in_executor(None, _q)
-    return {
+    resp: dict = {
         "trades": [
             {
                 "ptr_id": t[0], "row": t[1], "senator": t[2],
@@ -226,6 +236,9 @@ async def congress(request: Request, days: int = Query(90, le=365), limit: int =
             for t in trades
         ],
     }
+    if is_commercial():
+        resp["disabled"] = _COMMERCIAL_DISABLED
+    return resp
 
 
 @router.get("/whales")
@@ -241,9 +254,13 @@ async def whales(request: Request) -> dict:
 @router.post("/congress/run")
 async def congress_run(request: Request) -> dict:
     """Trigger the Senate PTR ingest now instead of waiting for the
-    scheduled sweep (first run ~10 min after boot, then every 12h)."""
+    scheduled sweep (first run ~10 min after boot, then every 12h). No-ops
+    (stored_transactions: 0) in MARKET_PROFILE=commercial — see app/profile.py."""
     stored = await request.app.state.congress_pipeline.run()
-    return {"stored_transactions": stored}
+    resp: dict = {"stored_transactions": stored}
+    if is_commercial():
+        resp["disabled"] = _COMMERCIAL_DISABLED
+    return resp
 
 
 @router.post("/whales/run")
@@ -356,12 +373,18 @@ async def kalshi(request: Request) -> dict:
         )
 
     events, expected = await loop.run_in_executor(None, _q)
-    return {"events": events, "fomc_expected_rate": expected}
+    resp: dict = {"events": events, "fomc_expected_rate": expected}
+    if is_commercial():
+        resp["disabled"] = _COMMERCIAL_DISABLED
+    return resp
 
 
 @router.post("/kalshi/run")
 async def kalshi_run(request: Request) -> dict:
-    """Trigger the Kalshi ingest now (scheduled run is every few hours)."""
+    """Trigger the Kalshi ingest now (scheduled run is every few hours).
+    No-ops in MARKET_PROFILE=commercial — see app/profile.py."""
+    if is_commercial():
+        return {"ok": False, "disabled": _COMMERCIAL_DISABLED}
     pipe = request.app.state.kalshi_pipeline
     if pipe is None:
         return {"ok": False, "reason": "kalshi disabled"}
