@@ -1,73 +1,10 @@
 "use client";
 
 import { Responsive, WidthProvider, type Layouts } from "react-grid-layout";
-import { AlertsPanel } from "./panels/AlertsPanel";
-import { BotPanel } from "./panels/BotPanel";
-import { BriefPanel } from "./panels/BriefPanel";
-import { CalendarPanel } from "./panels/CalendarPanel";
-import { CorrelationPanel } from "./panels/CorrelationPanel";
-import { DivergencePanel } from "./panels/DivergencePanel";
-import { Edgar8KPanel } from "./panels/Edgar8KPanel";
-import { Edgar13DPanel } from "./panels/Edgar13DPanel";
-import { EnergyPanel } from "./panels/EnergyPanel";
-import { FedSpeechesPanel } from "./panels/FedSpeechesPanel";
-import { HeartbeatPanel } from "./panels/HeartbeatPanel";
-import { HelpPanel } from "./panels/HelpPanel";
-import { KalshiPanel } from "./panels/KalshiPanel";
-import { MacroPanel } from "./panels/MacroPanel";
-import { MultiAssetPanel } from "./panels/MultiAssetPanel";
-import { NewsPanel } from "./panels/NewsPanel";
-import { PolicyRiskPanel } from "./panels/PolicyRiskPanel";
-import { PortfolioPanel } from "./panels/PortfolioPanel";
-import { PositioningPanel } from "./panels/PositioningPanel";
-import { RatesInflationPanel } from "./panels/RatesInflationPanel";
-import { RetailPanel } from "./panels/RetailPanel";
-import { RotationPanel } from "./panels/RotationPanel";
-import { SourceHealthPanel } from "./panels/SourceHealthPanel";
-import { StrategistPanel } from "./panels/StrategistPanel";
-import { TffPositioningPanel } from "./panels/TffPositioningPanel";
-import { TradebookPanel } from "./panels/TradebookPanel";
-import { TreasurySupplyPanel } from "./panels/TreasurySupplyPanel";
-import { VolOverlayPanel } from "./panels/VolOverlayPanel";
-import { WatchlistPanel } from "./panels/WatchlistPanel";
-import { WhalesPanel } from "./panels/WhalesPanel";
+import { PANEL_REGISTRY } from "./panelRegistry";
+import { usePopouts } from "@/hooks/usePopouts";
 
 const Grid = WidthProvider(Responsive);
-
-// The six target panels from PLAN.md §3, the Phase-0 system panel, and the
-// Phase-7 edge layer (brief, alerts, calendar, rotation, positioning).
-const PANELS: { i: string; el: React.ReactNode }[] = [
-  { i: "portfolio", el: <PortfolioPanel /> },
-  { i: "system", el: <HeartbeatPanel /> },
-  { i: "news", el: <NewsPanel /> },
-  { i: "liquidity", el: <MacroPanel /> },
-  { i: "watchlist", el: <WatchlistPanel /> },
-  { i: "multiasset", el: <MultiAssetPanel /> },
-  { i: "retail", el: <RetailPanel /> },
-  { i: "cookbook", el: <CorrelationPanel /> },
-  { i: "brief", el: <BriefPanel /> },
-  { i: "alerts", el: <AlertsPanel /> },
-  { i: "calendar", el: <CalendarPanel /> },
-  { i: "rotation", el: <RotationPanel /> },
-  { i: "positioning", el: <PositioningPanel /> },
-  { i: "whales", el: <WhalesPanel /> },
-  { i: "divergence", el: <DivergencePanel /> },
-  { i: "edgar8k", el: <Edgar8KPanel /> },
-  { i: "edgar13d", el: <Edgar13DPanel /> },
-  { i: "tff", el: <TffPositioningPanel /> },
-  { i: "treasury", el: <TreasurySupplyPanel /> },
-  { i: "kalshi", el: <KalshiPanel /> },
-  { i: "nowcast", el: <RatesInflationPanel /> },
-  { i: "energy", el: <EnergyPanel /> },
-  { i: "policyrisk", el: <PolicyRiskPanel /> },
-  { i: "fedspeak", el: <FedSpeechesPanel /> },
-  { i: "strategist", el: <StrategistPanel /> },
-  { i: "voloverlay", el: <VolOverlayPanel /> },
-  { i: "bot", el: <BotPanel /> },
-  { i: "tradebook", el: <TradebookPanel /> },
-  { i: "sources", el: <SourceHealthPanel /> },
-  { i: "help", el: <HelpPanel /> },
-];
 
 const layouts: Layouts = {
   lg: [
@@ -117,6 +54,8 @@ const layouts: Layouts = {
 };
 
 export function DashboardGrid() {
+  const { isPoppedOut, openPopout, bringBack } = usePopouts();
+
   return (
     <Grid
       className="layout"
@@ -128,8 +67,36 @@ export function DashboardGrid() {
       draggableHandle=".panel-head"
       draggableCancel="button, a, select, input"
     >
-      {PANELS.map((p) => (
-        <div key={p.i}>{p.el}</div>
+      {PANEL_REGISTRY.map((p) => (
+        <div key={p.id} className="grid-tile">
+          {isPoppedOut(p.id) ? (
+            <div className="panel">
+              <div className="panel-head">
+                <span>{p.title}</span>
+              </div>
+              <div className="panel-body placeholder">
+                <span>Popped out</span>
+                <button className="expand-btn" onClick={() => bringBack(p.id)}>
+                  Bring back
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <button
+                className="popout-btn"
+                title={`Pop out ${p.title}`}
+                aria-label={`Pop out ${p.title}`}
+                onMouseDown={(e) => e.stopPropagation()}
+                onTouchStart={(e) => e.stopPropagation()}
+                onClick={() => openPopout(p.id)}
+              >
+                ⧉
+              </button>
+              {p.render()}
+            </>
+          )}
+        </div>
       ))}
     </Grid>
   );

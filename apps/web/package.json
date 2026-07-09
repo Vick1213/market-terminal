@@ -6,12 +6,14 @@
   "scripts": {
     "dev": "next dev -p 3000",
     "build": "next build",
+    "build:export": "NEXT_OUTPUT=export next build",
     "start": "next start -p 3000",
     "lint": "next lint"
   },
   "dependencies": {
     "@market/shared": "workspace:*",
     "@tanstack/react-query": "^5.66.0",
+    "@tauri-apps/api": "^2.11.1",
     "lightweight-charts": "^5.2.0",
     "next": "^15.1.6",
     "react": "^19.0.0",

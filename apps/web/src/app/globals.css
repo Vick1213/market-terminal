@@ -698,6 +698,59 @@ body {
   border-radius: 8px;
 }
 
+/* --- panel pop-out (multi-monitor) --- */
+.grid-tile {
+  height: 100%;
+}
+.popout-btn {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  z-index: 5;
+  width: 20px;
+  height: 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--panel-border);
+  background: var(--panel);
+  color: var(--text-dim);
+  border-radius: 4px;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+.grid-tile:hover .popout-btn {
+  opacity: 1;
+}
+.popout-btn:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+
+/* pop-out window: same app chrome, one panel filling the viewport */
+.popout-page {
+  height: 100vh;
+  padding: 12px;
+  display: flex;
+}
+.popout-panel {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+}
+.popout-error {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+
 /* Multi-Asset panel (P4): live tape, depth imbalance, flow chips */
 .ma-quotes {
   display: flex;
