@@ -69,11 +69,13 @@ from app.routers import news as news_router
 from app.routers import retail as retail_router
 from app.routers import series as series_router
 from app.routers import sentiment as sentiment_router
+from app.routers import settings as settings_router
 from app.routers import trading as trading_router
 from app.routers import watchlist as watchlist_router
 from app.routers import ws as ws_router
 from app.scheduler.jobs import build_scheduler
 from app.sentiment import SentimentService
+from app.settings_store import apply_overlay
 from app.trading.bot import TradingBotService
 from app.trading.broker import AlpacaPaperBroker
 from app.trading.broker_cache import BrokerState
@@ -93,6 +95,11 @@ log = logging.getLogger("market.main")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    # M3: apply the BYO settings store (apps/api/data/settings.json) on top of
+    # env/.env BEFORE any pipeline/broker/LLM client is constructed below, so
+    # a key saved through the settings UI is live from the very first request.
+    # No-op if the store file doesn't exist yet (pure env/.env behavior).
+    apply_overlay(settings)
     settings.ensure_dirs()
     log.info("starting %s v%s — data dir: %s", settings.app_name, settings.version, settings.data_dir)
 
@@ -430,7 +437,12 @@ def create_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.cors_origins,
+        # M3: the packaged Tauri desktop shell serves the frontend from its
+        # own fixed custom-scheme origin, not localhost:3000 — added
+        # unconditionally (not user-configurable via settings.cors_origins)
+        # since it's a property of how Tauri packages the app, not a data
+        # source. See apps/desktop/README.md.
+        allow_origins=[*settings.cors_origins, "tauri://localhost", "http://tauri.localhost"],
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
@@ -448,6 +460,7 @@ def create_app() -> FastAPI:
     app.include_router(edge_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(trading_router.router)
+    app.include_router(settings_router.router)
     app.include_router(ws_router.router)
 
     @app.get("/", tags=["meta"])

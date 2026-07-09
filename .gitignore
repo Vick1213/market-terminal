@@ -1,5 +1,8 @@
 # --- data & local state (never commit) ---
 /data/
+# M3: settings.json (BYO API keys/credentials) — separate dir from /data/
+# above (see app/settings_store.py), never committed either way.
+/apps/api/data/
 *.duckdb
 *.duckdb.wal
 *.db

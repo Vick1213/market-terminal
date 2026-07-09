@@ -55,6 +55,10 @@ import type {
   SuggestionsResponse,
   SuggestionActionResponse,
   KnobsResponse,
+  SettingsResponse,
+  SettingsUpdate,
+  SettingsTestProvider,
+  SettingsTestResult,
 } from "@market/shared";
 
 export const API_URL = process.env.NEXT_PUBLIC_API_URL ?? "http://127.0.0.1:8000";
@@ -703,4 +707,33 @@ export async function removeNewsTicker(symbol: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`remove news ticker failed: ${res.status}`);
+}
+
+// --- M3: onboarding & settings UI (replaces hand-edited .env) ---
+export async function fetchSettings(): Promise<SettingsResponse> {
+  const res = await fetch(`${API_URL}/api/settings`, { cache: "no-store" });
+  if (!res.ok) throw new Error(`settings request failed: ${res.status}`);
+  return res.json();
+}
+
+/** Partial update — only send changed fields. "" unsets a field (reverts to
+ * env/default). Returns the same shape as fetchSettings(). */
+export async function updateSettings(updates: SettingsUpdate): Promise<SettingsResponse> {
+  const res = await fetch(`${API_URL}/api/settings`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data?.detail || `settings update failed: ${res.status}`);
+  return data;
+}
+
+export async function testSettingsProvider(
+  provider: SettingsTestProvider,
+): Promise<SettingsTestResult> {
+  const res = await fetch(`${API_URL}/api/settings/test/${provider}`, { method: "POST" });
+  const data = (await res.json().catch(() => ({ ok: false, detail: "no response" }))) as SettingsTestResult;
+  if (!res.ok) throw new Error(data?.detail || `${provider} test failed: ${res.status}`);
+  return data;
 }

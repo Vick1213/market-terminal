@@ -1727,3 +1727,37 @@ export interface FedSpeechesResponse {
   speeches: FedSpeech[];
   index: { date: string; value: number } | null; // rolling FED_HAWK_DOVE
 }
+
+// --- M3: onboarding & settings UI (replaces hand-edited .env) ---
+export type SettingsGroup = "data" | "broker" | "ai" | "alerts";
+export type SettingsProvenance = "store" | "env" | "default";
+
+export interface SettingsFieldView {
+  group: SettingsGroup;
+  label: string;
+  secret: boolean; // true = value is masked (last 4 chars only)
+  value: string | null; // masked for secrets; null = unset
+  provenance: SettingsProvenance;
+}
+
+export interface SettingsResponse {
+  onboarded: boolean;
+  fields: Record<string, SettingsFieldView>;
+}
+
+// Partial update body for PUT /api/settings — "" unsets a field.
+export type SettingsUpdate = Record<string, string | boolean>;
+
+export type SettingsTestProvider =
+  | "fred"
+  | "tiingo"
+  | "alpaca"
+  | "fmp"
+  | "finnhub"
+  | "llm"
+  | "ntfy";
+
+export interface SettingsTestResult {
+  ok: boolean;
+  detail: string;
+}
