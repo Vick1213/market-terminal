@@ -27,6 +27,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Provisions Python for us (via uv's own toolchain, no separate
+      # actions/setup-python needed) - the sidecar build script
+      # (apps/desktop/scripts/build-sidecar.mjs) runs
+      # `uv run --group bundle pyinstaller` to stage the apps/api sidecar.
+      - uses: astral-sh/setup-uv@v5
+
       # Reads packageManager from the root package.json (pnpm@9.15.9) - no
       # version input needed.
       - uses: pnpm/action-setup@v4

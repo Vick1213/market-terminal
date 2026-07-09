@@ -33,6 +33,13 @@ dev = [
     "honcho>=2.0",
     "ruff>=0.8",
 ]
+# Desktop packaging (M2): freezes sidecar_main.py into a PyInstaller onedir
+# sidecar for the Tauri app. Install with `uv sync --group bundle`, run with
+# `uv run --group bundle pyinstaller ...` (see sidecar.spec + ../desktop/scripts/build-sidecar.mjs).
+# Not a normal runtime dep — dev/CI machines building the desktop app only.
+bundle = [
+    "pyinstaller>=6.11",
+]
 
 [tool.uv]
 package = false

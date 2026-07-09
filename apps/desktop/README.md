@@ -2,10 +2,11 @@
 
 Wraps the existing Next.js UI (`apps/web`) in a native window using
 [Tauri v2](https://v2.tauri.app/). Dev mode, native multi-window popouts, and
-the **production build path** (static-exporting `apps/web` and packaging it
-with `tauri build`) are wired up. Bundling a Python/FastAPI sidecar into the
-app and installer signing/notarization/auto-update are still out of scope —
-see "What's NOT wired up yet" below.
+the **production build path** (static-exporting `apps/web`, staging the
+`apps/api` Python backend as a bundled sidecar, and packaging both with
+`tauri build`) are wired up — the packaged app spawns and manages that
+sidecar itself. Installer signing/notarization/auto-update are still out of
+scope — see "What's NOT wired up yet" below.
 
 ## Prerequisites
 
@@ -55,16 +56,24 @@ cd apps/desktop && pnpm build --debug  # debug profile — faster, unoptimized, 
 This runs `tauri build`, which:
 
 1. Runs `build.beforeBuildCommand` (see `src-tauri/tauri.conf.json`):
-   `pnpm --filter @market/web build:export`. This statically exports
-   `apps/web` to `apps/web/out` (see `apps/web/next.config.mjs` /
-   `package.json`'s `build:export` script — gated behind `NEXT_OUTPUT=export`
-   so the normal `pnpm dev` / `pnpm build` browser deployment of `apps/web` is
-   completely unaffected). The app is fully client-fetching (see
-   `apps/web/src/lib/api.ts`), so the static export needs no rewrites, route
-   handlers, or server actions to work.
-2. Packages `apps/web/out` (via `build.frontendDist: "../../web/out"`) into a
-   native app bundle (`.app` on macOS, plus a `.dmg` if code signing/hdiutil
-   succeeds) under `src-tauri/target/{debug,release}/bundle/`.
+   `pnpm --filter @market/web build:export && node scripts/build-sidecar.mjs`
+   (cwd `apps/desktop`; plain `&&`/`node`, no `bash`, so it also works on
+   Windows `cmd`).
+   - `pnpm --filter @market/web build:export` statically exports `apps/web`
+     to `apps/web/out` (see `apps/web/next.config.mjs` / `package.json`'s
+     `build:export` script — gated behind `NEXT_OUTPUT=export` so the normal
+     `pnpm dev` / `pnpm build` browser deployment of `apps/web` is completely
+     unaffected). The app is fully client-fetching (see
+     `apps/web/src/lib/api.ts`), so the static export needs no rewrites,
+     route handlers, or server actions to work.
+   - `node scripts/build-sidecar.mjs` stages the `apps/api` Python backend as
+     a PyInstaller onedir build at `src-tauri/sidecar/market-api/`, ready for
+     `bundle.resources` to package (see "Python/FastAPI sidecar bundling" note in
+     "What's NOT wired up yet" below).
+2. Packages `apps/web/out` (via `build.frontendDist: "../../web/out"`) and
+   `src-tauri/sidecar/market-api/` (via `bundle.resources`) into a native app
+   bundle (`.app` on macOS, plus a `.dmg` if code signing/hdiutil succeeds)
+   under `src-tauri/target/{debug,release}/bundle/`.
 
 You do **not** need to manually run the web export first — step 1 does it for
 you. If you want to do it explicitly (e.g. to inspect `apps/web/out` without
@@ -186,9 +195,14 @@ because window/webview creation and focus-stealing are considered sensitive.
 - `build.beforeDevCommand`: empty string `""`. The dev servers are started
   separately via `honcho start`; Tauri should not spawn them itself.
   (Not runtime-verified under `tauri dev` this round — see caveat below.)
-- `build.beforeBuildCommand`: `"pnpm --filter @market/web build:export"` —
-  runs before every `tauri build`, so the static export always exists (and is
-  fresh) by the time Tauri packages it. See "Production build" above.
+- `build.beforeBuildCommand`:
+  `"pnpm --filter @market/web build:export && node scripts/build-sidecar.mjs"`
+  — runs before every `tauri build`, so both the static export and the staged
+  sidecar always exist (and are fresh) by the time Tauri packages them. See
+  "Production build" above.
+- `bundle.resources`: `{ "sidecar/market-api/": "market-api/" }` — packages
+  the staged sidecar directory into the app bundle's resource dir (see
+  "Python/FastAPI sidecar bundling" note in "What's NOT wired up yet" below).
 - `build.frontendDist`: `"../../web/out"` — resolved relative to `src-tauri/`
   (where `tauri.conf.json` lives), so this points at `apps/web/out`, the
   static export's output directory (see `apps/web/next.config.mjs`). Note the
@@ -202,8 +216,22 @@ because window/webview creation and focus-stealing are considered sensitive.
 
 ## What's NOT wired up yet
 
-- **No Python/FastAPI sidecar bundling.** `apps/api` still runs as its own
-  process; nothing here packages or spawns it.
+- **Python/FastAPI sidecar bundling — DONE.** `apps/api` is staged as a
+  PyInstaller onedir build (`apps/desktop/scripts/build-sidecar.mjs`, run as
+  part of `beforeBuildCommand`) and packaged via `tauri.conf.json`'s
+  `bundle.resources` into the app's resource dir under `market-api/`. On
+  startup, `src-tauri/src/lib.rs` spawns it on `127.0.0.1:8765`
+  (`MARKET_SIDECAR_PORT`) unless one is already listening there, and kills it
+  on app exit. It manages its own per-user app-data dir (same as it would
+  running standalone); its stdout/stderr are appended to `api.log` in the
+  app's log dir (`~/Library/Logs/com.market.terminal/api.log` on macOS,
+  `%LOCALAPPDATA%\com.market.terminal\logs\api.log` on Windows). Dev mode is
+  unchanged: `tauri dev` never spawns it — you still run `honcho start`
+  yourself and the UI talks to that dev API on `127.0.0.1:8000`. A force-quit
+  of the packaged app (as opposed to a normal window close) can orphan the
+  sidecar process, since the exit-cleanup that kills it never runs; the
+  sidecar's own best-effort parent-death watchdog is the mitigation for that
+  case, not a guarantee.
 - **CORS for the packaged app's origin — DONE (M3).** `apps/web/src/lib/api.ts`
   calls the API via an absolute URL (`NEXT_PUBLIC_API_URL ?? http://127.0.0.1:8000`),
   so from inside the packaged app those `fetch()` calls originate from

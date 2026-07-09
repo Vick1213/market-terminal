@@ -1646,7 +1646,12 @@ class DayTraderService:
             from app.ml.vol_overlay import current_signal as _vol_sig
             loop = asyncio.get_running_loop()
             sig = await loop.run_in_executor(None, lambda: _vol_sig(duck=self._duck))
-        except Exception:
+        except Exception as exc:
+            # Fail-soft: app.ml may be unavailable (ImportError — e.g. a trimmed
+            # PyInstaller/desktop build without torch/sklearn/lightgbm) or the
+            # market data DB may be missing/empty. Either way, continue without
+            # the overlay rather than break the intraday plan.
+            log.warning("vol-overlay signal unavailable, continuing without it: %s", exc)
             sig = None
         self._vol_cache = (sig, _t.monotonic())
         return sig

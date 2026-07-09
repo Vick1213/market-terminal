@@ -2,3 +2,9 @@
 # will have compiled files and executables
 /target/
 /gen/schemas
+
+# Staged PyInstaller onedir build of apps/api, produced by
+# scripts/build-sidecar.mjs and packaged into the bundle via
+# tauri.conf.json's bundle.resources — regenerated on every build, never
+# committed.
+/sidecar/

@@ -201,6 +201,27 @@ def test_settings_snapshot_shape() -> None:
     assert set(snap["fields"]["fred_api_key"]) == {"group", "label", "secret", "value", "provenance"}
 
 
+# --- check 5: MARKET_SETTINGS_PATH env override (desktop sidecar) -----------
+
+
+def test_default_settings_path_honors_env_override() -> None:
+    original = os.environ.get("MARKET_SETTINGS_PATH")
+    try:
+        override_path = Path(tempfile.mkdtemp()) / "appdata" / "settings.json"
+        os.environ["MARKET_SETTINGS_PATH"] = str(override_path)
+        store = ss.SettingsStore()
+        assert store.path == override_path
+
+        os.environ.pop("MARKET_SETTINGS_PATH", None)
+        store2 = ss.SettingsStore()
+        assert store2.path == ss._API_ROOT / "data" / "settings.json"
+    finally:
+        if original is None:
+            os.environ.pop("MARKET_SETTINGS_PATH", None)
+        else:
+            os.environ["MARKET_SETTINGS_PATH"] = original
+
+
 def _run_all() -> int:
     checks = [
         test_save_is_atomic_and_0600,
@@ -215,6 +236,7 @@ def _run_all() -> int:
         test_mask_value,
         test_describe_fields_masks_secrets_but_not_plain_fields,
         test_settings_snapshot_shape,
+        test_default_settings_path_honors_env_override,
     ]
     failed = 0
     for c in checks:

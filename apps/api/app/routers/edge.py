@@ -88,28 +88,40 @@ async def cot(request: Request) -> dict:
 async def vol_overlay(request: Request, symbol: str = Query("SPY"),
                       target_vol: float = Query(0.15, ge=0.05, le=0.50)) -> dict:
     """Volatility-targeted exposure overlay — the defensive use of forecastable
-    vol. Returns the latest suggested exposure/regime + backtest summary."""
-    from app.ml.vol_overlay import overlay_payload
+    vol. Returns the latest suggested exposure/regime + backtest summary.
 
+    Fail-soft: the desktop/PyInstaller build doesn't ship data/ml/*.duckdb, and
+    app.ml pulls in torch/sklearn/lightgbm that may not be present in a trimmed
+    frozen build — either an ImportError (module/deps missing) or a missing/
+    empty duckdb file must return a valid empty-shaped 200, never a 500."""
     duck = request.app.state.duck
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        None, overlay_payload, duck, symbol, target_vol
-    )
+    try:
+        from app.ml.vol_overlay import overlay_payload
+
+        return await loop.run_in_executor(
+            None, overlay_payload, duck, symbol, target_vol
+        )
+    except Exception as exc:  # ImportError (deps/module missing) or no market data
+        return {"signal": None, "backtest": {}, "note": f"vol-overlay unavailable: {exc}"}
 
 
 @router.get("/factors")
 async def factors(request: Request) -> dict:
     """Fundamental factor screen (value/quality/investment/size composite) from
     EDGAR XBRL. Descriptive cross-sectional ranks — NOT a deflation-cleared alpha
-    (the composite L/S fails DSR; size carries most of it). Leaders/laggards only."""
-    from app.ml.factors import latest_ranks
+    (the composite L/S fails DSR; size carries most of it). Leaders/laggards only.
 
+    Fail-soft: same reasoning as /api/vol-overlay above — the import itself
+    (not just the DB read) must be covered, since a trimmed frozen build may
+    not bundle app.ml's dependency stack at all."""
     loop = asyncio.get_running_loop()
     try:
+        from app.ml.factors import latest_ranks
+
         ranks = await loop.run_in_executor(None, latest_ranks, 6)
-    except Exception as exc:  # missing fundamentals DB — fail soft
-        return {"error": str(exc), "leaders": [], "laggards": []}
+    except Exception as exc:  # missing fundamentals DB, or app.ml unavailable — fail soft
+        return {"as_of": None, "leaders": [], "laggards": [], "note": f"factors unavailable: {exc}"}
     return ranks
 
 

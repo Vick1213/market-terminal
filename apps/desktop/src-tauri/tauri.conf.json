@@ -7,7 +7,7 @@
     "frontendDist": "../../web/out",
     "devUrl": "http://localhost:3000",
     "beforeDevCommand": "",
-    "beforeBuildCommand": "pnpm --filter @market/web build:export"
+    "beforeBuildCommand": "pnpm --filter @market/web build:export && node scripts/build-sidecar.mjs"
   },
   "app": {
     "windows": [
@@ -36,6 +36,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "sidecar/market-api/": "market-api/"
+    },
     "android": {
       "debugApplicationIdSuffix": ".debug"
     }

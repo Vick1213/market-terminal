@@ -42,7 +42,25 @@ log = logging.getLogger("market.settings_store")
 
 # apps/api/app/settings_store.py -> parents: [0]=app [1]=api
 _API_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_SETTINGS_PATH = _API_ROOT / "data" / "settings.json"
+
+
+def _resolve_default_settings_path() -> Path:
+    """``MARKET_SETTINGS_PATH`` env override wins when set (the PyInstaller
+    desktop sidecar, apps/api/sidecar_main.py, points this at a per-user
+    app-data directory before any ``app.*`` module is imported); otherwise
+    the long-standing dev default, apps/api/data/settings.json.
+
+    Resolved fresh on every call (not cached at import time) so a
+    ``SettingsStore()`` constructed after the env var is set — sidecar
+    startup, or a test that pokes ``os.environ`` — picks it up without
+    needing a module reload."""
+    override = os.environ.get("MARKET_SETTINGS_PATH")
+    if override:
+        return Path(override)
+    return _API_ROOT / "data" / "settings.json"
+
+
+DEFAULT_SETTINGS_PATH = _resolve_default_settings_path()
 
 
 @dataclass(frozen=True)
@@ -99,7 +117,7 @@ class SettingsStore:
     no file behaves exactly like the pre-M3 env-only world."""
 
     def __init__(self, path: Path | str | None = None) -> None:
-        self.path = Path(path) if path is not None else DEFAULT_SETTINGS_PATH
+        self.path = Path(path) if path is not None else _resolve_default_settings_path()
 
     def load(self) -> dict[str, Any]:
         try:
