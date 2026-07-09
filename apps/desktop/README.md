@@ -203,18 +203,20 @@ because window/webview creation and focus-stealing are considered sensitive.
 ## What's NOT wired up yet
 
 - **No Python/FastAPI sidecar bundling.** `apps/api` still runs as its own
-  process; nothing here packages or spawns it. This means:
-  **the packaged app cannot fetch any data until `apps/api`'s CORS config
-  allows the Tauri production origin.** `apps/web/src/lib/api.ts` calls the
-  API via an absolute URL (`NEXT_PUBLIC_API_URL ?? http://127.0.0.1:8000`),
+  process; nothing here packages or spawns it.
+- **CORS for the packaged app's origin — DONE (M3).** `apps/web/src/lib/api.ts`
+  calls the API via an absolute URL (`NEXT_PUBLIC_API_URL ?? http://127.0.0.1:8000`),
   so from inside the packaged app those `fetch()` calls originate from
   `tauri://localhost` (macOS/Linux) or `http://tauri.localhost` (Windows) —
-  not `http://localhost:3000` like the dev server. **Needed later in
-  `apps/api`:** add those origins to whatever CORS allow-list
-  `apps/api` uses (e.g. FastAPI's `CORSMiddleware`) alongside the existing dev
-  origin, or the packaged app will get CORS errors on every API call. Not
-  done here — `apps/api` is another agent's concurrent work; this is a note,
-  not a change.
+  not `http://localhost:3000` like the dev server. `apps/api/app/main.py`'s
+  `CORSMiddleware` now allows both of those origins unconditionally,
+  alongside `settings.cors_origins` (the dev-server localhost origins):
+  ```python
+  allow_origins=[*settings.cors_origins, "tauri://localhost", "http://tauri.localhost"],
+  ```
+  These two are hardcoded (not part of `MARKET_CORS_ORIGINS`/`settings.cors_origins`)
+  because they're a fixed property of how Tauri packages a webview app, not a
+  user-configurable data source.
 - **No installers / code signing / notarization / auto-update.** `tauri
   build`'s default `bundle.targets: "all"` + no signing identity means macOS
   bundles are ad-hoc/unsigned (fine for local dev/smoke-testing, not for
@@ -232,3 +234,27 @@ because window/webview creation and focus-stealing are considered sensitive.
   not smoke-tested under a live `tauri dev`/`tauri build` GUI session — same
   caveat as above, now also applying to the new `/popout?panel=<id>` query
   scheme.
+
+## CI builds
+
+`.github/workflows/desktop-build.yml` builds unsigned macOS (arm64) and
+Windows desktop bundles in GitHub Actions via `tauri-apps/tauri-action`
+(`pnpm install` → `tauri build`, same `beforeBuildCommand` web-export path as
+a local build — see "Production build" above).
+
+- **Trigger manually**: GitHub → **Actions** tab → **desktop-build** →
+  **Run workflow**. Note: the **Run workflow** button for a
+  `workflow_dispatch` trigger only shows up once the workflow file exists on
+  the repo's default branch — it won't appear for a workflow that only lives
+  on a feature branch or in an unmerged PR.
+- **Trigger via tag**: push a tag matching `v*` (e.g.
+  `git tag v0.1.0 && git push origin v0.1.0`). This additionally creates/
+  updates a **draft** GitHub Release (`Market Terminal v<version>`) and
+  uploads the built bundles to it.
+- **Artifacts**: every run — tagged or not — also uploads the bundles as a
+  workflow artifact named `market-terminal-<os>` (`.app`/`.dmg` on macOS,
+  `.msi`/NSIS installer on Windows), downloadable from the run's summary
+  page under "Artifacts", so a plain manual run without a tag still yields
+  installers to grab.
+- No code signing/notarization yet (see "What's NOT wired up yet" above) —
+  every build here is ad-hoc/unsigned.
