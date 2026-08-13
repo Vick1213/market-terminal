@@ -50,6 +50,16 @@ class Settings(BaseSettings):
     # Force inference device ("mps" | "cpu"); empty = auto-detect MPS.
     sentiment_device: str = ""
 
+    # --- Kronos OHLCV forecasting (GET /api/forecast) ---
+    # HF checkpoints; -small (24.7M) is the CPU sweet spot, -base (102M) and
+    # -mini (4.1M, pair with Kronos-Tokenizer-2k + max_context 2048) also work.
+    forecast_model_id: str = "NeoQuasar/Kronos-small"
+    forecast_tokenizer_id: str = "NeoQuasar/Kronos-Tokenizer-base"
+    # Force device ("cuda:0" | "mps" | "cpu"); empty = auto-detect.
+    forecast_device: str = ""
+    # Model context window in bars — 512 for base tokenizer, 2048 for the 2k one.
+    forecast_max_context: int = 512
+
     # Poll cadences (minutes). Yahoo/Finnhub per-ticker RSS 5-15 min per plan;
     # EDGAR submissions refresh ~10 min server-side.
     news_poll_minutes: int = 10
