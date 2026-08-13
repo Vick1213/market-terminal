@@ -83,6 +83,14 @@ class InsufficientHistoryError(RuntimeError):
     """Raised when ts_price has too few clean bars to condition the model."""
 
 
+class ModelUnavailableError(RuntimeError):
+    """Raised when the Kronos weights can't be loaded (HF unreachable, bad id).
+
+    Left unset on failure so the next request retries the load — a transient
+    HF outage shouldn't wedge the process until restart.
+    """
+
+
 class KronosForecastService:
     def __init__(
         self,
@@ -125,8 +133,14 @@ class KronosForecastService:
                 device = "cpu"
 
             log.info("loading %s + %s on %s …", self._model_id, self._tokenizer_id, device)
-            tokenizer = KronosTokenizer.from_pretrained(self._tokenizer_id)
-            model = Kronos.from_pretrained(self._model_id)
+            try:
+                tokenizer = KronosTokenizer.from_pretrained(self._tokenizer_id)
+                model = Kronos.from_pretrained(self._model_id)
+            except Exception as exc:
+                log.exception("kronos weight load failed")
+                raise ModelUnavailableError(
+                    f"Kronos weights unavailable ({self._model_id}): {exc}"
+                ) from exc
             self._predictor = KronosPredictor(
                 model, tokenizer, device=device, max_context=self._max_context
             )
@@ -156,6 +170,10 @@ class KronosForecastService:
     def _future_index(last: pd.Timestamp, horizon: int, asset_class: str) -> pd.DatetimeIndex:
         if asset_class == "crypto":  # 24/7 markets trade calendar days
             return pd.date_range(last + pd.Timedelta(days=1), periods=horizon, freq="D")
+        # Known limitation: bdate_range skips weekends but not exchange holidays
+        # (~9 US days/yr get calendar features for a non-session). Kronos only
+        # reads weekday/day/month from these, so the skew is mild — an exchange
+        # calendar dep isn't worth it for a scenario generator.
         return pd.bdate_range(last + pd.Timedelta(days=1), periods=horizon)
 
     # ------------------------------------------------------------------ api

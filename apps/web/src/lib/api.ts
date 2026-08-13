@@ -5,6 +5,7 @@ import type {
   ChartMarker,
   CongressResponse,
   CotResponse,
+  ForecastResponse,
   GexResponse,
   InsiderResponse,
   RotationResponse,
@@ -273,4 +274,29 @@ export async function removeNewsTicker(symbol: string): Promise<void> {
     method: "DELETE",
   });
   if (!res.ok) throw new Error(`remove news ticker failed: ${res.status}`);
+}
+
+// Kronos model forecast — user-triggered, not polled. First call per API
+// process is slow (lazy model load + CPU inference), so this deliberately
+// carries no timeout/AbortSignal; the caller controls when it fires.
+export async function fetchForecast(params: {
+  symbol: string;
+  horizon?: number;
+  lookback?: number;
+  temperature?: number;
+  top_p?: number;
+  samples?: number;
+}): Promise<ForecastResponse> {
+  const qs = new URLSearchParams({ symbol: params.symbol });
+  if (params.horizon !== undefined) qs.set("horizon", String(params.horizon));
+  if (params.lookback !== undefined) qs.set("lookback", String(params.lookback));
+  if (params.temperature !== undefined) qs.set("temperature", String(params.temperature));
+  if (params.top_p !== undefined) qs.set("top_p", String(params.top_p));
+  if (params.samples !== undefined) qs.set("samples", String(params.samples));
+  const res = await fetch(`${API_URL}/api/forecast?${qs}`, { cache: "no-store" });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => null))?.detail;
+    throw new Error(detail ?? `forecast request failed: ${res.status}`);
+  }
+  return res.json();
 }

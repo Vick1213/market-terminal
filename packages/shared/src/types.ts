@@ -827,3 +827,27 @@ export interface ReportCardResponse {
   signals: ReportCardSignal[];
   note: string;
 }
+
+// --- Forecast (Kronos model projections) ---
+
+export interface ForecastBar {
+  t: number; // unix seconds (UTC)
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+}
+
+export interface ForecastResponse {
+  symbol: string;
+  asset_class: string;
+  model: string;
+  device: string;
+  context_bars: number;
+  horizon: number;
+  generated_at: string; // ISO
+  disclaimer: string;
+  history: ForecastBar[];
+  forecast: ForecastBar[];
+}

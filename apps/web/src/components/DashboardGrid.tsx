@@ -5,6 +5,7 @@ import { AlertsPanel } from "./panels/AlertsPanel";
 import { BriefPanel } from "./panels/BriefPanel";
 import { CalendarPanel } from "./panels/CalendarPanel";
 import { CorrelationPanel } from "./panels/CorrelationPanel";
+import { ForecastPanel } from "./panels/ForecastPanel";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
 import { HelpPanel } from "./panels/HelpPanel";
 import { MacroPanel } from "./panels/MacroPanel";
@@ -37,6 +38,7 @@ const PANELS: { i: string; el: React.ReactNode }[] = [
   { i: "positioning", el: <PositioningPanel /> },
   { i: "whales", el: <WhalesPanel /> },
   { i: "strategist", el: <StrategistPanel /> },
+  { i: "forecast", el: <ForecastPanel /> },
   { i: "sources", el: <SourceHealthPanel /> },
   { i: "help", el: <HelpPanel /> },
 ];
@@ -57,9 +59,10 @@ const layouts: Layouts = {
     { i: "cookbook", x: 6, y: 18, w: 6, h: 8 },
     { i: "whales", x: 0, y: 26, w: 6, h: 8 },
     { i: "strategist", x: 6, y: 26, w: 6, h: 8 },
-    { i: "system", x: 0, y: 34, w: 4, h: 6 },
-    { i: "sources", x: 4, y: 34, w: 4, h: 6 },
-    { i: "help", x: 8, y: 34, w: 4, h: 6 },
+    { i: "forecast", x: 0, y: 34, w: 12, h: 10 },
+    { i: "system", x: 0, y: 44, w: 4, h: 6 },
+    { i: "sources", x: 4, y: 44, w: 4, h: 6 },
+    { i: "help", x: 8, y: 44, w: 4, h: 6 },
   ],
 };
 
