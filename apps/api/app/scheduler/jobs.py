@@ -769,6 +769,30 @@ def build_scheduler(
         log.info("universe refresh disabled (set MARKET_UNIVERSE_REFRESH_ENABLED=true "
                  "to keep data/ml/universe.duckdb's daily OHLC fresh)")
 
+    # Per-name vol scorer (PLAN §13.9 step 2) — DEFAULT-OFF. Writes
+    # ml_vol_scores through the shared DuckStore; NOTHING consumes it yet
+    # (live sizing/stops are §13.7, held for a separate sign-off), so the only
+    # cost of enabling this is compute. Staggered well after universe_refresh
+    # above — that job walks ~150 tickers at 1.5s apiece, so scoring stale
+    # prices is the failure mode to avoid here.
+    if duck is not None and settings.vol_scores_enabled:
+        from app.ml.vol_scores import run_vol_scores_job
+
+        async def _vol_scores() -> None:
+            await run_vol_scores_job(duck)
+
+        scheduler.add_job(
+            _vol_scores,
+            trigger="interval",
+            minutes=settings.vol_scores_poll_minutes,
+            next_run_time=soon + timedelta(seconds=900),
+            id="vol_scores",
+            max_instances=1, coalesce=True, misfire_grace_time=1800, jitter=30,
+        )
+    elif duck is not None:
+        log.info("vol scorer disabled (set MARKET_VOL_SCORES_ENABLED=true to "
+                 "start writing per-name ml_vol_scores; nothing consumes them yet)")
+
     # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.
     # Logs every signal as-knowable-today into a separate snapshots DB so the
     # recent-only sources accrete a backtestable PIT history. Reuses the live
