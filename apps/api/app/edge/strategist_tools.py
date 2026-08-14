@@ -31,6 +31,7 @@ import re
 import statistics
 import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from app.db.duck import DuckStore
@@ -218,6 +219,262 @@ def _tool_quote(duck: DuckStore, _sqlite: SqliteStore, _ctx: dict, args: dict,
     return out
 
 
+# --- vol_rank (PLAN §13.9 step 3) -------------------------------------------
+#
+# Read-only lookup over ``ml_vol_scores`` (written by app.ml.vol_scores, a
+# concurrently-developed module this file only ever SELECTs from — no
+# import, no coupling to its internals, so this tool cannot break if that
+# module changes shape mid-edit). Three correctness constraints from PLAN
+# §13.3/§13.4/§13.8 that must reach the LLM, not just exist in the DB:
+#   1. level_admissible is False at h=5 — its pred_vol is a rank input only,
+#      never a usable sizing level (§13.3's h=5 kill switch). Emitted under a
+#      differently-named key (``pred_vol_rank_only``) at h=5 so the LLM can't
+#      mistake it for the admissible h=21 ``pred_vol``.
+#   2. in_reference_panel flags names (ETFs/crypto/metals) ranked against a
+#      147-name panel they were never a member of (§13.8).
+#   3. Staleness — 145/147 symbols are pinned at one date right now, so a
+#      stale answer is the norm, not the exception; every payload carries the
+#      score's ts (or, for a multi-symbol cross-section, an as_of_min/max
+#      range), its trading-day age, and an explicit "stale" flag/note past a
+#      5-trading-day threshold. A cross-section's overall staleness is judged
+#      by its OLDEST constituent, never its newest -- see the "per-symbol
+#      latest row" note below for why a single shared ts is unsafe here.
+#
+# CORRECTNESS FIX (found in live end-to-end testing, not by any test written
+# against synthetic fixtures): a cross-section listing must take EACH
+# SYMBOL'S OWN latest row -- the same rule the single-symbol lookup already
+# used -- never a single WHERE ts = max(ts) filter. vol_scores.py stamps
+# every row with that SYMBOL's own last available OHLC bar (deliberately, so
+# per-name price staleness stays visible rather than being papered over), so
+# different symbols legitimately carry different `ts` values on the same
+# scoring run. Pinning to one global max(ts) silently collapsed a 147-name
+# panel down to only the 1-2 names whose price happened to be freshest that
+# day, while reporting the (correct, but wildly unrepresentative) freshness
+# of just those names as if it applied to the whole cross-section -- a
+# confidently wrong answer, the worst failure mode for something an LLM
+# consumes. The fix: always take every symbol's own latest row, report the
+# resulting ts RANGE explicitly (`as_of_min`/`as_of_max`), and derive
+# staleness from the oldest row in that range.
+
+_VOL_RANK_TABLE = "ml_vol_scores"
+_VOL_RANK_HORIZONS = (5, 21)           # the only horizons app.ml.vol_scores ever scores
+_VOL_RANK_DEFAULT_HORIZON = 21
+_VOL_RANK_STALE_TRADING_DAYS = 5       # PLAN §13.9 step 3 / §13.6 staleness note threshold
+_VOL_RANK_MAX_N = 25                   # top/bottom cap, mirrors _tool_portfolio's positions[:25]
+_VOL_RANK_DEFAULT_N = 5                # extremes size when neither top nor bottom is given
+# Fixed panel size (PLAN §13.5: "the FIXED 147-name research universe"),
+# duplicated here as a plain literal rather than importing app.ml.universe /
+# app.ml.vol_scores -- same "no coupling to a concurrently-edited module"
+# reasoning as the rest of this file. Used only for an advisory coverage
+# note, never for gating, so an eventual panel-size drift is low-risk.
+_VOL_RANK_REFERENCE_PANEL_SIZE = 147
+_VOL_RANK_COVERAGE_MIN_RATIO = 0.8     # coverage_note fires below this fraction of the panel
+_VOL_RANK_COLS = (
+    "ts, symbol, horizon, estimator, pred_vol, level_admissible, "
+    "rank, pctile, in_reference_panel, n_obs"
+)
+# Latest row PER SYMBOL (not a single global max(ts) -- see the module note
+# above): QUALIFY + row_number() is the DuckDB-native way to express this.
+_VOL_RANK_LATEST_PER_SYMBOL_SQL = (
+    f"SELECT {_VOL_RANK_COLS} FROM {_VOL_RANK_TABLE} WHERE horizon = ? "
+    "QUALIFY row_number() OVER (PARTITION BY symbol ORDER BY ts DESC) = 1"
+)
+
+
+def _trading_days_stale(ts: Any, now: datetime) -> int:
+    """Weekday count strictly between ``ts``'s date and ``now``'s date — a
+    deliberate simplification (no market-holiday calendar exists anywhere
+    else in this codebase either; see the plain calendar-day ``_age_days`` in
+    edge/strategist.py for the analogous staleness helper this project
+    already uses elsewhere). ``ts`` may be a datetime, pandas Timestamp, or
+    an ISO string (DuckDB python bindings can hand back any of these)."""
+    if hasattr(ts, "to_pydatetime"):
+        ts = ts.to_pydatetime()
+    if isinstance(ts, str):
+        ts = datetime.fromisoformat(ts[:19])
+    d0, d1 = ts.date(), now.date()
+    if d1 <= d0:
+        return 0
+    days = 0
+    d = d0
+    while d < d1:
+        d += timedelta(days=1)
+        if d.weekday() < 5:
+            days += 1
+    return days
+
+
+def _vol_rank_row(row: tuple, now: datetime) -> dict[str, Any]:
+    (ts, symbol, horizon, estimator, pred_vol, level_admissible,
+     rank, pctile, in_panel, n_obs) = row
+    age = _trading_days_stale(ts, now)
+    stale = age > _VOL_RANK_STALE_TRADING_DAYS
+    out: dict[str, Any] = {
+        "symbol": symbol,
+        "horizon": int(horizon),
+        "ts": str(ts)[:10],
+        "age_trading_days": age,
+        "stale": stale,
+        "estimator": estimator,
+        "rank": int(rank) if rank is not None else None,
+        "pctile": round(float(pctile), 4) if pctile is not None else None,
+        "in_reference_panel": bool(in_panel),
+        "n_obs": int(n_obs) if n_obs is not None else None,
+    }
+    if level_admissible:
+        out["level_admissible"] = True
+        out["pred_vol"] = round(float(pred_vol), 4) if pred_vol is not None else None
+    else:
+        out["level_admissible"] = False
+        out["pred_vol_rank_only"] = round(float(pred_vol), 4) if pred_vol is not None else None
+        out["level_note"] = (
+            f"h={horizon} pred_vol is NOT an admissible sizing level -- rank/percentile "
+            "only (PLAN §13.3); do not size off this number"
+        )
+    if not in_panel:
+        out["panel_note"] = (
+            "not a member of the 147-name reference panel -- its percentile is not "
+            "apples-to-apples with panel members (PLAN §13.8)"
+        )
+    if stale:
+        out["staleness_note"] = (
+            f"score is {age} trading day(s) old (> {_VOL_RANK_STALE_TRADING_DAYS}-day "
+            "staleness threshold) -- treat as informational, not current"
+        )
+    return out
+
+
+def _vol_rank_count_arg(args: dict, name: str) -> int | None:
+    v = args.get(name)
+    if v is None:
+        return None
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        raise ValueError(f"vol_rank: {name!r} must be an integer")
+    if n <= 0:
+        raise ValueError(f"vol_rank: {name!r} must be positive")
+    return min(n, _VOL_RANK_MAX_N)
+
+
+def _tool_vol_rank(duck: DuckStore, _sqlite: SqliteStore, _ctx: dict, args: dict,
+                    _broker_state: Any = None) -> dict:
+    symbol = str(args.get("symbol") or "").strip().upper()
+
+    horizon_raw = args.get("horizon", _VOL_RANK_DEFAULT_HORIZON)
+    try:
+        horizon = int(horizon_raw)
+    except (TypeError, ValueError):
+        raise ValueError("vol_rank: 'horizon' must be an integer (5 or 21)")
+    if horizon not in _VOL_RANK_HORIZONS:
+        raise ValueError("vol_rank: 'horizon' must be 5 or 21 (the only scored horizons)")
+
+    top_n = _vol_rank_count_arg(args, "top")
+    bottom_n = _vol_rank_count_arg(args, "bottom")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+
+    if symbol:
+        try:
+            rows = duck.fetchall(
+                f"SELECT {_VOL_RANK_COLS} FROM {_VOL_RANK_TABLE} "
+                "WHERE symbol = ? AND horizon = ? ORDER BY ts DESC LIMIT 1",
+                [symbol, horizon],
+            )
+        except Exception as exc:  # missing table, corrupt DB, etc. -- never raise out of a tool
+            return {"error": f"vol_rank data unavailable: {exc}"}
+        if not rows:
+            return {
+                "symbol": symbol, "horizon": horizon,
+                "error": f"no vol score for {symbol} at horizon={horizon}",
+            }
+        return _vol_rank_row(rows[0], now)
+
+    # No symbol requested: extremes across EACH SYMBOL'S OWN latest row for
+    # this horizon (never a single global max(ts) -- see the module note
+    # above). Different symbols can legitimately carry different `ts`
+    # values, so the payload reports an explicit as_of_min/as_of_max range
+    # instead of one shared date, and staleness is judged by the OLDEST
+    # constituent row, not the newest.
+    try:
+        rows = duck.fetchall(_VOL_RANK_LATEST_PER_SYMBOL_SQL, [horizon])
+    except Exception as exc:  # missing table, corrupt DB, etc. -- never raise out of a tool
+        return {"error": f"vol_rank data unavailable: {exc}"}
+    if not rows:
+        return {"horizon": horizon, "error": "no vol scores available (table empty or missing)"}
+
+    if top_n is None and bottom_n is None:
+        top_n = bottom_n = _VOL_RANK_DEFAULT_N
+
+    ts_idx, pctile_idx = 0, 7  # positions of `ts`/`pctile` in _VOL_RANK_COLS
+    n_scored = len(rows)
+    ts_values = [r[ts_idx] for r in rows]
+    min_ts, max_ts = min(ts_values), max(ts_values)  # earliest/oldest, latest/newest
+    # Age is monotonic in ts (earlier date -> equal-or-larger trading-day age vs `now`), so the
+    # earliest ts is exactly the stalest constituent -- no need to scan every row's age.
+    age_trading_days = _trading_days_stale(min_ts, now)
+    stale = age_trading_days > _VOL_RANK_STALE_TRADING_DAYS
+
+    out: dict[str, Any] = {
+        "horizon": horizon,
+        "as_of_min": str(min_ts)[:10],
+        "as_of_max": str(max_ts)[:10],
+        "age_trading_days": age_trading_days,
+        "stale": stale,
+        "n_scored": n_scored,
+    }
+    if str(min_ts)[:10] != str(max_ts)[:10]:
+        out["mixed_scoring_dates"] = True
+    # rank and level come from DIFFERENT estimators by design (PLAN §13.3:
+    # HAR-63 wins on ranks, plain HAR wins on levels), and they are only ~0.80
+    # correlated -- so pred_vol is NOT monotonic in pctile. Without this note a
+    # reader takes the non-monotonicity for a data error and distrusts the tool.
+    out["estimator_note"] = (
+        "rank/pctile and pred_vol come from different estimators (HAR-63 for ranks, "
+        "HAR for levels), so pred_vol is not strictly monotonic in pctile -- ranks "
+        "order the names, levels size them"
+    )
+    if stale:
+        out["staleness_note"] = (
+            f"oldest score in this cross-section is {age_trading_days} trading day(s) old "
+            f"(> {_VOL_RANK_STALE_TRADING_DAYS}-day staleness threshold) -- treat as "
+            "informational, not current"
+        )
+    if n_scored < _VOL_RANK_REFERENCE_PANEL_SIZE * _VOL_RANK_COVERAGE_MIN_RATIO:
+        out["coverage_note"] = (
+            f"only {n_scored} of {_VOL_RANK_REFERENCE_PANEL_SIZE} reference-panel names "
+            f"have a horizon={horizon} score -- thin cross-section, ranks may be less reliable"
+        )
+
+    ranked = sorted((r for r in rows if r[pctile_idx] is not None),
+                     key=lambda r: r[pctile_idx], reverse=True)  # highest vol first
+    unranked = [r for r in rows if r[pctile_idx] is None]
+    n_ranked = len(ranked)
+
+    # Non-overlapping top/bottom allocation: `top` claims its full request
+    # first (up to what's available), `bottom` gets whatever's left, capped
+    # by its own request -- so the same symbol never appears in both lists.
+    top_actual = min(top_n, n_ranked) if top_n else 0
+    bottom_actual = min(bottom_n, n_ranked - top_actual) if bottom_n else 0
+    if top_n:
+        out["top"] = [_vol_rank_row(r, now) for r in ranked[:top_actual]]
+    if bottom_n:
+        bottom_slice = ranked[n_ranked - bottom_actual:] if bottom_actual else []
+        out["bottom"] = [_vol_rank_row(r, now) for r in reversed(bottom_slice)]
+    if (top_n and top_actual < top_n) or (bottom_n and bottom_actual < bottom_n):
+        out["extremes_note"] = (
+            f"only {n_ranked} ranked name(s) available at horizon={horizon} -- fewer than the "
+            f"requested top={top_n or 0}/bottom={bottom_n or 0}; returned each available name "
+            "once (no overlap between top and bottom) instead of duplicating"
+        )
+    if unranked and (top_n or bottom_n):
+        out["unranked_note"] = (
+            f"{len(unranked)} symbol(s) in this cross-section have no percentile "
+            "(insufficient reference-panel distribution) and are excluded from top/bottom"
+        )
+    return out
+
+
 def _tool_macro_series(duck: DuckStore, _sqlite: SqliteStore, _ctx: dict, args: dict,
                         _broker_state: Any = None) -> dict:
     series_id = str(args.get("series_id") or args.get("id") or "").strip()
@@ -378,6 +635,17 @@ TOOLS: dict[str, Tool] = {
             "quote",
             'Latest close + 1d/5d/20d/60d percent returns. args: {"symbol": "AAPL"}.',
             _tool_quote,
+        ),
+        Tool(
+            "vol_rank",
+            'Per-name volatility rank/level vs the 147-name reference panel. args: '
+            '{"symbol": "AAPL"} for one name, OR {"top": 5, "bottom": 5} for the '
+            'jumpiest/calmest names (both default to 5 if neither given); optional '
+            '"horizon" (5 or 21, default 21). h=5 is RANK-ONLY -- its level is not '
+            "admissible for sizing (PLAN §13.3); only h=21 gives a usable pred_vol "
+            "level. Flags symbols outside the reference panel and stale "
+            "(>5 trading-day-old) scores.",
+            _tool_vol_rank,
         ),
         Tool(
             "macro_series",
