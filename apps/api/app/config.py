@@ -226,6 +226,13 @@ class Settings(BaseSettings):
     llm_base_url: str = ""     # override, e.g. a self-hosted OpenAI-compatible server
     llm_timeout_seconds: float = 180.0
 
+    # Strategist tool-use loop (edge/strategist_tools.py): the LLM can call a
+    # calc tool + read-only lookups (price history, quotes, macro series,
+    # news, portfolio, signal detail) before writing its notes. Off ->
+    # exactly the prior single-shot-prompt-then-template-fallback behavior.
+    strategist_tools: bool = True
+    strategist_tool_calls: int = 6
+
     # --- Phase 11: gap-audit backlog (PLAN §10) ---
     # FINRA true short interest publishes bi-monthly (~9-day lag); the daily
     # run is a partition-list diff and a no-op between publication days.

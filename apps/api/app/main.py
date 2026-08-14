@@ -195,6 +195,8 @@ async def lifespan(app: FastAPI):
     strategist_service = StrategistService(
         duck, sqlite, hub, llm,
         sectors=settings.sector_etfs, benchmark=settings.rrg_benchmark,
+        tools_enabled=settings.strategist_tools,
+        tool_calls=settings.strategist_tool_calls,
     )
 
     scheduler = build_scheduler(
