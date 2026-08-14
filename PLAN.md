@@ -526,3 +526,316 @@ Rank candidates by **walk-forward OOS**, not in-sample fit:
 ---
 
 **Sources for the two time-sensitive 2026 pivots I re-verified:** [Bluesky firehose free / no paid tier (Blotato 2026)](https://www.blotato.com/blog/bluesky-api-pricing) · [Bluesky cashtags Jan 2026 (TechCrunch)](https://techcrunch.com/2026/01/16/bluesky-rolls-out-cashtags-and-live-badges-amid-a-boost-in-app-installs/) · [CCXT Pro WebSockets merged into free CCXT (GitHub #15171)](https://github.com/ccxt/ccxt/issues/15171). All other source URLs are inline in the research dimensions above and the master table.
+---
+
+## 13. Phase 21 — Per-Name Volatility Risk Layer (design review 2026-08-14, NOT built)
+
+> **Read §13.0 before anything else — the premise this phase was written on is wrong.**
+
+### 13.0 Premise correction: most of "Phase 21" already exists, and the model already lost
+
+The Phase-21 memo was written on 2026-08-13 off the `xtrain` cross-sectional run: forward realised
+vol scored **IC 0.47 (h=5) / 0.62 (h=21)**, 100% daily hit rate, while returns failed every gate.
+The memo concluded this was "the real find" and "the build". Three facts in this repo say otherwise:
+
+1. **`apps/api/app/ml/vol_baselines.py` (committed `ac206a1`, 2026-06-28) already ran exactly the
+   persistence check the memo listed as future work** — naive 21d close-to-close vol, naive 21d
+   Garman-Klass vol, and a panel HAR (Corsi 2009) refit per fold, scored on the *identical* target,
+   cross-sectional IC and `DateWalkForward` the GBM used. Its own docstring names the trap:
+   *"vol is PERSISTENT ... a naive 'rank by trailing vol' predictor may already score most of that
+   IC"*, citing Audrino & Chassot 2024 ("HARd to Beat": tuned HAR beats Lasso/RF/GBM/NN on 1,445 stocks).
+2. **The naive estimator beats the 66-feature GBM.** `vol_overlay.py:4-6`: *"trailing Garman-Klass vol
+   already nails it — IC 0.53/0.70"*. **Re-measured 2026-08-14 and confirmed** (§13.0a) — on identical
+   OOS rows a parameter-free 21-day estimator scores **higher** than the gradient-boosted model on 66
+   features. (Note: `GBM_REF = {5: 0.460, 21: 0.610}` at `vol_baselines.py:38` is a stale hardcoded
+   constant from a different "56 feat" harness, not scored on the same rows — hence the re-run.)
+3. **The deployable version is already built and wired.** `apps/api/app/ml/vol_overlay.py` produces a
+   vol-targeted exposure weight, and it is live in three places: the strategist signal list and tilts
+   (`edge/strategist.py:610-635`), the `/api/edge/vol-overlay` route (`routers/edge.py:88-100`), and the
+   day sleeve's position-size throttle (`daytrader.py:1646` → `intraday.py:106-114`).
+
+**Ruling:** the finding "cross-sectional vol is strongly forecastable" is true and unchanged — it is
+also six weeks old, already actioned, and *not* evidence for an ML vol model. **The GBM is dropped
+from this phase.** Everything below is built on the trailing-GK/HAR estimator that already wins.
+This deletes three of the memo's four open questions (model versioning, retrain cadence, artifact
+persistence): a parameter-free estimator has nothing to retrain and no artifact to version.
+
+### 13.0a Gate 0 — measured 2026-08-14, all predictors on identical OOS rows
+
+Re-ran `app.ml.vol_baselines` and added the two tests it never covered (orthogonalised residual,
+level calibration). Same 147-name panel, same `DateWalkForward`, GBM reproduced at 0.4710/0.6169
+confirming the harness. **Rank IC** (cross-sectional, vs `labels.forward_realized_vol`):
+
+| h | GBM (66 feat) | naive_gk (21d) | HAR (Corsi, in-fold) | GBM lift vs naive_gk |
+|---|---|---|---|---|
+| 5 | 0.4710 (t=231) | **0.5190** (t=269) | 0.5174 (t=269) | **−0.048** |
+| 21 | 0.6169 (t=349) | **0.6898** (t=446) | 0.6855 (t=434) | **−0.073** |
+
+**Level accuracy** — the metric that governs sizing, never previously measured. Predicted vs realised
+daily σ; QLIKE on variance; calibration = OLS of realised on predicted:
+
+| h | model | RMSE | QLIKE | slope | R² |
+|---|---|---|---|---|---|
+| 5 | GBM | 0.01146 | 0.8549 | 1.396 | 0.342 |
+| 5 | naive_gk | 0.01062 | 0.7806 | **1.069** | 0.400 |
+| 5 | **HAR** | **0.01038** | **0.7403** | 1.187 | **0.442** |
+| 21 | GBM | 0.00943 | 0.4304 | 1.133 | 0.342 |
+| 21 | naive_gk | 0.00880 | 0.5979 | **1.018** | 0.496 |
+| 21 | **HAR** | **0.00812** | **0.3756** | 1.098 | **0.523** |
+
+**HAR is the best model by every level metric at both horizons**, and the GBM is the worst-calibrated
+(slope furthest from 1, lowest R²). Its predictions are 0.81–0.83 rank-correlated with naive_gk — it is
+largely reconstructing the trivial baseline, more noisily.
+
+**But the §13.3 residual bar cleared, decisively.** Orthogonalising both the GBM prediction and the
+realised target against rank(naive_gk) leaves residual IC **0.131 (t=74, h=5)** and **0.205 (t=116, h=21)**
+— far above the pre-registered ≥0.05 / t>3. Recorded as passed.
+
+### 13.0b Stronger controls — the GBM residual is real, and it is also nearly worthless
+
+naive_gk is a single 21-day window, so a GBM that merely learned a better *mix* of lookbacks would show
+that residual while knowing nothing beyond vol history. Four stronger controls were run. **The residual
+survived all of them** — it does not decay toward zero under any reparameterisation of vol history:
+
+| Control the GBM is orthogonalised against | h=5 resid IC (t) | h=21 resid IC (t) |
+|---|---|---|
+| naive_gk (the original, weak control) | 0.131 (74) | 0.205 (116) |
+| in-fold HAR | 0.148 (84) | 0.223 (129) |
+| joint: HAR + naive_gk | 0.124 (71) | 0.201 (114) |
+| parameter-free composite rank(5d, 21d, 63d) | 0.126 (72) | 0.203 (115) |
+| in-fold OLS on log-GK(5d, 21d, 63d) — strongest control built | 0.140 (80) | 0.208 (118) |
+
+**Feature importance says why it is nonetheless small.** A single feature — `px_rvol_21`, literally
+trailing 21-day realised vol — carries **57–59% of total gain**. Own-price/vol history is 73–74% of gain;
+macro/positioning is 22–23% but is itself dominated by *market-wide* vol-regime indicators (VVIX/VIX,
+VIX_z, VIX9D term structure); genuine cross-asset content is 3–5%. The GBM's edge is nonlinear
+interaction of the *same* own-name vol and trend history, plus a market-wide vol-regime assist — not a
+distinct information source.
+
+**Practical payoff**: blending the residual into HAR at the best weight (w=0.1) buys **+0.004 IC (h=5)
+and +0.005 IC (h=21)**, with a ~0.002 QLIKE improvement. Statistically overwhelming; economically trivial.
+
+**The finding that actually matters came out of the control itself**: the in-fold OLS on log-GK at
+**5d/21d/63d lookbacks** scored **IC 0.5235 (h=5) / 0.7027 (h=21)** — beating standard HAR *and* naive_gk,
+and by +0.017 at h=21, roughly **three times the gain the entire 66-feature GBM pipeline buys**. Widening
+HAR's lookbacks is free.
+
+### 13.0c HAR-63 evaluated — it wins on ranks, loses on levels, and breaks in a shock
+
+| h | estimator | rank IC | RMSE | QLIKE | slope | R² |
+|---|---|---|---|---|---|---|
+| 5 | HAR (1,5,22) | 0.5174 | **0.010379** | **0.7403** | 1.187 | **0.4423** |
+| 5 | **HAR-63 (5,21,63)** | **0.5235** | 0.010424 | 0.7450 | 1.164 | 0.4331 |
+| 21 | HAR (1,5,22) | 0.6855 | **0.008123** | **0.3756** | 1.098 | **0.5225** |
+| 21 | **HAR-63 (5,21,63)** | **0.7027** | 0.008155 | 0.3835 | 1.040 | 0.5117 |
+
+**Lookback robustness — a plateau, not a peak.** Five non-standard triples all land within IC
+0.5219–0.5255 (h=5) and 0.6997–0.7080 (h=21); every one clears standard HAR and naive_gk by a similar
+margin. The *simplest* spec tested — two-term (21,63), dropping the short lookback entirely — has the
+**highest IC of the grid**, which is the opposite of what selection-overfit looks like. HAR-63 is not a
+lucky triple. But the grid also shows an IC-vs-calibration tradeoff: standard HAR has the best QLIKE of
+the whole grid, and (21,63) has the worst despite the best IC.
+
+**Fold stability (6 walk-forward folds).** HAR-63 beats naive_gk in **every fold at both horizons** — no
+single regime drives it. Both estimators score highest in the 2008 GFC fold and decay toward recent,
+choppier folds (2023–2026: IC 0.46 h=5 / 0.65 h=21) — **live expectations must be anchored to the recent
+fold, not the full-sample headline.** One flag: **h=5, HAR-63, fold 3 (2017–2020, contains COVID) —
+calibration slope 1.355**, outside [0.8, 1.2]: a ~35% underprediction of near-term vol during a fast
+regime shift, precisely when sizing matters most. At h=21 the same fold is fine (slope 1.091). Plain HAR
+never left the band in any fold.
+
+**Blend recheck**: on the stronger HAR-63 base the GBM residual adds only +0.0035/+0.0036 at w=0.1, down
+~25% from its gain over plain HAR — a better base leaves less for it to contribute. Confirms §13.3.
+
+### 13.1 What is actually missing
+
+| Capability | Status |
+|---|---|
+| Market-level vol forecast (SPY) → exposure weight | **Exists** — `vol_overlay.current_signal()` |
+| → strategist tilt, edge panel, day-sleeve `risk_scale` | **Exists** — 3-tier step function, `intraday.py:106-114` |
+| **Per-name** vol forecast for the tradable set | **Missing** — overlay is called with one symbol (SPY) |
+| Swing-sleeve vol input of any kind | **Missing** — sizing is pure rebalance-to-target-weight (`bot.py:216-256`) |
+| Persisted per-name forecasts | **Missing** — no table; overlay recomputes on demand, cached 15min |
+| Forecast graded vs realised outcome | **Missing** — `day_review` grades P&L only, never forecast accuracy |
+| Strategist access to per-name vol ranks | **Missing** — it sees the market-level weight only |
+
+The net-new capability is therefore **per-name relative vol → per-name sizing and stop geometry**,
+plus the accountability layer (persist → grade) that the market-level overlay never got.
+
+### 13.2 The unpriced blocker: the bot-tradable set has no live price coverage
+
+This, not modelling, is the critical path.
+
+- `data/market.duckdb` holds **43 symbols** — only **8 of the day sleeve's 60** (`settings.day_universe`).
+- `data/ml/universe.duckdb` holds the 147 research names — **40 of 60**, and it is a **one-shot snapshot**
+  written only by `scratchpad/fetch_universe.py`, with no refresh job anywhere in `scheduler/jobs.py`.
+- The fetcher is deliberately slow (sequential, `time.sleep(1.5)`, ~4 min for 147 names) to dodge
+  Yahoo's burst throttle — fine nightly, not fine on demand.
+- Coupling to watch: the 390MB feature-matrix cache is keyed on `universe.duckdb`'s **mtime**
+  (`xtrain.py:170`), so every refresh invalidates it and `xtrain` deletes *all* stale caches on rebuild.
+  Re-key the cache on content (max(ts) + row count) or accept a ~minutes rebuild after each refresh.
+- The swing watchlist is worse: **3 of 11** names are single stocks (AAPL, NVDA, TSLA). The rest are
+  ETFs (SPY/QQQ/GLD/SLV), crypto (BTC/ETH) and metals (XAU/XAG) — none in the research universe.
+  GK vol needs only OHLC, so they *can* be scored, but they were never in the panel the IC was measured on.
+
+**Consequence:** per-name vol scores are only as good as daily OHLC coverage. Step 1 of the build is a
+daily incremental price refresh for `day_universe ∪ watchlist`, not a model.
+
+### 13.3 Estimator ruling and the pre-registered GBM kill switch
+
+**Two estimators, each used only where it measurably wins** (§13.0c) — resist the urge to pick one:
+
+| Use | Estimator | Why |
+|---|---|---|
+| **Ranks** (which names are jumpier: relative weights, trim lists, `vol_rank` tool) | **HAR-63** — in-fold OLS on log-GK at 5/21/63d | Best rank IC at both horizons, broad plateau across nearby triples, beats naive_gk in all 6 folds |
+| **Levels** (σ in daily units → dollar risk, stop distances) | **plain HAR (1,5,22)**, at **h=21 only** | Best RMSE/QLIKE/R² at both horizons; calibration slope never left [0.8, 1.2] in any fold |
+| Fallback if either fit degenerates | `naive_gk` | Zero parameters, cannot drift, best raw slope (1.069/1.018) |
+
+**h=5 levels are not admissible for sizing.** In the COVID fold, HAR-63's 5-day calibration slope hit
+1.355 — it underpredicted near-term vol by ~35% during exactly the kind of shock sizing exists to survive.
+h=21 stayed calibrated through the same fold. So: **h=5 is a rank and alert signal only; h=21 carries the
+levels.** This is preferred over the alternative of a regime-triggered sizing multiplier, which would add
+a tunable knob — and untested knobs are how this project has previously fooled itself.
+
+All of these already exist in `vol_baselines.py` (`_gk_daily_vol`, `_har_ic`); GK is ~5–8× more efficient
+than close-to-close when no intraday data exists, which is our situation.
+
+**GBM status: it passed every statistical bar I set, and it is still shelved. The statistics did not
+kill it — the engineering economics did, and that distinction is recorded deliberately.**
+
+Both admissibility conditions were met: the residual survived four stronger controls (§13.0b), and a
+w=0.1 blend beat HAR alone on both IC and QLIKE at both horizons. By the pre-registered rule the GBM is
+*admissible*. Admissible is not the same as worth shipping, and the cost side is lopsided:
+
+- **Benefit**: +0.004–0.005 rank IC. Against a free lookback change (HAR-63) worth +0.017 at h=21.
+- **Cost**: the full 66-feature pipeline in the daily live path — lightgbm, model artifacts, a retrain
+  cadence and version registry, and a hard dependency on macro series with publication lags of 4–45 days
+  (GPR 45d, M2 30d, WEI 6d, COT/TFF weekly) that must all be fresh for a score to be emitted.
+- **Revision risk — the decisive one.** 22–23% of the GBM's gain comes from the macro/positioning block,
+  and the h=21 top-15 includes `eng_anfci`, `eng_m2_yoy`, `eng_term_prem` — revision-prone series. This
+  project has already been burned once by exactly this: §12's `EDGE_FOUND` verdict was ~60% NFCI revision
+  leakage, and revised-vs-PIT NFCI ranked at only 0.45 correlation. The backtest that produced the
+  +0.005 was run on revised macro; live scoring sees first prints. The measured gain is therefore an
+  **upper bound**, and plausibly smaller than the PIT haircut.
+
+**Ruling**: the GBM is out of the Phase-21 risk path. Not falsified — shelved, with its exact price
+recorded (+0.005 IC) so the decision is revisitable if the cost side ever collapses. If it is ever
+revived, it must first be re-scored on point-in-time macro via `ts_macro_vintage`, not revised series.
+
+### 13.4 Rank is not level — the number nobody has measured
+
+Every vol result on record before today (0.47/0.62, 0.53/0.70) was a **rank** IC: it says *which names*
+will be jumpier, in order. Position sizing needs a **level** — a σ in daily return units — and until
+§13.0a nothing in this repo had ever validated one. `labels.forward_realized_vol` returns
+log-of-daily-vol (`log=True`, not annualised); `annualize_vol` is a separate helper, so the
+log→level conversion must be explicit at every boundary.
+
+**Measured answer**: plain HAR clears the calibration test at both horizons (slope 1.187 / 1.098, R²
+0.442 / 0.523) and — critically — **never left [0.8, 1.2] in any of the six folds**, including COVID.
+Its levels are admissible for sizing **with** the fitted shrinkage `σ̂ = a + b·σ_pred` applied, not raw.
+naive_gk is better calibrated on average (slope 1.069 / 1.018) but explains less variance; it is the
+fallback when HAR's in-fold fit is unavailable or degenerate. The GBM fails at h=5 (slope 1.396) and
+HAR-63 fails in the COVID fold at h=5 (1.355) — neither drives levels (§13.0c).
+
+Standing rules:
+1. **Ranks drive relative decisions** (which names to trim or avoid); **levels drive sizing** and come
+   from plain HAR at h=21 only.
+2. Levels apply **only while the live calibration slope stays in band**, re-checked by the §13.6 grader.
+   If it drifts out, sizing reverts to equal-weight and annotation keeps recording — degrade to the
+   status quo, never to an uncalibrated number.
+3. **Anchor live expectations to the most recent fold** (2023–2026: IC 0.46 h=5 / 0.65 h=21), never to
+   the full-sample 0.52/0.70 — vol forecastability decays measurably from the GFC era toward the present.
+
+### 13.5 Architecture
+
+- **`apps/api/app/ml/vol_scores.py`** (new) — per-name daily scorer. Imports `_gk_daily_vol` and the HAR
+  fit from `vol_baselines.py` and runs **both** estimators per §13.3: HAR-63 for the rank column, plain
+  HAR for the level column. Emits per symbol, per horizon (5, 21): `pred_vol` (daily σ, HAR, shrinkage
+  applied) plus a `level_admissible` flag that is **false at h=5** — the level is still stored at h=5 so
+  the grader can monitor its calibration, but consumers may not size off it (§13.3); `rank`/`pctile`
+  (HAR-63) against a **fixed
+  147-name reference panel** (not the scored set — otherwise adding a watchlist name silently reshuffles
+  every rank), `estimator`, `calib_slope` (so the §13.6 grader can trip rule 2 without a refit), `n_obs`.
+- **Table `ml_vol_scores` in `data/market.duckdb`**, written through the shared `DuckStore`
+  (`db/duck.py:20-66`, single writer, lock-serialised). ~150 rows × 2 horizons/day is trivial; it needs
+  live serving, and the "keep it out of the main DB" convention exists for *big slow panels*, not small
+  serving tables. Columns: `ts, symbol, horizon, estimator, pred_vol, pctile, rank, n_names, created_at`.
+- **Daily job** in `scheduler/jobs.py::build_scheduler`, **default OFF** behind
+  `MARKET_VOL_SCORES_ENABLED`, copying the `ml_snapshot` pattern verbatim (`jobs.py:742-762`): async
+  wrapper, `run_in_executor` for the blocking work, `max_instances=1, coalesce=True`, and the
+  `elif duck is not None: log.info(...)` disabled-hint line.
+- **Price refresh**: promote `scratchpad/fetch_universe.py` to `apps/api/app/ml/universe.py` with an
+  incremental mode (fetch only bars after `max(ts)` per symbol), scheduled before the scorer.
+- **`GET /api/ml/vol-scores`** — latest cross-section, optional `?symbol=`.
+- **Strategist `vol_rank` tool** — `Tool("vol_rank", …)` in `edge/strategist_tools.py:360-409`, read-only,
+  same shape as `_tool_quote` (`strategist_tools.py:203-218`).
+
+### 13.6 Shadow mode and the pre-registered promotion bar
+
+Phase A **annotates only** — no order, size, or stop changes.
+
+- **Day sleeve**: write the annotation into `day_signal_journal.context` (already a free-form JSON blob,
+  `db/schema.py:922-950`) — no migration.
+- **Swing sleeve**: `bot_proposals.rationale` is JSON but semantically owned by strategist evidence.
+  Use a separate `ml_vol_shadow` table keyed on `(proposal_id, symbol, ts)` instead of overloading it.
+- Each annotation records: `pred_vol`, `pctile`, and the **counterfactual** — the qty and stop distance
+  the vol rule *would* have produced, alongside what actually happened.
+- **Grading is of the forecast first, P&L second.** Forecast grading is clean (predicted vs realised vol,
+  no confounds). P&L grading is confounded the moment the rule changes behaviour, which is exactly why
+  Phase A must not change behaviour.
+
+**Promotion criteria, fixed now, before any data exists** — all four must hold before any live knob moves:
+1. Live per-name rank IC ≥ 0.30 at h=5 over ≥ 30 trading days (vs 0.53 in backtest; a large haircut,
+   because live coverage is thinner and the universe differs).
+2. Level calibration slope ∈ [0.8, 1.2] on live data, or an explicitly fitted shrinkage in place.
+3. Counterfactual stop-outs strictly reduced, with realised P&L no worse.
+4. Every counterfactual trade still clears the $5 min-risk fee gate (`config.py:498`) — see §13.7.
+
+### 13.7 Live wiring — Phase B, a SEPARATE sign-off, explicitly not covered by this approval
+
+- **Swing**: inverse-vol weights on top of strategist target weights, **capped by available cash, never
+  margin** — the cash-only rule is absolute here (it previously caused a −$18k cash position).
+- **Day**: replace the 3-tier step `risk_scale` (`intraday.py:106-114`) with a continuous per-name scale.
+  **Two fee interactions that must be checked in this order:** vol-scaling shrinks size, which can push
+  `risk_d = stop_dist × qty` *below* the $5 min-risk gate and silently kill trades; and vol-widened stops
+  raise `risk_d`, which can inflate per-trade risk past intent. The gate must be re-evaluated **after**
+  vol scaling, never before.
+- **Fail-safe**: scores carry a TTL (ignore if older than 3 sessions); any failure falls back to current
+  behaviour. The bots must never trade on a stale vol score, and must never *stop* trading because the
+  scorer is down.
+
+### 13.8 Risks
+
+- **Inverse-vol sizing is itself a factor bet** — it systematically overweights low-vol names (the
+  low-vol anomaly, and a crowded one). Cap per-name weight regardless of vol.
+- **Survivorship**: the 147-name universe is current-membership only (documented in
+  `fetch_universe.py:6-9`); delisted names are absent, so backtest vol dispersion is understated.
+- **Mixed adjustment**: C and CMCSA are split-adjusted while the other 145 are total-return. Minor for
+  vol, real for anything return-based.
+- **Coverage asymmetry**: crypto and metals get no reference-panel percentile. Either score them against
+  their own history or leave them unscored — do not silently rank them against equities.
+- **Regime**: vol persistence is strongest in calm and clustered-stress regimes and breaks at turning
+  points, which is precisely when sizing matters most. The overlay's existing stress gate already
+  underperformed in backtest and was demoted to informational (`vol_overlay.py:165-167`) — do not
+  reintroduce a hard regime gate here.
+
+### 13.9 Sequence, with kill points
+
+| Step | Deliverable | Kill point |
+|---|---|---|
+| 0 | Re-run `vol_baselines` + orthogonalised-residual and level-calibration tests | **DONE 2026-08-14** (§13.0a) — HAR is the estimator; GBM restricted to a candidate tilt pending the stronger controls |
+| 1 | Incremental price refresh job for `day_universe ∪ watchlist` | — (pure infrastructure, no risk) |
+| 2 | `vol_scores.py` + `ml_vol_scores` + default-OFF daily job + API route | — |
+| 3 | `vol_rank` strategist tool | — (read-only, no bot risk) |
+| 4 | Shadow annotations + forecast grader | Stop if live IC < 0.30 after 30 sessions (§13.6) |
+| 5 | **Separate sign-off** — live sizing/stop wiring | Gated on all four §13.6 criteria |
+
+### 13.10 Net honest take
+
+The valuable output of this phase is **not** a better vol model — the best available vol model is a
+three-parameter HAR regression on Garman-Klass vol, barely ahead of a zero-parameter 21-day average
+that has been in production since June. The value is
+(a) extending it from one market-level number to per-name, (b) giving the swing sleeve any volatility
+awareness at all, and (c) building the persist-and-grade loop the market-level overlay never got, so
+the next vol claim is settled by live data instead of a backtest IC. If step 4's live grading fails,
+stop at step 3 — a strategist-readable vol rank with no bot wiring is still a real, safe deliverable.
