@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, timezone
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.alpaca import alpaca_symbol, fetch_intraday_bars
+from app.ml.vol_shadow import day_vol_shadow
 from app.trading.bot import sleeve_holdings
 from app.trading.broker import BrokerError
 from app.trading.broker_cache import BrokerState
@@ -1195,6 +1196,14 @@ class DayTraderService:
                "sigma": sig.get("sigma"),
                "exit_type": (primary or {}).get("exit_type"),
                "rr": (primary or {}).get("rr")}
+        # PLAN §13.9 step 4 (Phase A, shadow-only): record what the per-name vol
+        # rule WOULD have sized/gated -- this READS the decision that's already
+        # final by this point and writes nothing back into it. Fail-soft: never
+        # let an annotation problem break the journal write itself.
+        try:
+            ctx["vol"] = day_vol_shadow(self._duck, d, float(self._s.day_min_risk_dollars))
+        except Exception:
+            ctx["vol"] = {"available": False, "reason": "annotation_error"}
         try:
             self._sqlite.execute(
                 "INSERT INTO day_signal_journal (ts, run_id, trade_date, symbol, asset_class, "
