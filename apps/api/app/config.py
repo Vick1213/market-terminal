@@ -242,10 +242,17 @@ class Settings(BaseSettings):
     ml_snapshot_poll_minutes: int = 1440
     # Incremental daily price refresh for the bot-tradable universe (PLAN
     # §13.9 step 1 / §13.2): keeps data/ml/universe.duckdb's OHLC fresh so
-    # per-name vol scoring (§13.5, not yet built) has live data to work from.
-    # Pure data plumbing, no trading behaviour. DEFAULT-OFF like ml_snapshot.
+    # per-name vol scoring (§13.5) has live data to work from. Pure data
+    # plumbing, no trading behaviour. DEFAULT-OFF like ml_snapshot.
     universe_refresh_enabled: bool = False
     universe_refresh_poll_minutes: int = 1440
+    # Per-name volatility scorer (PLAN §13.9 step 2): writes ml_vol_scores
+    # into the main DuckDB daily. Read-only as far as the bots are concerned —
+    # NOTHING consumes these scores yet (live sizing/stops are §13.7, held for
+    # a separate sign-off), so this only ever costs compute. Depends on
+    # universe_refresh above for fresh prices. DEFAULT-OFF.
+    vol_scores_enabled: bool = False
+    vol_scores_poll_minutes: int = 1440
 
     # LLM provider for the brief/strategist narratives.
     #   ollama    — local, default ($0 tokens; uses ollama_url/ollama_model)
