@@ -851,3 +851,47 @@ export interface ForecastResponse {
   history: ForecastBar[];
   forecast: ForecastBar[];
 }
+
+// --- Forecast distribution (N-path Kronos ensemble) ---
+
+export interface ForecastQuantilePoint {
+  t: number; // unix seconds (UTC) — same future grid as ForecastBar
+  p10: number;
+  p25: number;
+  p50: number;
+  p75: number;
+  p90: number;
+}
+
+export interface ForecastDistributionStats {
+  mean_return: number;
+  median_return: number;
+  std_return: number;
+  skew_return: number;
+  p_up: number;
+  median_max_drawdown: number;
+  p_dd_5: number;
+  p_dd_10: number;
+}
+
+export interface ForecastLevelTouch {
+  level: number;
+  direction: "above" | "below";
+  p_touch: number;
+}
+
+export interface ForecastDistributionResponse {
+  symbol: string;
+  asset_class: string;
+  model: string;
+  device: string;
+  context_bars: number;
+  horizon: number;
+  paths: number;
+  generated_at: string; // ISO
+  disclaimer: string;
+  history: ForecastBar[];
+  quantiles: ForecastQuantilePoint[];
+  stats: ForecastDistributionStats;
+  levels: ForecastLevelTouch[];
+}

@@ -5,6 +5,7 @@ import type {
   ChartMarker,
   CongressResponse,
   CotResponse,
+  ForecastDistributionResponse,
   ForecastResponse,
   GexResponse,
   InsiderResponse,
@@ -286,6 +287,7 @@ export async function fetchForecast(params: {
   temperature?: number;
   top_p?: number;
   samples?: number;
+  model?: "mini" | "small" | "base";
 }): Promise<ForecastResponse> {
   const qs = new URLSearchParams({ symbol: params.symbol });
   if (params.horizon !== undefined) qs.set("horizon", String(params.horizon));
@@ -293,10 +295,43 @@ export async function fetchForecast(params: {
   if (params.temperature !== undefined) qs.set("temperature", String(params.temperature));
   if (params.top_p !== undefined) qs.set("top_p", String(params.top_p));
   if (params.samples !== undefined) qs.set("samples", String(params.samples));
+  if (params.model !== undefined) qs.set("model", params.model);
   const res = await fetch(`${API_URL}/api/forecast?${qs}`, { cache: "no-store" });
   if (!res.ok) {
     const detail = (await res.json().catch(() => null))?.detail;
     throw new Error(detail ?? `forecast request failed: ${res.status}`);
+  }
+  return res.json();
+}
+
+// N-path Kronos ensemble — quantile cone + terminal/drawdown/level-touch
+// stats. Same "user-triggered, no timeout" contract as fetchForecast: the
+// backend batches all paths into one autoregressive pass, but that pass
+// still carries the same lazy-model-load latency on a cold server.
+export async function fetchForecastDistribution(params: {
+  symbol: string;
+  horizon?: number;
+  lookback?: number;
+  temperature?: number;
+  top_p?: number;
+  paths?: number;
+  levels?: number[];
+  model?: "mini" | "small" | "base";
+}): Promise<ForecastDistributionResponse> {
+  const qs = new URLSearchParams({ symbol: params.symbol });
+  if (params.horizon !== undefined) qs.set("horizon", String(params.horizon));
+  if (params.lookback !== undefined) qs.set("lookback", String(params.lookback));
+  if (params.temperature !== undefined) qs.set("temperature", String(params.temperature));
+  if (params.top_p !== undefined) qs.set("top_p", String(params.top_p));
+  if (params.paths !== undefined) qs.set("paths", String(params.paths));
+  if (params.levels !== undefined && params.levels.length > 0) {
+    qs.set("levels", params.levels.join(","));
+  }
+  if (params.model !== undefined) qs.set("model", params.model);
+  const res = await fetch(`${API_URL}/api/forecast/distribution?${qs}`, { cache: "no-store" });
+  if (!res.ok) {
+    const detail = (await res.json().catch(() => null))?.detail;
+    throw new Error(detail ?? `forecast distribution request failed: ${res.status}`);
   }
   return res.json();
 }
