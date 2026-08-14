@@ -23,7 +23,11 @@ Run:  cd apps/api && .venv/bin/python -m app.ml.xtrain
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
+import subprocess
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 
 import duckdb
@@ -93,8 +97,56 @@ def _ls_portfolio(dates, pred, raw_fwd, q=0.2) -> np.ndarray:
     return np.array(pnl, dtype=float)
 
 
-def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None):
-    warnings.filterwarnings("ignore"); np.seterr(invalid="ignore")
+def _feature_version(columns) -> str:
+    names = ",".join(sorted(columns))
+    return hashlib.sha1(names.encode()).hexdigest()[:12]
+
+
+def _git_sha(repo: Path) -> str | None:
+    try:
+        out = subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=str(repo),
+            capture_output=True, text=True, check=True, timeout=5,
+        )
+        return out.stdout.strip()
+    except Exception:
+        return None
+
+
+def _f(x):
+    return None if x is None or (isinstance(x, float) and not np.isfinite(x)) else float(x)
+
+
+def _ensure_xs_tables(con) -> None:
+    """Parallel to train.py's ml_runs / ml_oos_metrics. A separate table pair
+    (not a shared ``kind`` discriminator on ml_oos_metrics) because the
+    cross-sectional harness has no single ``asset`` (it ranks a whole
+    universe per day) and a different metric set — no ann_ret/auc/brier
+    (no classification target here), no n_folds/min_train, and n_days
+    (unique OOS test dates) is a different unit than n_oos (row count).
+    Mixing rows into ml_oos_metrics would also silently leak into select.py's
+    latest-run champion scan, which assumes one row per (asset, horizon,
+    target, model) from the time-series harness.
+    """
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS xs_runs (
+            run_id VARCHAR, ts TIMESTAMP, git_sha VARCHAR,
+            feature_version VARCHAR, n_features INTEGER, n_names INTEGER,
+            n_rows INTEGER, window_start VARCHAR, window_end VARCHAR,
+            cost_bps DOUBLE, config VARCHAR);"""
+    )
+    con.execute(
+        """CREATE TABLE IF NOT EXISTS xs_oos_metrics (
+            run_id VARCHAR, horizon INTEGER, target VARCHAR, model VARCHAR,
+            n_days INTEGER, ic DOUBLE, ic_t DOUBLE, hit_rate DOUBLE,
+            sharpe DOUBLE, dsr DOUBLE, pbo DOUBLE, is_best BOOLEAN);"""
+    )
+
+
+def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None,
+        persist=True):
+    warnings.filterwarnings("ignore")
+    np.seterr(invalid="ignore")
     repo = Path(__file__).resolve().parents[4]
     main_db = repo / "data" / "market.duckdb"
     uni_db = Path(uni_db) if uni_db else repo / "data" / "ml" / "universe.duckdb"
@@ -134,7 +186,12 @@ def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None):
           f"{matrix.index.get_level_values('date').min().date()}->"
           f"{matrix.index.get_level_values('date').max().date()}\n", flush=True)
 
-    feat_cols = list(matrix.columns)
+    run_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    fv = _feature_version(matrix.columns)
+    git_sha = _git_sha(repo)
+    window_start = str(matrix.index.get_level_values("date").min().date())
+    window_end = str(matrix.index.get_level_values("date").max().date())
+
     rows = []
     for h in horizons:
         for kind in ("rel_return", "fwd_vol"):
@@ -156,7 +213,7 @@ def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None):
             for name, factory in REGRESSORS.items():
                 if name == "naive_mean":
                     continue
-                fold_ics, pooled_d, pooled_p, pooled_t, pooled_dates, pnl_all = [], [], [], [], [], []
+                fold_ics, pooled_p, pooled_t, pooled_dates, pnl_all = [], [], [], [], []
                 for fi, (tr, te) in enumerate(splitter.split(dates)):
                     if tr.sum() < 200 or te.sum() < 50:
                         continue
@@ -171,12 +228,16 @@ def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None):
                     pred = pipe.predict(X[te])
                     r = cross_sectional_ic(dates[te], pred, y[te])
                     fold_ics.append(r["ic"])
-                    pooled_p.append(pred); pooled_t.append(y[te]); pooled_dates.append(dates[te])
+                    pooled_p.append(pred)
+                    pooled_t.append(y[te])
+                    pooled_dates.append(dates[te])
                     if kind == "rel_return":
                         pnl_all.append(_ls_portfolio(dates[te], pred, rawv[te]))
                 if not pooled_p:
                     continue
-                P = np.concatenate(pooled_p); T = np.concatenate(pooled_t); D = np.concatenate(pooled_dates)
+                P = np.concatenate(pooled_p)
+                T = np.concatenate(pooled_t)
+                D = np.concatenate(pooled_dates)
                 pooled = cross_sectional_ic(D, P, T)
                 per_model_fold_ic[name] = fold_ics
                 per_model_pooled[name] = pooled
@@ -210,8 +271,30 @@ def run(horizons=HORIZONS, start=DEFAULT_START, cost_bps=1.0, uni_db=None):
                 rows.append({"h": h, "target": kind, "model": m, "ic": pm["ic"],
                              "ic_t": pm["ic_t"], "n_days": pm["n_days"], "hit": pm["hit"],
                              "pbo": pbo, "sharpe": sh, "dsr": dsr, "best": m == best})
+    if persist:
+        runs_db = repo / "data" / "ml" / "runs.duckdb"
+        runs_db.parent.mkdir(parents=True, exist_ok=True)
+        con = duckdb.connect(str(runs_db))
+        _ensure_xs_tables(con)
+        con.execute(
+            "INSERT INTO xs_runs VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            [run_id, datetime.now(timezone.utc), git_sha, fv, matrix.shape[1],
+             len(symbols), matrix.shape[0], window_start, window_end, cost_bps,
+             json.dumps({"horizons": list(horizons), "start": start,
+                         "uni_db": str(uni_db)})],
+        )
+        for r in rows:
+            con.execute(
+                "INSERT INTO xs_oos_metrics VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                [run_id, r["h"], r["target"], r["model"], int(r["n_days"]),
+                 _f(r["ic"]), _f(r["ic_t"]), _f(r["hit"]), _f(r["sharpe"]),
+                 _f(r["dsr"]), _f(r["pbo"]), bool(r["best"])],
+            )
+        con.close()
+
     _report(rows, len(symbols))
-    main.close(); uni.close()
+    main.close()
+    uni.close()
     return rows
 
 
@@ -264,9 +347,11 @@ def _main():
     ap.add_argument("--start", default=DEFAULT_START)
     ap.add_argument("--cost-bps", type=float, default=1.0)
     ap.add_argument("--uni-db", default=None, help="override universe DB path")
+    ap.add_argument("--no-persist", dest="persist", action="store_false",
+                     default=True, help="skip writing to data/ml/runs.duckdb")
     a = ap.parse_args()
     run(horizons=tuple(int(x) for x in a.horizons.split(",")), start=a.start,
-        cost_bps=a.cost_bps, uni_db=a.uni_db)
+        cost_bps=a.cost_bps, uni_db=a.uni_db, persist=a.persist)
     return 0
 
 
