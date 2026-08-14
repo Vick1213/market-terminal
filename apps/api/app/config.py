@@ -240,6 +240,12 @@ class Settings(BaseSettings):
     # DEFAULT-OFF like the trading bots — opt in to start the clock.
     ml_snapshot_enabled: bool = False
     ml_snapshot_poll_minutes: int = 1440
+    # Incremental daily price refresh for the bot-tradable universe (PLAN
+    # §13.9 step 1 / §13.2): keeps data/ml/universe.duckdb's OHLC fresh so
+    # per-name vol scoring (§13.5, not yet built) has live data to work from.
+    # Pure data plumbing, no trading behaviour. DEFAULT-OFF like ml_snapshot.
+    universe_refresh_enabled: bool = False
+    universe_refresh_poll_minutes: int = 1440
 
     # LLM provider for the brief/strategist narratives.
     #   ollama    — local, default ($0 tokens; uses ollama_url/ollama_model)
