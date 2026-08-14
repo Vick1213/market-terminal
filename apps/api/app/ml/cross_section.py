@@ -50,8 +50,18 @@ class RoutingDuck:
         self._uni = universe_con
 
     def fetchall(self, sql, params=None):
-        con = self._uni if "ts_price" in sql else self._main
-        return con.execute(sql, params or []).fetchall()
+        if "ts_price" in sql:
+            # Per-asset closes for the 147-name universe live in the universe
+            # DB, but the cross-asset block (TLT/GLD/copper/DXY/SMH/XLY/XLP)
+            # is also a ts_price query and those symbols are NOT in the
+            # universe DB (equity-only) — they live in the main terminal DB.
+            # Try the universe DB first (the common case); an empty result
+            # falls back to main so the cross-asset block still resolves.
+            rows = self._uni.execute(sql, params or []).fetchall()
+            if rows:
+                return rows
+            return self._main.execute(sql, params or []).fetchall()
+        return self._main.execute(sql, params or []).fetchall()
 
 
 # --- per-day cross-sectional helpers ---------------------------------------
@@ -130,11 +140,11 @@ class DateWalkForward:
             if hi <= lo:
                 continue
             test_days = uniq[lo:hi]
-            test0, testN = test_days[0], test_days[-1]
+            test0 = test_days[0]
             # Purge: drop train days within h of the first test day (their label
-            # window leaks into the test block). Embargo: drop days just after.
+            # window leaks into the test block — train label-end (d+h) must be
+            # < test0). Embargo: drop days just after.
             train_days = uniq[:lo]
-            purge_cut = test0  # train label-end (d+h) must be < test0
             train_days = train_days[
                 _shift_days(train_days, self.horizon, uniq) < test0
             ]
