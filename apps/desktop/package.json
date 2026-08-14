@@ -5,7 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "tauri dev",
-    "build": "bash scripts/build.sh"
+    "build": "bash scripts/build.sh",
+    "tauri": "tauri"
   },
   "devDependencies": {
     "@tauri-apps/cli": "^2.11.4"
