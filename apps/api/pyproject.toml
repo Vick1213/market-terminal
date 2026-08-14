@@ -34,6 +34,7 @@ dependencies = [
 dev = [
     "honcho>=2.0",
     "ruff>=0.8",
+    "pytest>=8.0",
 ]
 # Desktop packaging (M2): freezes sidecar_main.py into a PyInstaller onedir
 # sidecar for the Tauri app. Install with `uv sync --group bundle`, run with

@@ -66,6 +66,7 @@ from app.routers import forecast as forecast_router
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
+from app.routers import ml as ml_router
 from app.routers import multiasset as multiasset_router
 from app.routers import news as news_router
 from app.routers import retail as retail_router
@@ -479,6 +480,7 @@ def create_app() -> FastAPI:
     app.include_router(retail_router.router)
     app.include_router(corr_router.router)
     app.include_router(edge_router.router)
+    app.include_router(ml_router.router)
     app.include_router(watchlist_router.router)
     app.include_router(trading_router.router)
     app.include_router(settings_router.router)

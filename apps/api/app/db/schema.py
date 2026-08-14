@@ -605,6 +605,42 @@ def init_duckdb(duck: DuckStore) -> None:
         "CREATE INDEX IF NOT EXISTS idx_fed_speeches_date "
         "ON fed_speeches (speech_date);"
     )
+    # Per-name daily volatility scorer (PLAN §13.9 step 2, architecture §13.5).
+    # One row per (ts, symbol, horizon): a forward-vol forecast, never a
+    # trading signal by itself -- nothing reads this table yet. `estimator`
+    # names which model produced `pred_vol` ('har' or the 'naive_gk'
+    # fallback); `level_admissible` is true only at h=21 (§13.3/§13.4 — h=5
+    # levels are stored for grading but must never drive sizing);
+    # `calib_a`/`calib_b` are the PANEL-LEVEL shrinkage `realised = a +
+    # b*predicted`, fit ONCE per horizon per run pooled across the reference
+    # panel (never per symbol -- a per-symbol fit on overlapping labels is
+    # noise) so the §13.6 grader can watch the live calibration slope without
+    # refitting; `rank`/`pctile` are always HAR-63, scored against the FIXED
+    # 147-name reference panel (`app.ml.universe.UNIVERSE`), so
+    # `in_reference_panel=False` flags a symbol that was ranked against that
+    # panel without being a member of it (crypto/metals/new watchlist names).
+    # Canonical DDL/writer: app/ml/vol_scores.py (also self-creates this table
+    # defensively, so standalone CLI/tests work without the full bootstrap).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ml_vol_scores (
+            ts                  TIMESTAMP NOT NULL,
+            symbol              VARCHAR NOT NULL,
+            horizon             INTEGER NOT NULL,
+            estimator           VARCHAR NOT NULL,
+            pred_vol            DOUBLE,
+            level_admissible    BOOLEAN NOT NULL,
+            calib_a             DOUBLE,
+            calib_b             DOUBLE,
+            rank                INTEGER,
+            pctile              DOUBLE,
+            in_reference_panel  BOOLEAN NOT NULL,
+            n_obs               INTEGER,
+            created_at          TIMESTAMP NOT NULL,
+            PRIMARY KEY (ts, symbol, horizon)
+        );
+        """
+    )
 
 
 def init_sqlite(sqlite: SqliteStore) -> None:
