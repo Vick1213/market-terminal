@@ -697,6 +697,27 @@ h=21 stayed calibrated through the same fold. So: **h=5 is a rank and alert sign
 levels.** This is preferred over the alternative of a regime-triggered sizing multiplier, which would add
 a tunable knob — and untested knobs are how this project has previously fooled itself.
 
+**Attempted repair — FAILED, recorded (2026-08-14).** Hypothesis: HAR's weakness is that trailing 5/21/63d
+windows *lag* a regime shift, so adding the forward-looking CBOE vol complex (`eng_vix9d_ts`, `eng_vix_z`,
+`eng_vvix_vix`, `eng_vix_chg5`, `eng_move_z`, `eng_skew_z` — all **0-day publication lag, never revised**,
+so none of §13.3's revision-risk objection applies) might recover h=5 levels. Result: **it does not.** The
+best confound-controlled spec moves the fold-3 h=5 slope only from 1.355 to ~1.28–1.30 — a real ~0.07
+improvement, still well outside [0.8, 1.2]. Additive, interaction, single-feature, pair and full-bundle
+forms were all tested; none clears the bar. **h=5 levels stay inadmissible.**
+
+Secondary findings from that run, kept because they constrain future attempts:
+- Only `eng_vix9d_ts` does real work (QLIKE −6.5% at h=5, −2.0% at h=21); `eng_vvix_vix` and `eng_skew_z`
+  slightly *hurt*; `eng_move_z` is unreliable (history starts 2015-07, 44.8% NaN).
+- **Not adopted for h=21 either**: at the one horizon whose levels we actually use, it is ambiguous —
+  QLIKE −2.0% but RMSE **+3.4%** — and it would bottleneck coverage on VIX9D (starts 2011-01, 22.8% NaN).
+  Plain HAR stays. The feature helps most at the horizon whose levels we do not consume.
+- **Interactions never beat the additive form**, including the `vix9d_ts × lrv_d` form; the interaction is
+  statistically indistinguishable from the main effect alone.
+- Market-wide regressors *can* shift cross-sectional ranks slightly (+0.003 to +0.011) despite being
+  constant within a day — via coefficient reallocation in a pooled across-day fit, not a direct effect.
+- If h=5 sizing is ever wanted, this result points at a genuinely reactive estimator (GARCH-style shock
+  term, explicit regime-switch detection) rather than bolting same-day features onto a trailing regression.
+
 All of these already exist in `vol_baselines.py` (`_gk_daily_vol`, `_har_ic`); GK is ~5–8× more efficient
 than close-to-close when no intraday data exists, which is our situation.
 
