@@ -32,6 +32,7 @@ from datetime import datetime, timezone
 from app.db.duck import DuckStore
 from app.db.sqlite import SqliteStore
 from app.ingest.alpaca import alpaca_symbol
+from app.ml.vol_shadow import annotate_and_persist_swing
 from app.trading.broker import BrokerError
 from app.trading.broker_cache import BrokerState
 from app.trading.optimizer import PortfolioOptimizer
@@ -655,6 +656,18 @@ class TradingBotService:
             )
             p["id"] = pid
             ids.append(pid)
+
+        # PLAN §13.9 step 4 (Phase A, shadow-only): annotate each just-persisted
+        # proposal with what the per-name vol rule WOULD have sized -- runs AFTER
+        # every bot_proposals row above is already final (qty/notional/status/
+        # blocks all committed), reads them only, and writes to a separate new
+        # table nothing else queries. Fail-soft internally; wrapped again here so
+        # an annotation failure can never break a propose() run.
+        try:
+            annotate_and_persist_swing(
+                self._duck, self._sqlite, plan["proposals"], plan.get("available_cash"), run_id, now)
+        except Exception:
+            log.debug("vol shadow annotation failed for run %s", run_id, exc_info=True)
 
         await self._broadcast("propose")
         n_actionable = sum(1 for p in plan["proposals"] if p["status"] == "proposed")

@@ -641,6 +641,29 @@ def init_duckdb(duck: DuckStore) -> None:
         );
         """
     )
+    # Forecast grader (PLAN §13.9 step 4 / §13.6): one row per grading run,
+    # accruing over time as more ml_vol_scores rows resolve their forward
+    # window. `metrics_json` holds per-horizon {rank_ic, qlike, rmse,
+    # calibration} (see app.ml.vol_grade); `promotion_json` holds the §13.6
+    # four promotion criteria as pass/fail/insufficient_data, each with its
+    # observed value next to its threshold. Canonical DDL/writer:
+    # app/ml/vol_grade.py (also self-creates this table defensively).
+    duck.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ml_vol_grade (
+            run_ts                  TIMESTAMP NOT NULL,
+            as_of_start              DATE,
+            as_of_end                DATE,
+            n_trading_days_h5        INTEGER,
+            n_trading_days_h21       INTEGER,
+            metrics_json             VARCHAR NOT NULL,
+            day_counterfactual_json  VARCHAR,
+            promotion_json           VARCHAR NOT NULL,
+            created_at                TIMESTAMP NOT NULL,
+            PRIMARY KEY (run_ts)
+        );
+        """
+    )
 
 
 def init_sqlite(sqlite: SqliteStore) -> None:
@@ -988,6 +1011,47 @@ def init_sqlite(sqlite: SqliteStore) -> None:
     sqlite.execute(
         "CREATE INDEX IF NOT EXISTS idx_day_journal_date ON day_signal_journal (trade_date);"
     )
+
+    # Swing-sleeve vol shadow annotations (PLAN §13.9 step 4 / §13.6, Phase A
+    # shadow-only -- nothing here changes an order/size/stop/gating decision).
+    # `bot_proposals.rationale` is JSON but semantically owned by strategist
+    # evidence, so this gets its own table instead, keyed on (proposal_id,
+    # symbol, ts) per the spec. One row per proposal from TradingBotService
+    # .propose(), written strictly AFTER that proposal's bot_proposals row is
+    # already persisted. `detail` carries the full annotation (see
+    # app.ml.vol_shadow.swing_vol_shadow) as JSON; the flattened columns exist
+    # so the grader (app.ml.vol_grade) can query without parsing JSON per row.
+    # Canonical DDL/writer: app/ml/vol_shadow.py (also self-creates this table
+    # defensively, so standalone tests work without the full bootstrap).
+    sqlite.execute(
+        """
+        CREATE TABLE IF NOT EXISTS ml_vol_shadow (
+            proposal_id              INTEGER NOT NULL,
+            symbol                   TEXT NOT NULL,
+            ts                       TEXT NOT NULL,
+            run_id                   TEXT,
+            score_available          INTEGER NOT NULL DEFAULT 0,
+            score_ts                 TEXT,
+            score_age_trading_days   INTEGER,
+            score_stale              INTEGER,
+            estimator                TEXT,
+            pred_vol                 REAL,
+            pctile                   REAL,
+            rank                     INTEGER,
+            in_reference_panel       INTEGER,
+            n_obs                    INTEGER,
+            panel_reference_pred_vol REAL,
+            panel_reference_n        INTEGER,
+            scale_factor             REAL,
+            counterfactual_available INTEGER NOT NULL DEFAULT 0,
+            reason                   TEXT,
+            detail                   TEXT NOT NULL,
+            created_at                TEXT NOT NULL,
+            PRIMARY KEY (proposal_id, symbol, ts)
+        );
+        """
+    )
+
     # One row per end-of-day review pass: stats, detected mistakes, and concrete
     # strategy-parameter suggestions (LLM + heuristics over the journal above).
     sqlite.execute(
