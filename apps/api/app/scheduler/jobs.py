@@ -739,6 +739,36 @@ def build_scheduler(
             max_instances=1, coalesce=True, misfire_grace_time=2 * 3600,
         )
 
+    # Incremental daily price refresh for the bot-tradable universe (PLAN
+    # §13.9 step 1 / §13.2) — DEFAULT-OFF, like the other ml jobs. It is the
+    # upstream data dependency for the (not-yet-built) per-name vol scorer
+    # (§13.5), so it is staggered to run BEFORE ml_snapshot below. Builds its
+    # own SqliteStore in the closure (SQLite/WAL is multi-connection safe,
+    # same pattern as _swing_review/_day_review above) to read the watchlist
+    # for target_symbols().
+    if duck is not None and settings.universe_refresh_enabled:
+        from app.db.sqlite import SqliteStore
+        from app.ml.universe import run_universe_refresh_job
+
+        async def _universe_refresh() -> None:
+            sq = SqliteStore(settings.sqlite_path)
+            try:
+                await run_universe_refresh_job(sq, settings)
+            finally:
+                sq.close()
+
+        scheduler.add_job(
+            _universe_refresh,
+            trigger="interval",
+            minutes=settings.universe_refresh_poll_minutes,
+            next_run_time=soon + timedelta(seconds=160),
+            id="universe_refresh",
+            max_instances=1, coalesce=True, misfire_grace_time=600, jitter=30,
+        )
+    elif duck is not None:
+        log.info("universe refresh disabled (set MARKET_UNIVERSE_REFRESH_ENABLED=true "
+                 "to keep data/ml/universe.duckdb's daily OHLC fresh)")
+
     # PIT snapshot logger (PLAN §12 lever #3) — DEFAULT-OFF, like the bots.
     # Logs every signal as-knowable-today into a separate snapshots DB so the
     # recent-only sources accrete a backtestable PIT history. Reuses the live
