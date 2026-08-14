@@ -67,24 +67,38 @@ class LlmClient:
 
     async def generate(self, prompt: str, *, temperature: float = 0.3) -> str:
         """One-shot completion. Raises on any transport/shape/auth failure."""
-        if self.provider == "ollama":
-            text = await self._ollama(prompt, temperature)
-        elif self.provider == "anthropic":
-            text = await self._anthropic(prompt)
-        else:
-            text = await self._openai_compat(prompt, temperature)
-        text = _THINK_RE.sub("", text or "").strip()
+        text = await self.generate_messages(
+            [{"role": "user", "content": prompt}], temperature=temperature,
+        )
         if len(text) < 40:
             raise ValueError(f"{self.label} returned an empty/too-short response")
         return text
 
-    async def _ollama(self, prompt: str, temperature: float) -> str:
+    async def generate_messages(
+        self, messages: list[dict], *, temperature: float = 0.3,
+    ) -> str:
+        """Multi-turn completion (strategist tool loop). Same three provider
+        paths as ``generate`` but takes a full messages array instead of
+        wrapping a single user turn — every provider's chat API already
+        accepts one. Unlike ``generate`` this does NOT enforce a minimum
+        response length: a JSON tool call can be a few dozen characters, so
+        callers validate shape themselves. <think>…</think> is still
+        stripped; raises on any transport/shape/auth failure."""
+        if self.provider == "ollama":
+            text = await self._ollama(messages, temperature)
+        elif self.provider == "anthropic":
+            text = await self._anthropic(messages)
+        else:
+            text = await self._openai_compat(messages, temperature)
+        return _THINK_RE.sub("", text or "").strip()
+
+    async def _ollama(self, messages: list[dict], temperature: float) -> str:
         async with httpx.AsyncClient(timeout=self._timeout) as client:
             resp = await client.post(
                 f"{self._base}/api/chat",
                 json={
                     "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "stream": False,
                     "options": {"temperature": temperature},
                 },
@@ -92,7 +106,7 @@ class LlmClient:
             resp.raise_for_status()
             return resp.json()["message"]["content"]
 
-    async def _openai_compat(self, prompt: str, temperature: float) -> str:
+    async def _openai_compat(self, messages: list[dict], temperature: float) -> str:
         if not self._api_key:
             raise ValueError(f"{self.provider} selected but MARKET_LLM_API_KEY is empty")
         async with httpx.AsyncClient(timeout=self._timeout) as client:
@@ -101,7 +115,7 @@ class LlmClient:
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json={
                     "model": self.model,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                     "temperature": temperature,
                     "stream": False,
                 },
@@ -109,7 +123,7 @@ class LlmClient:
             resp.raise_for_status()
             return resp.json()["choices"][0]["message"]["content"]
 
-    async def _anthropic(self, prompt: str) -> str:
+    async def _anthropic(self, messages: list[dict]) -> str:
         # Sampling params are omitted: recent Anthropic models reject them.
         if not self._api_key:
             raise ValueError("anthropic selected but MARKET_LLM_API_KEY is empty")
@@ -123,7 +137,7 @@ class LlmClient:
                 json={
                     "model": self.model,
                     "max_tokens": 2048,
-                    "messages": [{"role": "user", "content": prompt}],
+                    "messages": messages,
                 },
             )
             resp.raise_for_status()

@@ -1062,10 +1062,11 @@ def build_template_notes(result: dict) -> list[str]:
         return s if s and not s["stale"] and s["value"] is not None else None
 
     regime, score = result["regime"], result["score"]
+    mix = ", ".join(f"{b['label']} {b['weight_pct']:.0f}%" for b in result["buckets"])
     notes.append(
         f"Regime {regime.upper()}"
         + (f" (composite {score:+})" if score is not None else "")
-        + f" — base mix {', '.join(f'{b['label']} {b['weight_pct']:.0f}%' for b in result['buckets'])}."
+        + f" — base mix {mix}."
     )
     g = fresh("gex")
     if g and g["value"] == "short":
@@ -1113,6 +1114,9 @@ class StrategistService:
         *,
         sectors: list[str],
         benchmark: str,
+        tools_enabled: bool = True,
+        tool_calls: int = 6,
+        broker_state=None,
     ) -> None:
         self._duck = duck
         self._sqlite = sqlite
@@ -1120,23 +1124,56 @@ class StrategistService:
         self._llm = llm
         self._sectors = sectors
         self._benchmark = benchmark
+        self._tools_enabled = tools_enabled
+        self._tool_calls = tool_calls
+        # Shared TTL-cached broker view (app.trading.broker_cache.BrokerState),
+        # optional — read-only 'portfolio' tool in the loop only; None (the
+        # default) makes that tool report "unavailable" rather than raise.
+        self._broker_state = broker_state
 
-    async def _notes(self, result: dict) -> tuple[list[str], str]:
+    async def _notes_tool_loop(self, result: dict) -> tuple[list[str], str, list[dict]]:
+        """Bounded tool-use path: the LLM can call calc/price_history/quote/
+        macro_series/news/portfolio/signal_detail before writing notes. Any
+        failure here (bad shape, transport, budget exhausted with garbage)
+        is the caller's cue to fall back to the single-shot prompt."""
+        from app.edge.strategist_tools import run_tool_loop  # deferred: avoids a
+        # module-import cycle (strategist_tools reuses _price_series/_pct_return
+        # from this module).
+
+        notes, trace = await run_tool_loop(
+            self._llm, self._duck, self._sqlite, result,
+            max_calls=self._tool_calls,
+            broker_state=self._broker_state,
+        )
+        return notes, self._llm.label, trace
+
+    async def _notes_single_shot(self, result: dict) -> tuple[list[str], str]:
+        text = await self._llm.generate(
+            _NOTES_PROMPT.format(data=json.dumps(
+                {k: result[k] for k in ("regime", "score", "buckets", "equity_tilt", "signals")},
+                indent=1)),
+        )
+        notes = [ln.lstrip("-• ").strip() for ln in text.splitlines()
+                 if ln.strip().startswith(("-", "•"))]
+        if not 3 <= len(notes) <= 8:
+            raise ValueError(f"LLM returned {len(notes)} notes")
+        return notes[:5], self._llm.label
+
+    async def _notes(self, result: dict) -> tuple[list[str], str, list[dict]]:
+        if self._tools_enabled:
+            try:
+                notes, model, trace = await self._notes_tool_loop(result)
+                return notes, model, trace
+            except Exception as exc:
+                log.warning("%s strategist tool loop failed (%s) — falling back "
+                            "to single-shot notes", self._llm.label, exc)
         try:
-            text = await self._llm.generate(
-                _NOTES_PROMPT.format(data=json.dumps(
-                    {k: result[k] for k in ("regime", "score", "buckets", "equity_tilt", "signals")},
-                    indent=1)),
-            )
-            notes = [ln.lstrip("-• ").strip() for ln in text.splitlines()
-                     if ln.strip().startswith(("-", "•"))]
-            if not 3 <= len(notes) <= 8:
-                raise ValueError(f"LLM returned {len(notes)} notes")
-            return notes[:5], self._llm.label
+            notes, model = await self._notes_single_shot(result)
+            return notes, model, []
         except Exception as exc:
             log.warning("%s strategist notes failed (%s) — using template",
                         self._llm.label, exc)
-            return build_template_notes(result), "template"
+            return build_template_notes(result), "template", []
 
     async def run(self) -> dict:
         loop = asyncio.get_running_loop()
@@ -1144,9 +1181,10 @@ class StrategistService:
             None, compute_strategist,
             self._duck, self._sqlite, self._sectors, self._benchmark,
         )
-        notes, model = await self._notes(result)
+        notes, model, tool_trace = await self._notes(result)
         result["notes"] = notes
         result["model"] = model
+        result["tool_trace"] = tool_trace
 
         day = datetime(*date.today().timetuple()[:3])
         await loop.run_in_executor(

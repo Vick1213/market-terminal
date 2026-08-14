@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     # Force inference device ("mps" | "cpu"); empty = auto-detect MPS.
     sentiment_device: str = ""
 
+    # --- Kronos OHLCV forecasting (GET /api/forecast) ---
+    # HF checkpoints; -small (24.7M) is the CPU sweet spot, -base (102M) and
+    # -mini (4.1M, pair with Kronos-Tokenizer-2k + max_context 2048) also work.
+    forecast_model_id: str = "NeoQuasar/Kronos-small"
+    forecast_tokenizer_id: str = "NeoQuasar/Kronos-Tokenizer-base"
+    # Force device ("cuda:0" | "mps" | "cpu"); empty = auto-detect.
+    forecast_device: str = ""
+    # Model context window in bars — 512 for base tokenizer, 2048 for the 2k one.
+    forecast_max_context: int = 512
+
     # Poll cadences (minutes). Yahoo/Finnhub per-ticker RSS 5-15 min per plan;
     # EDGAR submissions refresh ~10 min server-side.
     news_poll_minutes: int = 10
@@ -243,6 +253,13 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_base_url: str = ""     # override, e.g. a self-hosted OpenAI-compatible server
     llm_timeout_seconds: float = 180.0
+
+    # Strategist tool-use loop (edge/strategist_tools.py): the LLM can call a
+    # calc tool + read-only lookups (price history, quotes, macro series,
+    # news, portfolio, signal detail) before writing its notes. Off ->
+    # exactly the prior single-shot-prompt-then-template-fallback behavior.
+    strategist_tools: bool = True
+    strategist_tool_calls: int = 6
 
     # --- Phase 11: gap-audit backlog (PLAN §10) ---
     # FINRA true short interest publishes bi-monthly (~9-day lag); the daily

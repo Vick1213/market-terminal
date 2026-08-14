@@ -38,6 +38,7 @@ from app.edge.ntfy import NtfyPublisher
 from app.edge.rotation import RotationPipeline
 from app.edge.strategist import StrategistService
 from app.edge.whales import WhalesPipeline
+from app.forecast import KronosForecastService
 from app.ingest.crypto import CryptoStreamer
 from app.ingest.http import HttpClient
 from app.ingest.intl import IntlPipeline
@@ -61,6 +62,7 @@ from app.ingest.source_health import SourceHealthRegistry
 from app.profile import apply_profile_gates
 from app.routers import corr as corr_router
 from app.routers import edge as edge_router
+from app.routers import forecast as forecast_router
 from app.routers import health as health_router
 from app.routers import macro as macro_router
 from app.routers import markers as markers_router
@@ -123,6 +125,14 @@ async def lifespan(app: FastAPI):
     # FinBERT loads lazily on first score (in its own thread-pool, off the loop).
     sentiment = SentimentService(
         duck, ensemble=settings.sentiment_ensemble, device=settings.sentiment_device
+    )
+    # Kronos loads lazily on the first /api/forecast call (own thread-pool).
+    forecast_service = KronosForecastService(
+        duck,
+        model_id=settings.forecast_model_id,
+        tokenizer_id=settings.forecast_tokenizer_id,
+        device=settings.forecast_device,
+        max_context=settings.forecast_max_context,
     )
     news_pipeline = NewsPipeline(
         duck,
@@ -269,10 +279,6 @@ async def lifespan(app: FastAPI):
 
     # Phase 9: international macro + strategist synthesis.
     intl_pipeline = IntlPipeline(duck, http)
-    strategist_service = StrategistService(
-        duck, sqlite, hub, llm,
-        sectors=settings.sector_etfs, benchmark=settings.rrg_benchmark,
-    )
 
     # Phase 12: paper trading bot — a guarded execution surface for the
     # strategist's suggestions. Paper-only by default; live trading is blocked
@@ -281,6 +287,8 @@ async def lifespan(app: FastAPI):
     # funded account read through a locally-run Client Portal Gateway; reads-only,
     # order writes stubbed to refuse). Both expose the same surface, so BrokerState
     # and every downstream reader are backend-agnostic.
+    # Built ahead of strategist_service (below) so the strategist's read-only
+    # 'portfolio' tool can share this same TTL-cached view.
     if settings.broker_backend.lower() == "ibkr":
         broker = IbkrBroker(
             base_url=settings.ibkr_base_url,
@@ -297,8 +305,18 @@ async def lifespan(app: FastAPI):
             allow_live=settings.bot_allow_live_trading,
         )
     # One shared, TTL-cached broker view for every reader (status polls + both
-    # bots + optimizer) — collapses bursts to a single paper-api call.
+    # bots + optimizer + the strategist's portfolio tool) — collapses bursts to
+    # a single paper-api call.
     broker_state = BrokerState(broker, ttl=settings.broker_cache_ttl_seconds)
+
+    strategist_service = StrategistService(
+        duck, sqlite, hub, llm,
+        sectors=settings.sector_etfs, benchmark=settings.rrg_benchmark,
+        tools_enabled=settings.strategist_tools,
+        tool_calls=settings.strategist_tool_calls,
+        broker_state=broker_state,
+    )
+
     # Phase 13: optimizer decides the swing/day capital split.
     optimizer = PortfolioOptimizer(
         duck, sqlite, hub,
@@ -373,6 +391,7 @@ async def lifespan(app: FastAPI):
     app.state.http = http
     app.state.source_health = source_health
     app.state.sentiment = sentiment
+    app.state.forecast = forecast_service
     app.state.news_pipeline = news_pipeline
     app.state.macro_pipeline = macro_pipeline
     app.state.multiasset_pipeline = multiasset_pipeline
@@ -425,6 +444,7 @@ async def lifespan(app: FastAPI):
         await crypto_streamer.stop()
         scheduler.shutdown(wait=False)
         sentiment.close()
+        forecast_service.close()
         await ntfy.aclose()
         await http.aclose()
         duck.close()
@@ -453,6 +473,7 @@ def create_app() -> FastAPI:
     app.include_router(news_router.router)
     app.include_router(macro_router.router)
     app.include_router(series_router.router)
+    app.include_router(forecast_router.router)
     app.include_router(markers_router.router)
     app.include_router(multiasset_router.router)
     app.include_router(retail_router.router)

@@ -13,7 +13,7 @@ A local-first, private, **free-data** market-intelligence terminal — Next.js d
 | Frontend | Next.js 15 · react-grid-layout · TanStack Query · Zustand · WebSocket |
 | Backend | FastAPI · APScheduler · WebSocket fan-out · httpx/aiolimiter/tenacity/diskcache ingest |
 | Storage | DuckDB (time-series) · SQLite WAL (app state) |
-| Models | FinBERT (bulk) + local LLM (aspect/brief) — Phase 1 |
+| Models | FinBERT (bulk) + local LLM (aspect/brief) — Phase 1 · Kronos OHLCV forecasts (`/api/forecast`) |
 
 ## Prerequisites
 

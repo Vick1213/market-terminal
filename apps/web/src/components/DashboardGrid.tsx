@@ -50,6 +50,8 @@ const layouts: Layouts = {
     { i: "system", x: 0, y: 121, w: 4, h: 6 },
     { i: "sources", x: 4, y: 121, w: 4, h: 6 },
     { i: "help", x: 8, y: 121, w: 4, h: 6 },
+    // Kronos model forecast — quantile-cone projections; own full-width row.
+    { i: "forecast", x: 0, y: 127, w: 12, h: 10 },
   ],
 };
 

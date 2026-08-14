@@ -11,6 +11,7 @@ import { Edgar8KPanel } from "./panels/Edgar8KPanel";
 import { Edgar13DPanel } from "./panels/Edgar13DPanel";
 import { EnergyPanel } from "./panels/EnergyPanel";
 import { FedSpeechesPanel } from "./panels/FedSpeechesPanel";
+import { ForecastPanel } from "./panels/ForecastPanel";
 import { HeartbeatPanel } from "./panels/HeartbeatPanel";
 import { HelpPanel } from "./panels/HelpPanel";
 import { KalshiPanel } from "./panels/KalshiPanel";
@@ -76,6 +77,7 @@ export const PANEL_REGISTRY: PanelDef[] = [
   { id: "tradebook", title: "Tradebook", render: () => <TradebookPanel /> },
   { id: "sources", title: "Data Sources", render: () => <SourceHealthPanel /> },
   { id: "help", title: "Field Manual", render: () => <HelpPanel /> },
+  { id: "forecast", title: "Forecast", render: () => <ForecastPanel /> },
 ];
 
 export function getPanelDef(id: string): PanelDef | undefined {
